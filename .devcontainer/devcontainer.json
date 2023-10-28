@@ -1,0 +1,11 @@
+{
+  "name": "Suricata DevContainer",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "mounts": ["source=${localWorkspaceFolder}/suricata,target=/build/suricata,type=bind"],
+  "settings": {
+    "terminal.integrated.shell.linux": "/bin/bash"
+  },
+  "postCreateCommand": "echo 'Devcontainer for Suricata is ready!'"
+}
