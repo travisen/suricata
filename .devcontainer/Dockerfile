@@ -9,7 +9,7 @@ RUN apt-get update && \
     apt-get install -y curl software-properties-common
 
 # Suricata dependencies
-RUN sudo apt-get -y install libpcre2-dev build-essential autoconf \
+RUN apt-get -y install libpcre2-dev build-essential autoconf \
     automake libtool libpcap-dev libnet1-dev libyaml-0-2 libyaml-dev \
     pkg-config zlib1g zlib1g-dev libcap-ng-dev libcap-ng0 make \
     libmagic-dev libjansson-dev rustc cargo jq git-core
