@@ -854,6 +854,9 @@ uint8_t PatternMatchDefaultMatcher(void)
 #endif
             if (strcmp("auto", mpm_algo) == 0) {
                 goto done;
+            } else if (strcmp("ac-bs", mpm_algo) == 0) {
+                SCLogWarning("mpm-algo \"ac-bs\" has been removed. See ticket #6586.");
+                goto done;
             }
             for (uint8_t u = 0; u < MPM_TABLE_SIZE; u++) {
                 if (mpm_table[u].name == NULL)
@@ -895,8 +898,7 @@ void PatternMatchThreadPrint(MpmThreadCtx *mpm_thread_ctx, uint16_t mpm_matcher)
 void PatternMatchThreadDestroy(MpmThreadCtx *mpm_thread_ctx, uint16_t mpm_matcher)
 {
     SCLogDebug("mpm_thread_ctx %p, mpm_matcher %"PRIu16"", mpm_thread_ctx, mpm_matcher);
-    if (mpm_table[mpm_matcher].DestroyThreadCtx != NULL)
-        mpm_table[mpm_matcher].DestroyThreadCtx(NULL, mpm_thread_ctx);
+    MpmDestroyThreadCtx(mpm_thread_ctx, mpm_matcher);
 }
 void PatternMatchThreadPrepare(MpmThreadCtx *mpm_thread_ctx, uint16_t mpm_matcher)
 {

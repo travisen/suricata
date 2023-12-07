@@ -238,10 +238,9 @@ AppLayerParserState *AppLayerParserStateAlloc(void)
 {
     SCEnter();
 
-    AppLayerParserState *pstate = (AppLayerParserState *)SCMalloc(sizeof(*pstate));
+    AppLayerParserState *pstate = (AppLayerParserState *)SCCalloc(1, sizeof(*pstate));
     if (pstate == NULL)
         goto end;
-    memset(pstate, 0, sizeof(*pstate));
 
  end:
     SCReturnPtr(pstate, "AppLayerParserState");
@@ -1184,16 +1183,14 @@ uint64_t AppLayerParserGetTransactionActive(const Flow *f,
     SCReturnCT(active_id, "uint64_t");
 }
 
-int AppLayerParserSupportsFiles(uint8_t ipproto, AppProto alproto)
+bool AppLayerParserSupportsFiles(uint8_t ipproto, AppProto alproto)
 {
     // Custom case for only signature-only protocol so far
     if (alproto == ALPROTO_HTTP) {
         return AppLayerParserSupportsFiles(ipproto, ALPROTO_HTTP1) ||
                AppLayerParserSupportsFiles(ipproto, ALPROTO_HTTP2);
     }
-    if (alp_ctx.ctxs[FlowGetProtoMapping(ipproto)][alproto].GetTxFiles != NULL)
-        return TRUE;
-    return FALSE;
+    return alp_ctx.ctxs[FlowGetProtoMapping(ipproto)][alproto].GetTxFiles != NULL;
 }
 
 AppLayerTxData *AppLayerParserGetTxData(uint8_t ipproto, AppProto alproto, void *tx)

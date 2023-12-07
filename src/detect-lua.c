@@ -596,12 +596,11 @@ static void *DetectLuaThreadInit(void *data)
     DetectLuaData *lua = (DetectLuaData *)data;
     BUG_ON(lua == NULL);
 
-    DetectLuaThreadData *t = SCMalloc(sizeof(DetectLuaThreadData));
+    DetectLuaThreadData *t = SCCalloc(1, sizeof(DetectLuaThreadData));
     if (unlikely(t == NULL)) {
         SCLogError("couldn't alloc ctx memory");
         return NULL;
     }
-    memset(t, 0x00, sizeof(DetectLuaThreadData));
 
     t->alproto = lua->alproto;
     t->flags = lua->flags;
@@ -681,11 +680,9 @@ static DetectLuaData *DetectLuaParse (DetectEngineCtx *de_ctx, const char *str)
     DetectLuaData *lua = NULL;
 
     /* We have a correct lua option */
-    lua = SCMalloc(sizeof(DetectLuaData));
+    lua = SCCalloc(1, sizeof(DetectLuaData));
     if (unlikely(lua == NULL))
         goto error;
-
-    memset(lua, 0x00, sizeof(DetectLuaData));
 
     if (strlen(str) && str[0] == '!') {
         lua->negated = 1;
@@ -1013,7 +1010,6 @@ error:
 static int DetectLuaSetup (DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
     DetectLuaData *lua = NULL;
-    SigMatch *sm = NULL;
 
     /* First check if Lua rules are enabled, by default Lua in rules
      * is disabled. */
@@ -1047,12 +1043,6 @@ static int DetectLuaSetup (DetectEngineCtx *de_ctx, Signature *s, const char *st
 
     /* Okay so far so good, lets get this into a SigMatch
      * and put it in the Signature. */
-    sm = SigMatchAlloc();
-    if (sm == NULL)
-        goto error;
-
-    sm->type = DETECT_LUA;
-    sm->ctx = (SigMatchCtx *)lua;
 
     int list = -1;
     if (lua->alproto == ALPROTO_UNKNOWN) {
@@ -1118,15 +1108,15 @@ static int DetectLuaSetup (DetectEngineCtx *de_ctx, Signature *s, const char *st
         goto error;
     }
 
-    SigMatchAppendSMToList(s, sm, list);
+    if (SigMatchAppendSMToList(de_ctx, s, DETECT_LUA, (SigMatchCtx *)lua, list) == NULL) {
+        goto error;
+    }
 
     return 0;
 
 error:
     if (lua != NULL)
         DetectLuaFree(de_ctx, lua);
-    if (sm != NULL)
-        SCFree(sm);
     return -1;
 }
 

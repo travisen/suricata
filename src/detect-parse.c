@@ -128,7 +128,7 @@ void DetectFileRegisterFileProtocols(DetectFileHandlerTableElmt *reg)
 /* Table with all SigMatch registrations */
 SigTableElmt sigmatch_table[DETECT_TBLSIZE];
 
-extern int sc_set_caps;
+extern bool sc_set_caps;
 
 static void SigMatchTransferSigMatchAcrossLists(SigMatch *sm,
         SigMatch **src_sm_list, SigMatch **src_sm_list_tail,
@@ -334,11 +334,10 @@ int DetectEngineContentModifierBufferSetup(DetectEngineCtx *de_ctx,
 
 SigMatch *SigMatchAlloc(void)
 {
-    SigMatch *sm = SCMalloc(sizeof(SigMatch));
+    SigMatch *sm = SCCalloc(1, sizeof(SigMatch));
     if (unlikely(sm == NULL))
         return NULL;
 
-    memset(sm, 0, sizeof(SigMatch));
     sm->prev = NULL;
     sm->next = NULL;
     return sm;
@@ -447,8 +446,16 @@ void SigTableApplyStrictCommandLineOption(const char *str)
  * \param new  The sig match to append.
  * \param list The list to append to.
  */
-void SigMatchAppendSMToList(Signature *s, SigMatch *new, const int list)
+SigMatch *SigMatchAppendSMToList(
+        DetectEngineCtx *de_ctx, Signature *s, uint16_t type, SigMatchCtx *ctx, const int list)
 {
+    SigMatch *new = SigMatchAlloc();
+    if (new == NULL)
+        return NULL;
+
+    new->type = type;
+    new->ctx = ctx;
+
     if (new->type == DETECT_CONTENT) {
         s->init_data->max_content_list_id = MAX(s->init_data->max_content_list_id, (uint32_t)list);
     }
@@ -498,10 +505,9 @@ void SigMatchAppendSMToList(Signature *s, SigMatch *new, const int list)
                 s->init_data->curbuf == NULL) {
             if (SignatureInitDataBufferCheckExpand(s) < 0) {
                 SCLogError("failed to expand rule buffer array");
-                s->init_data->init_flags |= SIG_FLAG_INIT_OVERFLOW;
-                // SignatureInitDataBufferCheckExpand should not fail in this case
-                DEBUG_VALIDATE_BUG_ON(s->init_data->curbuf == NULL);
-                // keep curbuf even with wrong id as we error on this signature
+                new->ctx = NULL;
+                SigMatchFree(de_ctx, new);
+                return NULL;
             } else {
                 /* initialize new buffer */
                 s->init_data->curbuf = &s->init_data->buffers[s->init_data->buffer_index++];
@@ -530,6 +536,7 @@ void SigMatchAppendSMToList(Signature *s, SigMatch *new, const int list)
                     sigmatch_table[sm->type].name, sm->idx);
         }
     }
+    return new;
 }
 
 void SigMatchRemoveSMFromList(Signature *s, SigMatch *sm, int sm_list)
@@ -1017,11 +1024,8 @@ static int SigParseOptions(DetectEngineCtx *de_ctx, Signature *s, char *optstr, 
         /* setup may or may not add a new SigMatch to the list */
         setup_ret = st->Setup(de_ctx, s, NULL);
     }
-    if (setup_ret < 0 || (s->init_data->init_flags & SIG_FLAG_INIT_OVERFLOW)) {
+    if (setup_ret < 0) {
         SCLogDebug("\"%s\" failed to setup", st->name);
-        if (s->init_data->init_flags & SIG_FLAG_INIT_OVERFLOW) {
-            SCLogError("rule %u tries to use too many buffers", s->id);
-        }
 
         /* handle 'silent' error case */
         if (setup_ret == -2) {
@@ -1174,7 +1178,7 @@ static int SigParseActionRejectValidate(const char *action)
 {
 #ifdef HAVE_LIBNET11
 #if defined HAVE_LIBCAP_NG && !defined HAVE_LIBNET_CAPABILITIES
-    if (sc_set_caps == TRUE) {
+    if (sc_set_caps) {
         SCLogError("Libnet 1.1 is "
                    "incompatible with POSIX based capabilities with privs dropping. "
                    "For rejects to work, run as root/super user.");
@@ -1509,10 +1513,9 @@ int SignatureInitDataBufferCheckExpand(Signature *s)
 
 Signature *SigAlloc (void)
 {
-    Signature *sig = SCMalloc(sizeof(Signature));
+    Signature *sig = SCCalloc(1, sizeof(Signature));
     if (unlikely(sig == NULL))
         return NULL;
-    memset(sig, 0, sizeof(Signature));
 
     sig->init_data = SCCalloc(1, sizeof(SignatureInitData));
     if (sig->init_data == NULL) {
@@ -2458,11 +2461,10 @@ static inline int DetectEngineSignatureIsDuplicate(DetectEngineCtx *de_ctx,
     SigDuplWrapper *sw = NULL;
 
     /* used for making a duplicate_sig_hash_table entry */
-    sw = SCMalloc(sizeof(SigDuplWrapper));
+    sw = SCCalloc(1, sizeof(SigDuplWrapper));
     if (unlikely(sw == NULL)) {
         exit(EXIT_FAILURE);
     }
-    memset(sw, 0, sizeof(SigDuplWrapper));
     sw->s = sig;
 
     /* check if we have a duplicate entry for this signature */

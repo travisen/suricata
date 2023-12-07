@@ -263,16 +263,11 @@ static int DetectHTTP2frametypeSetup (DetectEngineCtx *de_ctx, Signature *s, con
         return -1;
     *http2ft = frame_type;
 
-    SigMatch *sm = SigMatchAlloc();
-    if (sm == NULL) {
+    if (SigMatchAppendSMToList(de_ctx, s, DETECT_HTTP2_FRAMETYPE, (SigMatchCtx *)http2ft,
+                g_http2_match_buffer_id) == NULL) {
         DetectHTTP2frametypeFree(NULL, http2ft);
         return -1;
     }
-
-    sm->type = DETECT_HTTP2_FRAMETYPE;
-    sm->ctx = (SigMatchCtx *)http2ft;
-
-    SigMatchAppendSMToList(s, sm, g_http2_match_buffer_id);
 
     return 0;
 }
@@ -348,16 +343,11 @@ static int DetectHTTP2errorcodeSetup (DetectEngineCtx *de_ctx, Signature *s, con
         return -1;
     *http2ec = error_code;
 
-    SigMatch *sm = SigMatchAlloc();
-    if (sm == NULL) {
+    if (SigMatchAppendSMToList(de_ctx, s, DETECT_HTTP2_ERRORCODE, (SigMatchCtx *)http2ec,
+                g_http2_match_buffer_id) == NULL) {
         DetectHTTP2errorcodeFree(NULL, http2ec);
         return -1;
     }
-
-    sm->type = DETECT_HTTP2_ERRORCODE;
-    sm->ctx = (SigMatchCtx *)http2ec;
-
-    SigMatchAppendSMToList(s, sm, g_http2_match_buffer_id);
 
     return 0;
 }
@@ -415,16 +405,11 @@ static int DetectHTTP2prioritySetup (DetectEngineCtx *de_ctx, Signature *s, cons
     if (prio == NULL)
         return -1;
 
-    SigMatch *sm = SigMatchAlloc();
-    if (sm == NULL) {
+    if (SigMatchAppendSMToList(de_ctx, s, DETECT_HTTP2_PRIORITY, (SigMatchCtx *)prio,
+                g_http2_match_buffer_id) == NULL) {
         rs_detect_u8_free(prio);
         return -1;
     }
-
-    sm->type = DETECT_HTTP2_PRIORITY;
-    sm->ctx = (SigMatchCtx *)prio;
-
-    SigMatchAppendSMToList(s, sm, g_http2_match_buffer_id);
 
     return 0;
 }
@@ -482,16 +467,11 @@ static int DetectHTTP2windowSetup (DetectEngineCtx *de_ctx, Signature *s, const 
     if (wu == NULL)
         return -1;
 
-    SigMatch *sm = SigMatchAlloc();
-    if (sm == NULL) {
+    if (SigMatchAppendSMToList(de_ctx, s, DETECT_HTTP2_WINDOW, (SigMatchCtx *)wu,
+                g_http2_match_buffer_id) == NULL) {
         rs_detect_u32_free(wu);
         return -1;
     }
-
-    sm->type = DETECT_HTTP2_WINDOW;
-    sm->ctx = (SigMatchCtx *)wu;
-
-    SigMatchAppendSMToList(s, sm, g_http2_match_buffer_id);
 
     return 0;
 }
@@ -539,16 +519,11 @@ static int DetectHTTP2sizeUpdateSetup (DetectEngineCtx *de_ctx, Signature *s, co
     if (su == NULL)
         return -1;
 
-    SigMatch *sm = SigMatchAlloc();
-    if (sm == NULL) {
+    if (SigMatchAppendSMToList(de_ctx, s, DETECT_HTTP2_SIZEUPDATE, (SigMatchCtx *)su,
+                g_http2_match_buffer_id) == NULL) {
         DetectHTTP2settingsFree(NULL, su);
         return -1;
     }
-
-    sm->type = DETECT_HTTP2_SIZEUPDATE;
-    sm->ctx = (SigMatchCtx *)su;
-
-    SigMatchAppendSMToList(s, sm, g_http2_match_buffer_id);
 
     return 0;
 }
@@ -596,16 +571,11 @@ static int DetectHTTP2settingsSetup (DetectEngineCtx *de_ctx, Signature *s, cons
     if (http2set == NULL)
         return -1;
 
-    SigMatch *sm = SigMatchAlloc();
-    if (sm == NULL) {
+    if (SigMatchAppendSMToList(de_ctx, s, DETECT_HTTP2_SETTINGS, (SigMatchCtx *)http2set,
+                g_http2_match_buffer_id) == NULL) {
         DetectHTTP2settingsFree(NULL, http2set);
         return -1;
     }
-
-    sm->type = DETECT_HTTP2_SETTINGS;
-    sm->ctx = (SigMatchCtx *)http2set;
-
-    SigMatchAppendSMToList(s, sm, g_http2_match_buffer_id);
 
     return 0;
 }
@@ -687,9 +657,8 @@ static void PrefilterTxHttp2HName(DetectEngineThreadCtx *det_ctx, const void *pe
             break;
 
         if (buffer->inspect_len >= mpm_ctx->minlen) {
-            (void)mpm_table[mpm_ctx->mpm_type].Search(mpm_ctx,
-                    &det_ctx->mtcu, &det_ctx->pmq,
-                    buffer->inspect, buffer->inspect_len);
+            (void)mpm_table[mpm_ctx->mpm_type].Search(
+                    mpm_ctx, &det_ctx->mtc, &det_ctx->pmq, buffer->inspect, buffer->inspect_len);
             PREFILTER_PROFILING_ADD_BYTES(det_ctx, buffer->inspect_len);
         }
 
@@ -733,17 +702,10 @@ static uint8_t DetectEngineInspectHttp2HeaderName(DetectEngineCtx *de_ctx,
         if (buffer == NULL || buffer->inspect == NULL)
             break;
 
-        det_ctx->buffer_offset = 0;
-        det_ctx->discontinue_matching = 0;
-        det_ctx->inspection_recursion_counter = 0;
-
-        const int match = DetectEngineContentInspection(de_ctx, det_ctx, s, engine->smd,
-                                              NULL, f,
-                                              (uint8_t *)buffer->inspect,
-                                              buffer->inspect_len,
-                                              buffer->inspect_offset, DETECT_CI_FLAGS_SINGLE,
-                                              DETECT_ENGINE_CONTENT_INSPECTION_MODE_STATE);
-        if (match == 1) {
+        const bool match = DetectEngineContentInspection(de_ctx, det_ctx, s, engine->smd, NULL, f,
+                (uint8_t *)buffer->inspect, buffer->inspect_len, buffer->inspect_offset,
+                DETECT_CI_FLAGS_SINGLE, DETECT_ENGINE_CONTENT_INSPECTION_MODE_STATE);
+        if (match) {
             return DETECT_ENGINE_INSPECT_SIG_MATCH;
         }
         local_id++;

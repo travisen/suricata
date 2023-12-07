@@ -166,6 +166,7 @@ noinst_HEADERS = \
 	detect-flowbits.h \
 	detect-flow.h \
 	detect-flow-age.h \
+	detect-flow-pkts.h \
 	detect-flowint.h \
 	detect-flowvar.h \
 	detect-fragbits.h \
@@ -249,6 +250,7 @@ noinst_HEADERS = \
 	detect-mqtt-connect-clientid.h \
 	detect-mqtt-connect-flags.h \
 	detect-mqtt-connect-password.h \
+	detect-mqtt-connect-protocol-string.h \
 	detect-mqtt-connect-username.h \
 	detect-mqtt-connect-willmessage.h \
 	detect-mqtt-connect-willtopic.h \
@@ -337,8 +339,10 @@ noinst_HEADERS = \
 	detect-tls-version.h \
 	detect-tls-random.h \
 	detect-tos.h \
+	detect-transform-casechange.h \
 	detect-transform-compress-whitespace.h \
 	detect-transform-dotprefix.h \
+	detect-transform-header-lowercase.h \
 	detect-transform-md5.h \
 	detect-transform-pcrexform.h \
 	detect-transform-sha1.h \
@@ -385,6 +389,7 @@ noinst_HEADERS = \
 	log-tlslog.h \
 	log-tlsstore.h \
 	output-eve-stream.h \
+	output-eve-null.h \
 	output-filedata.h \
 	output-file.h \
 	output-filestore.h \
@@ -573,7 +578,6 @@ noinst_HEADERS = \
 	util-mem.h \
 	util-memrchr.h \
 	util-misc.h \
-	util-mpm-ac-bs.h \
 	util-mpm-ac.h \
 	util-mpm-ac-ks.h \
 	util-mpm.h \
@@ -777,6 +781,7 @@ libsuricata_c_a_SOURCES = \
 	detect-flowbits.c \
 	detect-flow.c \
 	detect-flow-age.c \
+	detect-flow-pkts.c \
 	detect-flowint.c \
 	detect-flowvar.c \
 	detect-fragbits.c \
@@ -858,6 +863,7 @@ libsuricata_c_a_SOURCES = \
 	detect-mqtt-connect-clientid.c \
 	detect-mqtt-connect-flags.c \
 	detect-mqtt-connect-password.c \
+	detect-mqtt-connect-protocol-string.c \
 	detect-mqtt-connect-username.c \
 	detect-mqtt-connect-willmessage.c \
 	detect-mqtt-connect-willtopic.c \
@@ -946,8 +952,10 @@ libsuricata_c_a_SOURCES = \
 	detect-tls-version.c \
 	detect-tls-random.c \
 	detect-tos.c \
+	detect-transform-casechange.c \
 	detect-transform-compress-whitespace.c \
 	detect-transform-dotprefix.c \
+	detect-transform-header-lowercase.c \
 	detect-transform-md5.c \
 	detect-transform-pcrexform.c \
 	detect-transform-sha1.c \
@@ -1037,6 +1045,7 @@ libsuricata_c_a_SOURCES = \
 	output-json-tftp.c \
 	output-json-tls.c \
 	output-eve-syslog.c \
+	output-eve-null.c \
 	output-lua.c \
 	output-packet.c \
 	output-stats.c \
@@ -1167,7 +1176,6 @@ libsuricata_c_a_SOURCES = \
 	util-memcmp.c \
 	util-memrchr.c \
 	util-misc.c \
-	util-mpm-ac-bs.c \
 	util-mpm-ac.c \
 	util-mpm-ac-ks.c \
 	util-mpm-ac-ks-small.c \

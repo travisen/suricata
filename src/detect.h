@@ -193,7 +193,7 @@ typedef struct DetectMatchAddressIPv6_ {
 
 /* a is ... than b */
 enum {
-    PORT_ER = -1, /* error e.g. compare ipv4 and ipv6 */
+    PORT_ER = -1, /* error */
     PORT_LT,      /* smaller              [aaa] [bbb] */
     PORT_LE,      /* smaller with overlap [aa[bab]bb] */
     PORT_EQ,      /* exactly equal        [abababab]  */
@@ -246,6 +246,10 @@ typedef struct DetectPort_ {
 
 #define SIG_FLAG_FLUSH                  BIT_U32(12) /**< detection logic needs stream flush notification */
 
+#define SIG_FLAG_REQUIRE_STREAM_ONLY                                                               \
+    BIT_U32(13) /**< signature is requiring stream match. Stream match is not optional, so no      \
+                   fallback to packet payload. */
+
 // vacancies
 
 #define SIG_FLAG_REQUIRE_FLOWVAR        BIT_U32(17) /**< signature can only match if a flowbit, flowvar or flowint is available. */
@@ -283,7 +287,6 @@ typedef struct DetectPort_ {
     BIT_U32(8) /**< priority is explicitly set by the priority keyword */
 #define SIG_FLAG_INIT_FILEDATA              BIT_U32(9)  /**< signature has filedata keyword */
 #define SIG_FLAG_INIT_JA3                   BIT_U32(10) /**< signature has ja3 keyword */
-#define SIG_FLAG_INIT_OVERFLOW              BIT_U32(11) /**< signature has overflown buffers */
 
 /* signature mask flags */
 /** \note: additions should be added to the rule analyzer as well */
@@ -558,7 +561,7 @@ typedef struct SignatureInitData_ {
     /** score to influence rule grouping. A higher value leads to a higher
      *  likelihood of a rulegroup with this sig ending up as a contained
      *  group. */
-    int whitelist;
+    int score;
 
     /** address settings for this signature */
     const DetectAddressHead *src, *dst;
@@ -718,7 +721,7 @@ typedef struct DetectPatternTracker {
 } DetectPatternTracker;
 
 typedef struct DetectReplaceList_ {
-    struct DetectContentData_ *cd;
+    const struct DetectContentData_ *cd;
     uint8_t *found;
     struct DetectReplaceList_ *next;
 } DetectReplaceList;
@@ -1100,10 +1103,11 @@ typedef struct DetectEngineThreadCtx_ {
 
     uint64_t raw_stream_progress;
 
-    /** offset into the payload of the last match by:
-     *  content, pcre, etc */
+    /** offset into the payload of the end of the last match by: content, pcre, etc */
     uint32_t buffer_offset;
-    /* used by pcre match function alone */
+
+    /** used by pcre match function alone: normally in sync with buffer_offset, but
+     *  points to 1 byte after the start of the last pcre match if a pcre match happened. */
     uint32_t pcre_match_start_offset;
 
     /* counter for the filestore array below -- up here for cache reasons. */
@@ -1138,8 +1142,6 @@ typedef struct DetectEngineThreadCtx_ {
         uint32_t *to_clear_queue;
     } multi_inspect;
 
-    /* used to discontinue any more matching */
-    uint16_t discontinue_matching;
     uint16_t flags; /**< DETECT_ENGINE_THREAD_CTX_* flags */
 
     /* true if tx_id is set */
@@ -1175,12 +1177,7 @@ typedef struct DetectEngineThreadCtx_ {
     SignatureNonPrefilterStore *non_pf_store_ptr;
     uint32_t non_pf_store_cnt;
 
-    /** pointer to the current mpm ctx that is stored
-     *  in a rule group head -- can be either a content
-     *  or uricontent ctx. */
-    MpmThreadCtx mtc;   /**< thread ctx for the mpm */
-    MpmThreadCtx mtcu;  /**< thread ctx for uricontent mpm */
-    MpmThreadCtx mtcs;  /**< thread ctx for stream mpm */
+    MpmThreadCtx mtc; /**< thread ctx for the mpm */
     PrefilterRuleStore pmq;
 
     /** SPM thread context used for scanning. This has been cloned from the
@@ -1416,7 +1413,7 @@ typedef struct SigGroupHeadInitData_ {
 
     uint8_t protos[256];    /**< proto(s) this sgh is for */
     uint32_t direction;     /**< set to SIG_FLAG_TOSERVER, SIG_FLAG_TOCLIENT or both */
-    int whitelist;          /**< try to make this group a unique one */
+    int score;              /**< try to make this group a unique one */
 
     MpmCtx **app_mpms;
     MpmCtx **pkt_mpms;
@@ -1560,7 +1557,7 @@ void SigRegisterTests(void);
 
 void DisableDetectFlowFileFlags(Flow *f);
 char *DetectLoadCompleteSigPath(const DetectEngineCtx *, const char *sig_file);
-int SigLoadSignatures (DetectEngineCtx *, char *, int);
+int SigLoadSignatures(DetectEngineCtx *, char *, bool);
 void SigMatchSignatures(ThreadVars *th_v, DetectEngineCtx *de_ctx,
                        DetectEngineThreadCtx *det_ctx, Packet *p);
 

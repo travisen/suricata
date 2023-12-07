@@ -1,4 +1,4 @@
-    AC_INIT([suricata],[7.0.3-dev])
+    AC_INIT([suricata],[8.0.0-dev])
     m4_ifndef([AM_SILENT_RULES], [m4_define([AM_SILENT_RULES],[])])AM_SILENT_RULES([yes])
     AC_CONFIG_HEADERS([src/autoconf.h])
     AC_CONFIG_SRCDIR([src/suricata.c])
@@ -218,6 +218,13 @@
         AC_DEFINE([HAVE_GETRANDOM], [1], [Use getrandom]),
         [], [
             #include <sys/random.h> 
+            ])
+
+    AC_CHECK_HEADERS([malloc.h])
+    AC_CHECK_DECL([malloc_trim],
+        AC_DEFINE([HAVE_MALLOC_TRIM], [1], [Use malloc_trim]),
+        [], [
+            #include <malloc.h> 
             ])
 
     OCFLAGS=$CFLAGS
@@ -475,6 +482,23 @@
                     AC_SUBST(LLC)
                   ],
                   [AC_MSG_ERROR([clang needed to build ebpf files])])
+            AC_MSG_CHECKING([libbpf has bpf/bpf_helpers.h])
+            AC_COMPILE_IFELSE(
+                [AC_LANG_PROGRAM(
+                    [
+                        #include <stddef.h>
+                        #include <linux/bpf.h>
+                        #include <bpf/bpf_helpers.h>
+                    ],
+                    [
+                    ])],
+                [HAVE_BPF="yes"],
+                [HAVE_BPF="no"])
+            if test "$HAVE_BPF" = "no"; then
+                AC_MSG_ERROR([libbpf include bpf/bpf_helpers.h not found])
+            else
+                AC_MSG_RESULT([ok])
+            fi
           ])
 
   # enable debug output
@@ -2613,6 +2637,8 @@ AC_CONFIG_FILES(suricata.yaml etc/Makefile etc/suricata.logrotate etc/suricata.s
 AC_CONFIG_FILES(python/Makefile python/suricata/config/defaults.py)
 AC_CONFIG_FILES(ebpf/Makefile)
 AC_CONFIG_FILES(libsuricata-config)
+AC_CONFIG_FILES(examples/plugins/c-json-filetype/Makefile)
+
 AC_OUTPUT
 
 SURICATA_BUILD_CONF="Suricata Configuration:

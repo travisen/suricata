@@ -248,11 +248,11 @@ void DetectAppLayerInspectEngineRegister2(const char *name,
         direction = 1;
     }
 
-    DetectEngineAppInspectionEngine *new_engine = SCMalloc(sizeof(DetectEngineAppInspectionEngine));
+    DetectEngineAppInspectionEngine *new_engine =
+            SCCalloc(1, sizeof(DetectEngineAppInspectionEngine));
     if (unlikely(new_engine == NULL)) {
         exit(EXIT_FAILURE);
     }
-    memset(new_engine, 0, sizeof(*new_engine));
     new_engine->alproto = alproto;
     new_engine->dir = direction;
     new_engine->sm_list = (uint16_t)sm_list;
@@ -1690,8 +1690,8 @@ void InspectionBufferCopy(InspectionBuffer *buffer, uint8_t *buf, uint32_t buf_l
  *  transform may validate that it's compatible with the transform.
  *
  *  When a transform indicates the byte array is incompatible, none of the
- *  subsequent transforms, if any, are invoked. This means the first positive
- *  validation result terminates the loop.
+ *  subsequent transforms, if any, are invoked. This means the first validation
+ *  failure terminates the loop.
  *
  *  \param de_ctx Detection engine context.
  *  \param sm_list The SM list id.
@@ -1928,7 +1928,7 @@ static int DetectEngineInspectRulePacketMatches(
         if (sigmatch_table[smd->type].Match(det_ctx, p, s, smd->ctx) <= 0) {
             KEYWORD_PROFILING_END(det_ctx, smd->type, 0);
             SCLogDebug("no match");
-            return false;
+            return DETECT_ENGINE_INSPECT_SIG_NO_MATCH;
         }
         KEYWORD_PROFILING_END(det_ctx, smd->type, 1);
         if (smd->is_last) {
@@ -1937,7 +1937,7 @@ static int DetectEngineInspectRulePacketMatches(
         }
         smd++;
     }
-    return true;
+    return DETECT_ENGINE_INSPECT_SIG_MATCH;
 }
 
 static int DetectEngineInspectRulePayloadMatches(
@@ -1968,18 +1968,22 @@ static int DetectEngineInspectRulePayloadMatches(
             /* skip if we don't have to inspect the packet and segment was
              * added to stream */
             if (!(s->flags & SIG_FLAG_REQUIRE_PACKET) && (p->flags & PKT_STREAM_ADD)) {
-                return false;
+                return DETECT_ENGINE_INSPECT_SIG_NO_MATCH;
+            }
+            if (s->flags & SIG_FLAG_REQUIRE_STREAM_ONLY) {
+                SCLogDebug("SIG_FLAG_REQUIRE_STREAM_ONLY, so no match");
+                return DETECT_ENGINE_INSPECT_SIG_NO_MATCH;
             }
             if (DetectEngineInspectPacketPayload(de_ctx, det_ctx, s, p->flow, p) != 1) {
-                return false;
+                return DETECT_ENGINE_INSPECT_SIG_NO_MATCH;
             }
         }
     } else {
         if (DetectEngineInspectPacketPayload(de_ctx, det_ctx, s, p->flow, p) != 1) {
-            return false;
+            return DETECT_ENGINE_INSPECT_SIG_NO_MATCH;
         }
     }
-    return true;
+    return DETECT_ENGINE_INSPECT_SIG_MATCH;
 }
 
 bool DetectEnginePktInspectionRun(ThreadVars *tv,
@@ -1990,8 +1994,8 @@ bool DetectEnginePktInspectionRun(ThreadVars *tv,
     SCEnter();
 
     for (DetectEnginePktInspectionEngine *e = s->pkt_inspect; e != NULL; e = e->next) {
-        if (e->v1.Callback(det_ctx, e, s, p, alert_flags) == false) {
-            SCLogDebug("sid %u: e %p Callback returned false", s->id, e);
+        if (e->v1.Callback(det_ctx, e, s, p, alert_flags) != DETECT_ENGINE_INSPECT_SIG_MATCH) {
+            SCLogDebug("sid %u: e %p Callback returned no match", s->id, e);
             return false;
         }
         SCLogDebug("sid %u: e %p Callback returned true", s->id, e);
@@ -2200,18 +2204,12 @@ uint8_t DetectEngineInspectBufferGeneric(DetectEngineCtx *de_ctx, DetectEngineTh
     ci_flags |= (offset == 0 ? DETECT_CI_FLAGS_START : 0);
     ci_flags |= buffer->flags;
 
-    det_ctx->discontinue_matching = 0;
-    det_ctx->buffer_offset = 0;
-    det_ctx->inspection_recursion_counter = 0;
-
     /* Inspect all the uricontents fetched on each
      * transaction at the app layer */
-    int r = DetectEngineContentInspection(de_ctx, det_ctx,
-                                          s, engine->smd,
-                                          NULL, f,
-                                          (uint8_t *)data, data_len, offset, ci_flags,
-                                          DETECT_ENGINE_CONTENT_INSPECTION_MODE_STATE);
-    if (r == 1) {
+    const bool match =
+            DetectEngineContentInspection(de_ctx, det_ctx, s, engine->smd, NULL, f, (uint8_t *)data,
+                    data_len, offset, ci_flags, DETECT_ENGINE_CONTENT_INSPECTION_MODE_STATE);
+    if (match) {
         return DETECT_ENGINE_INSPECT_SIG_MATCH;
     } else {
         return eof ? DETECT_ENGINE_INSPECT_SIG_CANT_MATCH :
@@ -2253,25 +2251,15 @@ int DetectEngineInspectPktBufferGeneric(
         return DETECT_ENGINE_INSPECT_SIG_NO_MATCH;
     }
 
-    const uint32_t data_len = buffer->inspect_len;
-    const uint8_t *data = buffer->inspect;
-    const uint64_t offset = 0;
-
     uint8_t ci_flags = DETECT_CI_FLAGS_START|DETECT_CI_FLAGS_END;
     ci_flags |= buffer->flags;
 
-    det_ctx->discontinue_matching = 0;
-    det_ctx->buffer_offset = 0;
-    det_ctx->inspection_recursion_counter = 0;
-
     /* Inspect all the uricontents fetched on each
      * transaction at the app layer */
-    int r = DetectEngineContentInspection(det_ctx->de_ctx, det_ctx,
-                                          s, engine->smd,
-                                          p, p->flow,
-                                          (uint8_t *)data, data_len, offset, ci_flags,
-                                          DETECT_ENGINE_CONTENT_INSPECTION_MODE_HEADER);
-    if (r == 1) {
+    const bool match = DetectEngineContentInspection(det_ctx->de_ctx, det_ctx, s, engine->smd, p,
+            p->flow, buffer->inspect, buffer->inspect_len, 0, ci_flags,
+            DETECT_ENGINE_CONTENT_INSPECTION_MODE_HEADER);
+    if (match) {
         return DETECT_ENGINE_INSPECT_SIG_MATCH;
     } else {
         return DETECT_ENGINE_INSPECT_SIG_NO_MATCH;
@@ -2462,18 +2450,19 @@ retry:
     return -1;
 }
 
-static DetectEngineCtx *DetectEngineCtxInitReal(enum DetectEngineType type, const char *prefix)
+static DetectEngineCtx *DetectEngineCtxInitReal(
+        enum DetectEngineType type, const char *prefix, uint32_t tenant_id)
 {
-    DetectEngineCtx *de_ctx = SCMalloc(sizeof(DetectEngineCtx));
+    DetectEngineCtx *de_ctx = SCCalloc(1, sizeof(DetectEngineCtx));
     if (unlikely(de_ctx == NULL))
         goto error;
 
-    memset(de_ctx,0,sizeof(DetectEngineCtx));
     memset(&de_ctx->sig_stat, 0, sizeof(SigFileLoaderStat));
     TAILQ_INIT(&de_ctx->sig_stat.failed_sigs);
     de_ctx->sigerror = NULL;
     de_ctx->type = type;
     de_ctx->filemagic_thread_ctx_id = -1;
+    de_ctx->tenant_id = tenant_id;
 
     if (type == DETECT_ENGINE_TYPE_DD_STUB || type == DETECT_ENGINE_TYPE_MT_STUB) {
         de_ctx->version = DetectEngineGetVersion();
@@ -2547,25 +2536,25 @@ error:
 
 DetectEngineCtx *DetectEngineCtxInitStubForMT(void)
 {
-    return DetectEngineCtxInitReal(DETECT_ENGINE_TYPE_MT_STUB, NULL);
+    return DetectEngineCtxInitReal(DETECT_ENGINE_TYPE_MT_STUB, NULL, 0);
 }
 
 DetectEngineCtx *DetectEngineCtxInitStubForDD(void)
 {
-    return DetectEngineCtxInitReal(DETECT_ENGINE_TYPE_DD_STUB, NULL);
+    return DetectEngineCtxInitReal(DETECT_ENGINE_TYPE_DD_STUB, NULL, 0);
 }
 
 DetectEngineCtx *DetectEngineCtxInit(void)
 {
-    return DetectEngineCtxInitReal(DETECT_ENGINE_TYPE_NORMAL, NULL);
+    return DetectEngineCtxInitReal(DETECT_ENGINE_TYPE_NORMAL, NULL, 0);
 }
 
-DetectEngineCtx *DetectEngineCtxInitWithPrefix(const char *prefix)
+DetectEngineCtx *DetectEngineCtxInitWithPrefix(const char *prefix, uint32_t tenant_id)
 {
     if (prefix == NULL || strlen(prefix) == 0)
         return DetectEngineCtxInit();
     else
-        return DetectEngineCtxInitReal(DETECT_ENGINE_TYPE_NORMAL, prefix);
+        return DetectEngineCtxInitReal(DETECT_ENGINE_TYPE_NORMAL, prefix, tenant_id);
 }
 
 static void DetectEngineCtxFreeThreadKeywordData(DetectEngineCtx *de_ctx)
@@ -2739,10 +2728,7 @@ static int DetectEngineCtxLoadConf(DetectEngineCtx *de_ctx)
         /* for now, since we still haven't implemented any intelligence into
          * understanding the patterns and distributing mpm_ctx across sgh */
         if (de_ctx->mpm_matcher == MPM_AC || de_ctx->mpm_matcher == MPM_AC_KS ||
-#ifdef BUILD_HYPERSCAN
-            de_ctx->mpm_matcher == MPM_HS ||
-#endif
-            de_ctx->mpm_matcher == MPM_AC_BS) {
+                de_ctx->mpm_matcher == MPM_HS) {
             de_ctx->sgh_mpm_ctx_cnf = ENGINE_SGH_MPM_FACTORY_CONTEXT_SINGLE;
         } else {
             de_ctx->sgh_mpm_ctx_cnf = ENGINE_SGH_MPM_FACTORY_CONTEXT_FULL;
@@ -3041,13 +3027,11 @@ static int DetectEngineThreadCtxInitKeywords(DetectEngineCtx *de_ctx, DetectEngi
 {
     if (de_ctx->keyword_id > 0) {
         // coverity[suspicious_sizeof : FALSE]
-        det_ctx->keyword_ctxs_array = SCMalloc(de_ctx->keyword_id * sizeof(void *));
+        det_ctx->keyword_ctxs_array = SCCalloc(de_ctx->keyword_id, sizeof(void *));
         if (det_ctx->keyword_ctxs_array == NULL) {
             SCLogError("setting up thread local detect ctx");
             return TM_ECODE_FAILED;
         }
-
-        memset(det_ctx->keyword_ctxs_array, 0x00, de_ctx->keyword_id * sizeof(void *));
 
         det_ctx->keyword_ctxs_size = de_ctx->keyword_id;
 
@@ -3205,8 +3189,6 @@ error:
 static TmEcode ThreadCtxDoInit (DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx)
 {
     PatternMatchThreadPrepare(&det_ctx->mtc, de_ctx->mpm_matcher);
-    PatternMatchThreadPrepare(&det_ctx->mtcs, de_ctx->mpm_matcher);
-    PatternMatchThreadPrepare(&det_ctx->mtcu, de_ctx->mpm_matcher);
 
     PmqSetup(&det_ctx->pmq);
 
@@ -3225,12 +3207,10 @@ static TmEcode ThreadCtxDoInit (DetectEngineCtx *de_ctx, DetectEngineThreadCtx *
     /* DeState */
     if (de_ctx->sig_array_len > 0) {
         det_ctx->match_array_len = de_ctx->sig_array_len;
-        det_ctx->match_array = SCMalloc(det_ctx->match_array_len * sizeof(Signature *));
+        det_ctx->match_array = SCCalloc(det_ctx->match_array_len, sizeof(Signature *));
         if (det_ctx->match_array == NULL) {
             return TM_ECODE_FAILED;
         }
-        memset(det_ctx->match_array, 0,
-               det_ctx->match_array_len * sizeof(Signature *));
 
         RuleMatchCandidateTxArrayInit(det_ctx, de_ctx->sig_array_len);
     }
@@ -3312,10 +3292,9 @@ static TmEcode ThreadCtxDoInit (DetectEngineCtx *de_ctx, DetectEngineThreadCtx *
  */
 TmEcode DetectEngineThreadCtxInit(ThreadVars *tv, void *initdata, void **data)
 {
-    DetectEngineThreadCtx *det_ctx = SCMalloc(sizeof(DetectEngineThreadCtx));
+    DetectEngineThreadCtx *det_ctx = SCCalloc(1, sizeof(DetectEngineThreadCtx));
     if (unlikely(det_ctx == NULL))
         return TM_ECODE_FAILED;
-    memset(det_ctx, 0, sizeof(DetectEngineThreadCtx));
 
     det_ctx->tv = tv;
     det_ctx->de_ctx = DetectEngineGetCurrent();
@@ -3378,10 +3357,9 @@ TmEcode DetectEngineThreadCtxInit(ThreadVars *tv, void *initdata, void **data)
 DetectEngineThreadCtx *DetectEngineThreadCtxInitForReload(
         ThreadVars *tv, DetectEngineCtx *new_de_ctx, int mt)
 {
-    DetectEngineThreadCtx *det_ctx = SCMalloc(sizeof(DetectEngineThreadCtx));
+    DetectEngineThreadCtx *det_ctx = SCCalloc(1, sizeof(DetectEngineThreadCtx));
     if (unlikely(det_ctx == NULL))
         return NULL;
-    memset(det_ctx, 0, sizeof(DetectEngineThreadCtx));
 
     det_ctx->tenant_id = new_de_ctx->tenant_id;
     det_ctx->tv = tv;
@@ -3457,8 +3435,6 @@ static void DetectEngineThreadCtxFree(DetectEngineThreadCtx *det_ctx)
     /** \todo get rid of this static */
     if (det_ctx->de_ctx != NULL) {
         PatternMatchThreadDestroy(&det_ctx->mtc, det_ctx->de_ctx->mpm_matcher);
-        PatternMatchThreadDestroy(&det_ctx->mtcs, det_ctx->de_ctx->mpm_matcher);
-        PatternMatchThreadDestroy(&det_ctx->mtcu, det_ctx->de_ctx->mpm_matcher);
     }
 
     PmqFree(&det_ctx->pmq);
@@ -3546,7 +3522,6 @@ void DetectEngineThreadCtxInfo(ThreadVars *t, DetectEngineThreadCtx *det_ctx)
 {
     /* XXX */
     PatternMatchThreadPrint(&det_ctx->mtc, det_ctx->de_ctx->mpm_matcher);
-    PatternMatchThreadPrint(&det_ctx->mtcu, det_ctx->de_ctx->mpm_matcher);
 }
 
 static uint32_t DetectKeywordCtxHashFunc(HashListTable *ht, void *data, uint16_t datalen)
@@ -3841,7 +3816,7 @@ static int DetectEngineMultiTenantLoadTenant(uint32_t tenant_id, const char *fil
         goto error;
     }
 
-    de_ctx = DetectEngineCtxInitWithPrefix(prefix);
+    de_ctx = DetectEngineCtxInitWithPrefix(prefix, tenant_id);
     if (de_ctx == NULL) {
         SCLogError("initializing detection engine "
                    "context failed.");
@@ -3858,7 +3833,7 @@ static int DetectEngineMultiTenantLoadTenant(uint32_t tenant_id, const char *fil
         goto error;
     }
 
-    if (SigLoadSignatures(de_ctx, NULL, 0) < 0) {
+    if (SigLoadSignatures(de_ctx, NULL, false) < 0) {
         SCLogError("Loading signatures failed.");
         goto error;
     }
@@ -3901,7 +3876,7 @@ static int DetectEngineMultiTenantReloadTenant(uint32_t tenant_id, const char *f
         goto error;
     }
 
-    DetectEngineCtx *new_de_ctx = DetectEngineCtxInitWithPrefix(prefix);
+    DetectEngineCtx *new_de_ctx = DetectEngineCtxInitWithPrefix(prefix, tenant_id);
     if (new_de_ctx == NULL) {
         SCLogError("initializing detection engine "
                    "context failed.");
@@ -3918,7 +3893,7 @@ static int DetectEngineMultiTenantReloadTenant(uint32_t tenant_id, const char *f
         goto error;
     }
 
-    if (SigLoadSignatures(new_de_ctx, NULL, 0) < 0) {
+    if (SigLoadSignatures(new_de_ctx, NULL, false) < 0) {
         SCLogError("Loading signatures failed.");
         goto error;
     }
@@ -4759,7 +4734,7 @@ int DetectEngineReload(const SCInstance *suri)
     }
 
     /* get new detection engine */
-    new_de_ctx = DetectEngineCtxInitWithPrefix(prefix);
+    new_de_ctx = DetectEngineCtxInitWithPrefix(prefix, old_de_ctx->tenant_id);
     if (new_de_ctx == NULL) {
         SCLogError("initializing detection engine "
                    "context failed.");
@@ -4796,6 +4771,15 @@ int DetectEngineReload(const SCInstance *suri)
     SCLogDebug("old_de_ctx should have been freed");
 
     SCLogNotice("rule reload complete");
+
+#ifdef HAVE_MALLOC_TRIM
+    /* The reload process potentially frees up large amounts of memory.
+     * Encourage the memory management system to reclaim as much as it
+     * can.
+     */
+    malloc_trim(0);
+#endif
+
     return 0;
 }
 

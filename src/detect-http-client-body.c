@@ -323,15 +323,12 @@ static uint8_t DetectEngineInspectBufferHttpBody(DetectEngineCtx *de_ctx,
     ci_flags |= (offset == 0 ? DETECT_CI_FLAGS_START : 0);
     ci_flags |= buffer->flags;
 
-    det_ctx->discontinue_matching = 0;
-    det_ctx->buffer_offset = 0;
-    det_ctx->inspection_recursion_counter = 0;
-
     /* Inspect all the uricontents fetched on each
      * transaction at the app layer */
-    int r = DetectEngineContentInspection(de_ctx, det_ctx, s, engine->smd, NULL, f, (uint8_t *)data,
-            data_len, offset, ci_flags, DETECT_ENGINE_CONTENT_INSPECTION_MODE_STATE);
-    if (r == 1) {
+    const bool match =
+            DetectEngineContentInspection(de_ctx, det_ctx, s, engine->smd, NULL, f, (uint8_t *)data,
+                    data_len, offset, ci_flags, DETECT_ENGINE_CONTENT_INSPECTION_MODE_STATE);
+    if (match) {
         return DETECT_ENGINE_INSPECT_SIG_MATCH;
     }
 
@@ -373,7 +370,7 @@ static void PrefilterTxHttpRequestBody(DetectEngineThreadCtx *det_ctx, const voi
 
     if (buffer->inspect_len >= mpm_ctx->minlen) {
         (void)mpm_table[mpm_ctx->mpm_type].Search(
-                mpm_ctx, &det_ctx->mtcu, &det_ctx->pmq, buffer->inspect, buffer->inspect_len);
+                mpm_ctx, &det_ctx->mtc, &det_ctx->pmq, buffer->inspect, buffer->inspect_len);
         PREFILTER_PROFILING_ADD_BYTES(det_ctx, buffer->inspect_len);
     }
 }

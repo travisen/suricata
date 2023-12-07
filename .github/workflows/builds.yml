@@ -12,6 +12,10 @@ on:
       SV_REPO:
       SV_BRANCH:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions: read-all
 
 env:
@@ -284,6 +288,18 @@ jobs:
           test -e /usr/local/lib/suricata/python/suricata/update/configs/modify.conf
           test -e /usr/local/lib/suricata/python/suricata/update/configs/threshold.in
           test -e /usr/local/lib/suricata/python/suricata/update/configs/update.yaml
+      - name: Build C json filetype plugin
+        working-directory: examples/plugins/c-json-filetype
+        run: make
+      - name: Check C json filetype plugin
+        run: test -e examples/plugins/c-json-filetype/.libs/json-filetype.so.0.0.0
+      - name: Installing headers and library
+        run: |
+          make install-headers
+          make install-library
+      - name: Test plugin build with Makefile.example
+        working-directory: examples/plugins/c-json-filetype
+        run: PATH=/usr/local/bin:$PATH make -f Makefile.example
 
   almalinux-9-templates:
     name: AlmaLinux 9 Test Templates
@@ -1014,11 +1030,11 @@ jobs:
       - run: suricata-update -V
       - run: suricatasc -h
 
-  # Fedora 37 build using Clang.
-  fedora-37-clang:
-    name: Fedora 37 (clang, debug, asan, wshadow, rust-strict, systemd)
+  # Fedora 39 build using Clang.
+  fedora-39-clang:
+    name: Fedora 39 (clang, debug, asan, wshadow, rust-strict, systemd)
     runs-on: ubuntu-latest
-    container: fedora:37
+    container: fedora:39
     needs: [prepare-deps, prepare-cbindgen]
     steps:
 
@@ -1041,6 +1057,7 @@ jobs:
                 autoconf \
                 automake \
                 cargo \
+                cbindgen \
                 ccache \
                 clang \
                 diffutils \
@@ -1082,12 +1099,6 @@ jobs:
           path: prep
       - run: tar xf prep/libhtp.tar.gz
       - run: tar xf prep/suricata-update.tar.gz
-      - name: Setup cbindgen
-        run: |
-          mkdir -p $HOME/.cargo/bin
-          cp prep/cbindgen $HOME/.cargo/bin
-          chmod 755 $HOME/.cargo/bin/cbindgen
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
       - run: ./autogen.sh
       - run: CC="clang" CFLAGS="$DEFAULT_CFLAGS -Wshadow -fsanitize=address -fno-omit-frame-pointer" ./configure --enable-debug --enable-unittests --disable-shared --enable-rust-strict --enable-hiredis --enable-nfqueue --enable-lua
         env:
@@ -1118,11 +1129,11 @@ jobs:
       # Check compilation against systemd
       - run: ldd src/suricata | grep libsystemd &> /dev/null
 
-  # Fedora 37 build using GCC.
-  fedora-37-gcc:
-    name: Fedora 37 (gcc, debug, asan, wshadow, rust-strict)
+  # Fedora 39 build using GCC.
+  fedora-39-gcc:
+    name: Fedora 39 (gcc, debug, asan, wshadow, rust-strict)
     runs-on: ubuntu-latest
-    container: fedora:37
+    container: fedora:39
     needs: [prepare-deps, prepare-cbindgen]
     steps:
 
@@ -1138,6 +1149,7 @@ jobs:
                 autoconf \
                 automake \
                 cargo \
+                cbindgen \
                 ccache \
                 diffutils \
                 file-devel \
@@ -1175,12 +1187,6 @@ jobs:
           path: prep
       - run: tar xf prep/libhtp.tar.gz
       - run: tar xf prep/suricata-update.tar.gz
-      - name: Setup cbindgen
-        run: |
-          mkdir -p $HOME/.cargo/bin
-          cp prep/cbindgen $HOME/.cargo/bin
-          chmod 755 $HOME/.cargo/bin/cbindgen
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
       - run: ./autogen.sh
       - run: ./configure --enable-debug --enable-unittests --disable-shared --enable-rust-strict --enable-hiredis --enable-nfqueue
         env:
@@ -1213,10 +1219,10 @@ jobs:
   # This job builds and tests Suricata as a non-root user as some
   # issues only show up when not running as root, and by default all
   # jobs in GitHub actions are run as root inside the container.
-  fedora-37-non-root:
-    name: Fedora 37 (non-root, debug, clang, asan, wshadow, rust-strict, systemd)
+  fedora-39-non-root:
+    name: Fedora 39 (non-root, debug, clang, asan, wshadow, rust-strict, systemd)
     runs-on: ubuntu-latest
-    container: fedora:37
+    container: fedora:39
     needs: [prepare-deps]
     steps:
       - run: |
@@ -2424,7 +2430,6 @@ jobs:
                 zlib1g \
                 zlib1g-dev \
                 clang \
-                libbpf-dev \
                 libelf-dev
       - name: Install Rust
         run: curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain $RUST_VERSION_KNOWN -y
@@ -2442,7 +2447,7 @@ jobs:
           cp prep/cbindgen $HOME/.cargo/bin
           chmod 755 $HOME/.cargo/bin/cbindgen
       - run: ./autogen.sh
-      - run: CFLAGS="${DEFAULT_CFLAGS}" ./configure --enable-unittests --enable-fuzztargets --enable-ebpf --enable-ebpf-build
+      - run: CFLAGS="${DEFAULT_CFLAGS}" ./configure --enable-unittests --enable-fuzztargets
       - run: make -j2
       - run: make check
       - run: tar xf prep/suricata-verify.tar.gz

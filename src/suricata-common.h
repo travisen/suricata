@@ -30,9 +30,6 @@
 #define DBG_PERF
 #endif
 
-#define TRUE   1
-#define FALSE  0
-
 #define _GNU_SOURCE
 #define __USE_GNU
 
@@ -213,6 +210,10 @@ typedef unsigned char u_char;
 
 #if HAVE_NETDB_H
 #include <netdb.h>
+#endif
+
+#if HAVE_MALLOC_H
+#include <malloc.h>
 #endif
 
 #if __CYGWIN__

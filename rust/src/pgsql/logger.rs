@@ -102,6 +102,13 @@ fn log_request(req: &PgsqlFEMessage, flags: u32) -> Result<JsonBuilder, JsonErro
         }) => {
             js.set_string("message", req.to_str())?;
         }
+        PgsqlFEMessage::UnknownMessageType(RegularPacket {
+            identifier: _,
+            length: _,
+            payload: _,
+        }) => {
+            // We don't want to log these, for now. Cf redmine: #6576
+        }
     }
     js.close()?;
     Ok(js)
@@ -177,12 +184,10 @@ fn log_response(res: &PgsqlBEMessage, jb: &mut JsonBuilder) -> Result<(), JsonEr
         }
         PgsqlBEMessage::UnknownMessageType(RegularPacket {
             identifier: _,
-            length,
-            payload,
+            length: _,
+            payload: _,
         }) => {
-            // jb.set_string_from_bytes("identifier", identifier.to_vec())?;
-            jb.set_uint("length", (*length).into())?;
-            jb.set_string_from_bytes("payload", payload)?;
+            // We don't want to log these, for now. Cf redmine: #6576
         }
         PgsqlBEMessage::AuthenticationOk(_)
         | PgsqlBEMessage::AuthenticationCleartextPassword(_)

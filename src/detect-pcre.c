@@ -79,7 +79,7 @@ static int pcre2_use_jit = 1;
 
 /* \brief Helper function for using pcre2_match with/without JIT
  */
-static inline int DetectPcreExec(DetectEngineThreadCtx *det_ctx, DetectPcreData *pd,
+static inline int DetectPcreExec(DetectEngineThreadCtx *det_ctx, const DetectPcreData *pd,
         const char *str, const size_t strlen, int start_offset, int options,
         pcre2_match_data *match)
 {
@@ -182,7 +182,7 @@ int DetectPcrePayloadMatch(DetectEngineThreadCtx *det_ctx, const Signature *s,
     uint32_t len = 0;
     PCRE2_SIZE capture_len = 0;
 
-    DetectPcreData *pe = (DetectPcreData *)smd->ctx;
+    const DetectPcreData *pe = (const DetectPcreData *)smd->ctx;
 
     if (pe->flags & DETECT_PCRE_RELATIVE) {
         ptr = payload + det_ctx->buffer_offset;
@@ -865,7 +865,6 @@ static int DetectPcreSetup (DetectEngineCtx *de_ctx, Signature *s, const char *r
 {
     SCEnter();
     DetectPcreData *pd = NULL;
-    SigMatch *sm = NULL;
     int parsed_sm_list = DETECT_SM_LIST_NOTSET;
     char capture_names[1024] = "";
     AppProto alproto = ALPROTO_UNKNOWN;
@@ -918,12 +917,10 @@ static int DetectPcreSetup (DetectEngineCtx *de_ctx, Signature *s, const char *r
     if (sm_list == -1)
         goto error;
 
-    sm = SigMatchAlloc();
-    if (sm == NULL)
+    SigMatch *sm = SigMatchAppendSMToList(de_ctx, s, DETECT_PCRE, (SigMatchCtx *)pd, sm_list);
+    if (sm == NULL) {
         goto error;
-    sm->type = DETECT_PCRE;
-    sm->ctx = (void *)pd;
-    SigMatchAppendSMToList(s, sm, sm_list);
+    }
 
     for (uint8_t x = 0; x < pd->idx; x++) {
         if (DetectFlowvarPostMatchSetup(de_ctx, s, pd->capids[x]) < 0)
