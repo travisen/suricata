@@ -27,6 +27,9 @@
 #![allow(clippy::let_and_return)]
 #![allow(clippy::uninlined_format_args)]
 
+// We find this is beyond what the linter should flag.
+#![allow(clippy::items_after_test_module)]
+
 // We find this makes sense at time.
 #![allow(clippy::module_inception)]
 
@@ -116,3 +119,4 @@ pub mod plugin;
 pub mod lzma;
 pub mod util;
 pub mod ffi;
+pub mod feature;

@@ -53,6 +53,9 @@
 struct SCSigOrderFunc_;
 struct SCSigSignatureWrapper_;
 
+/* Forward declarations for structures from Rust. */
+typedef struct SCDetectRequiresStatus SCDetectRequiresStatus;
+
 enum SignatureType {
     SIG_TYPE_NOT_SET = 0,
     SIG_TYPE_IPONLY,      // rule is handled by IPONLY engine
@@ -295,8 +298,7 @@ typedef struct DetectPort_ {
 #define SIG_MASK_REQUIRE_FLAGS_INITDEINIT   BIT_U8(2)    /* SYN, FIN, RST */
 #define SIG_MASK_REQUIRE_FLAGS_UNUSUAL      BIT_U8(3)    /* URG, ECN, CWR */
 #define SIG_MASK_REQUIRE_NO_PAYLOAD         BIT_U8(4)
-#define SIG_MASK_REQUIRE_DCERPC             BIT_U8(5)    /* require either SMB+DCE or raw DCE */
-// vacancy
+// vacancy 2x
 #define SIG_MASK_REQUIRE_ENGINE_EVENT       BIT_U8(7)
 
 /* for now a uint8_t is enough */
@@ -352,7 +354,7 @@ typedef struct SigMatch_ {
 /** \brief Data needed for Match() */
 typedef struct SigMatchData_ {
     uint16_t type;   /**< match type */
-    uint8_t is_last; /**< Last element of the list */
+    bool is_last;    /**< Last element of the list */
     SigMatchCtx *ctx; /**< plugin specific data */
 } SigMatchData;
 
@@ -413,7 +415,7 @@ typedef InspectionBuffer *(*InspectionBufferGetDataPtr)(
         void *txv, const int list_id);
 struct DetectEngineAppInspectionEngine_;
 
-typedef uint8_t (*InspectEngineFuncPtr2)(struct DetectEngineCtx_ *de_ctx,
+typedef uint8_t (*InspectEngineFuncPtr)(struct DetectEngineCtx_ *de_ctx,
         struct DetectEngineThreadCtx_ *det_ctx,
         const struct DetectEngineAppInspectionEngine_ *engine, const struct Signature_ *s, Flow *f,
         uint8_t flags, void *alstate, void *txv, uint64_t tx_id);
@@ -430,7 +432,7 @@ typedef struct DetectEngineAppInspectionEngine_ {
 
     struct {
         InspectionBufferGetDataPtr GetData;
-        InspectEngineFuncPtr2 Callback;
+        InspectEngineFuncPtr Callback;
         /** pointer to the transforms in the 'DetectBuffer entry for this list */
         const DetectEngineTransforms *transforms;
     } v2;
@@ -797,6 +799,7 @@ typedef struct SigFileLoaderStat_ {
     int total_files;
     int good_sigs_total;
     int bad_sigs_total;
+    int skipped_sigs_total;
 } SigFileLoaderStat;
 
 typedef struct DetectEngineThreadKeywordCtxItem_ {
@@ -847,7 +850,6 @@ typedef struct DetectEngineCtx_ {
     SRepCIDRTree *srepCIDR_ctx;
 
     Signature **sig_array;
-    uint32_t sig_array_size; /* size in bytes */
     uint32_t sig_array_len;  /* size in array members */
 
     uint32_t signum;
@@ -924,6 +926,9 @@ typedef struct DetectEngineCtx_ {
     const char *sigerror;
     bool sigerror_silent;
     bool sigerror_ok;
+
+    /** The rule errored out due to missing requirements. */
+    bool sigerror_requires;
 
     bool filedata_config_initialized;
 
@@ -1032,6 +1037,12 @@ typedef struct DetectEngineCtx_ {
 
     /* path to the tenant yaml for this engine */
     char *tenant_path;
+
+    /* Track rule requirements for reporting after loading rules. */
+    SCDetectRequiresStatus *requirements;
+
+    /* number of signatures using filestore, limited as u16 */
+    uint16_t filestore_cnt;
 } DetectEngineCtx;
 
 /* Engine groups profiles (low, medium, high, custom) */
@@ -1082,6 +1093,8 @@ typedef struct DetectEngineThreadCtx_ {
      *        on this being the first member */
     uint32_t tenant_id;
 
+    SC_ATOMIC_DECLARE(int, so_far_used_by_detect);
+
     /* the thread to which this detection engine thread belongs */
     ThreadVars *tv;
 
@@ -1109,6 +1122,17 @@ typedef struct DetectEngineThreadCtx_ {
     /** used by pcre match function alone: normally in sync with buffer_offset, but
      *  points to 1 byte after the start of the last pcre match if a pcre match happened. */
     uint32_t pcre_match_start_offset;
+
+    /** SPM thread context used for scanning. This has been cloned from the
+     * prototype held by DetectEngineCtx. */
+    SpmThreadCtx *spm_thread_ctx;
+
+    /* byte_* values */
+    uint64_t *byte_values;
+
+    uint8_t *base64_decoded;
+    int base64_decoded_len;
+    int base64_decoded_len_max;
 
     /* counter for the filestore array below -- up here for cache reasons. */
     uint16_t filestore_cnt;
@@ -1157,11 +1181,6 @@ typedef struct DetectEngineThreadCtx_ {
     uint16_t alert_queue_capacity;
     PacketAlert *alert_queue;
 
-    SC_ATOMIC_DECLARE(int, so_far_used_by_detect);
-
-    /* holds the current recursion depth on content inspection */
-    int inspection_recursion_counter;
-
     /** array of signature pointers we're going to inspect in the detection
      *  loop. */
     Signature **match_array;
@@ -1179,13 +1198,6 @@ typedef struct DetectEngineThreadCtx_ {
 
     MpmThreadCtx mtc; /**< thread ctx for the mpm */
     PrefilterRuleStore pmq;
-
-    /** SPM thread context used for scanning. This has been cloned from the
-     * prototype held by DetectEngineCtx. */
-    SpmThreadCtx *spm_thread_ctx;
-
-    /* byte_* values */
-    uint64_t *byte_values;
 
     /* string to replace */
     DetectReplaceList *replist;
@@ -1207,10 +1219,6 @@ typedef struct DetectEngineThreadCtx_ {
     /** store for keyword contexts that need a per thread storage. Global. */
     int global_keyword_ctxs_size;
     void **global_keyword_ctxs_array;
-
-    uint8_t *base64_decoded;
-    int base64_decoded_len;
-    int base64_decoded_len_max;
 
     AppLayerDecoderEvents *decoder_events;
     uint16_t events;
@@ -1307,14 +1315,14 @@ enum {
     DETECT_EVENT_TOO_MANY_BUFFERS,
 };
 
-#define SIG_GROUP_HEAD_HAVERAWSTREAM    BIT_U32(0)
+#define SIG_GROUP_HEAD_HAVERAWSTREAM BIT_U16(0)
 #ifdef HAVE_MAGIC
-#define SIG_GROUP_HEAD_HAVEFILEMAGIC    BIT_U32(20)
+#define SIG_GROUP_HEAD_HAVEFILEMAGIC BIT_U16(1)
 #endif
-#define SIG_GROUP_HEAD_HAVEFILEMD5      BIT_U32(21)
-#define SIG_GROUP_HEAD_HAVEFILESIZE     BIT_U32(22)
-#define SIG_GROUP_HEAD_HAVEFILESHA1     BIT_U32(23)
-#define SIG_GROUP_HEAD_HAVEFILESHA256   BIT_U32(24)
+#define SIG_GROUP_HEAD_HAVEFILEMD5    BIT_U16(2)
+#define SIG_GROUP_HEAD_HAVEFILESIZE   BIT_U16(3)
+#define SIG_GROUP_HEAD_HAVEFILESHA1   BIT_U16(4)
+#define SIG_GROUP_HEAD_HAVEFILESHA256 BIT_U16(5)
 
 enum MpmBuiltinBuffers {
     MPMB_TCP_PKT_TS,
@@ -1414,6 +1422,7 @@ typedef struct SigGroupHeadInitData_ {
     uint8_t protos[256];    /**< proto(s) this sgh is for */
     uint32_t direction;     /**< set to SIG_FLAG_TOSERVER, SIG_FLAG_TOCLIENT or both */
     int score;              /**< try to make this group a unique one */
+    uint32_t max_sig_id;    /**< max signature idx for this sgh */
 
     MpmCtx **app_mpms;
     MpmCtx **pkt_mpms;
@@ -1429,15 +1438,18 @@ typedef struct SigGroupHeadInitData_ {
 
     /** Array with sig ptrs... size is sig_cnt * sizeof(Signature *) */
     Signature **match_array;
-
-    /* port ptr */
-    struct DetectPort_ *port;
 } SigGroupHeadInitData;
 
 /** \brief Container for matching data for a signature group */
 typedef struct SigGroupHead_ {
-    uint32_t flags;
+    uint16_t flags;
     /* coccinelle: SigGroupHead:flags:SIG_GROUP_HEAD_ */
+
+    /** the number of signatures in this sgh that have the filestore keyword
+     *  set. */
+    uint16_t filestore_cnt;
+
+    uint32_t id; /**< unique id used to index sgh_array for stats */
 
     /* non prefilter list excluding SYN rules */
     uint32_t non_pf_other_store_cnt;
@@ -1445,12 +1457,6 @@ typedef struct SigGroupHead_ {
     SignatureNonPrefilterStore *non_pf_other_store_array; // size is non_mpm_store_cnt * sizeof(SignatureNonPrefilterStore)
     /* non mpm list including SYN rules */
     SignatureNonPrefilterStore *non_pf_syn_store_array; // size is non_mpm_syn_store_cnt * sizeof(SignatureNonPrefilterStore)
-
-    /** the number of signatures in this sgh that have the filestore keyword
-     *  set. */
-    uint16_t filestore_cnt;
-
-    uint32_t id; /**< unique id used to index sgh_array for stats */
 
     PrefilterEngine *pkt_engines;
     PrefilterEngine *payload_engines;

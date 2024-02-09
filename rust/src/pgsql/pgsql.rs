@@ -50,7 +50,7 @@ pub struct PgsqlTransaction {
     pub request: Option<PgsqlFEMessage>,
     pub responses: Vec<PgsqlBEMessage>,
 
-    pub data_row_cnt: u16,
+    pub data_row_cnt: u64,
     pub data_size: u64,
 
     tx_data: AppLayerTxData,
@@ -82,10 +82,10 @@ impl PgsqlTransaction {
     }
 
     pub fn incr_row_cnt(&mut self) {
-        self.data_row_cnt += 1;
+        self.data_row_cnt = self.data_row_cnt.saturating_add(1);
     }
 
-    pub fn get_row_cnt(&self) -> u16 {
+    pub fn get_row_cnt(&self) -> u64 {
         self.data_row_cnt
     }
 
@@ -117,6 +117,7 @@ pub enum PgsqlStateProgress {
     DataRowReceived,
     CommandCompletedReceived,
     ErrorMessageReceived,
+    CancelRequestReceived,
     ConnectionTerminated,
     #[cfg(test)]
     UnknownState,
@@ -229,6 +230,7 @@ impl PgsqlState {
             || self.state_progress == PgsqlStateProgress::SimpleQueryReceived
             || self.state_progress == PgsqlStateProgress::SSLRequestReceived
             || self.state_progress == PgsqlStateProgress::ConnectionTerminated
+            || self.state_progress == PgsqlStateProgress::CancelRequestReceived
         {
             let tx = self.new_tx();
             self.transactions.push_back(tx);
@@ -280,6 +282,7 @@ impl PgsqlState {
 
                 // Important to keep in mind that: "In simple Query mode, the format of retrieved values is always text, except when the given command is a FETCH from a cursor declared with the BINARY option. In that case, the retrieved values are in binary format. The format codes given in the RowDescription message tell which format is being used." (from pgsql official documentation)
             }
+            PgsqlFEMessage::CancelRequest(_) => Some(PgsqlStateProgress::CancelRequestReceived),
             PgsqlFEMessage::Terminate(_) => {
                 SCLogDebug!("Match: Terminate message");
                 Some(PgsqlStateProgress::ConnectionTerminated)
@@ -484,7 +487,6 @@ impl PgsqlState {
                             let dummy_resp =
                                 PgsqlBEMessage::ConsolidatedDataRow(ConsolidatedDataRowPacket {
                                     identifier: b'D',
-                                    length: tx.get_row_cnt() as u32, // TODO this is ugly. We can probably get rid of `length` field altogether...
                                     row_cnt: tx.get_row_cnt(),
                                     data_size: tx.data_size, // total byte count of all data_row messages combined
                                 });

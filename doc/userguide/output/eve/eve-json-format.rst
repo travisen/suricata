@@ -2432,13 +2432,17 @@ Example of HTTP2 logging, of a request and response:
 Event type: PGSQL
 -----------------
 
-PGSQL eve-logs reflect the bidirectional nature of the protocol transactions. Each PGSQL event lists at most one
-"Request" message field and one or more "Response" messages.
+PGSQL eve-logs reflect the bidirectional nature of the protocol transactions.
+Each PGSQL event lists at most one "Request" message field and one or more
+"Response" messages.
 
-The PGSQL parser merges individual messages into one EVE output item if they belong to the same transaction. In such cases, the source and destination information (IP/port) reflect the direction of the initial request, but contain messages from both sides.
+The PGSQL parser merges individual messages into one EVE output item if they
+belong to the same transaction. In such cases, the source and destination
+information (IP/port) reflect the direction of the initial request, but contain
+messages from both sides.
 
-
-Example of ``pgsql`` event for a SimpleQuery transaction complete with request with a ``SELECT`` statement and its response::
+Example of ``pgsql`` event for a SimpleQuery transaction complete with request
+with a ``SELECT`` statement and its response::
 
   {
     "timestamp": "2021-11-24T16:56:24.403417+0000",
@@ -2464,51 +2468,80 @@ Example of ``pgsql`` event for a SimpleQuery transaction complete with request w
     }
   }
 
-While on the wire PGSQL messages follow basically two types (startup messages and regular messages), those may have different subfields and/or meanings, based on the message type. Messages are logged based on their type and relevant fields.
+While on the wire PGSQL messages follow basically two types (startup messages
+and regular messages), those may have different subfields and/or meanings, based
+on the message type. Messages are logged based on their type and relevant fields.
 
-We list a few possible message types and what they mean in Suricata. For more details on message types and formats as well as what each message and field mean for PGSQL, check  `PostgreSQL's official documentation <https://www.postgresql.org/docs/14/protocol-message-formats.html>`_.
+We list a few possible message types and what they mean in Suricata. For more
+details on message types and formats as well as what each message and field mean
+for PGSQL, check `PostgreSQL's official documentation <https://www.postgresql.org
+/docs/14/protocol-message-formats.html>`_.
 
 Fields
 ~~~~~~
 
 * "tx_id": internal transaction id.
-* "request":  each PGSQL transaction may have up to one request message. The possible messages will be described in another section.
-* "response": even when there are several "Response" messages, there is one ``response`` field that summarizes all responses for that transaction. The possible messages will be described in another section.
+* "request":  each PGSQL transaction may have up to one request message. The
+  possible messages will be described in another section.
+* "response": even when there are several "Response" messages, there is one
+  ``response`` field that summarizes all responses for that transaction. The
+  possible messages will be described in another section.
 
 Request Messages
 ~~~~~~~~~~~~~~~~
 
-Some of the possible request messages are:
+Requests are sent by the frontend (client), which would be the source of a pgsql
+flow. Some of the possible request messages are:
 
-* "startup_message": message sent by a frontend/client process to start a new PostgreSQL connection
-* "password_message": if password output for PGSQL is enabled in suricata.yaml, carries the password sent during Authentication phase
-* "simple_query": issued SQL command during simple query subprotocol. PostgreSQL identifies specific sets of commands that change the set of expected messages to be exchanged as subprotocols.
-* "message": frontend responses which do not have meaningful payloads are logged like this, where the field value is the message type
+* "startup_message": message sent to start a new PostgreSQL connection
+* "password_message": if password output for PGSQL is enabled in suricata.yaml,
+  carries the password sent during Authentication phase
+* "simple_query": issued SQL command during simple query subprotocol. PostgreSQL
+  identifies specific sets of commands that change the set of expected messages
+  to be exchanged as subprotocols.
+* ``"message": "cancel_request"``: sent after a query, when the frontend
+  attempts to cancel said query. This message is sent over a different port,
+  thus bring shown as a different flow. It has no direct answer from the
+  backend, but if successful will lead to an ``ErrorResponse`` in the
+  transaction where the query was sent.
+* "message": requests which do not have meaningful payloads are logged like this,
+  where the field value is the message type
 
-There are several different authentication messages possible, based on selected authentication method. (e.g. the SASL authentication will have a set of authentication messages different from when ``md5`` authentication is chosen).
+There are several different authentication messages possible, based on selected
+authentication method. (e.g. the SASL authentication will have a set of
+authentication messages different from when ``md5`` authentication is chosen).
 
 Response Messages
 ~~~~~~~~~~~~~~~~~
 
-Some of the possible request messages are:
+Responses are sent by the backend (server), which would be the destination of a
+pgsql flow. Some of the possible request messages are:
 
-* "authentication_sasl_final": final SCRAM ``server-final-message``, as explained at https://www.postgresql.org/docs/14/sasl-authentication.html#SASL-SCRAM-SHA-256
-* "message": Backend responses which do not have meaningful payloads are logged like this, where the field value is the message type
+* "authentication_sasl_final": final SCRAM ``server-final-message``, as explained
+  at https://www.postgresql.org/docs/14/sasl-authentication.html#SASL-SCRAM-SHA-256
+* "message": Backend responses which do not have meaningful payloads are logged
+  like this, where the field value is the message type
 * "error_response"
 * "notice_response"
 * "notification_response"
 * "authentication_md5_password": a string with the ``md5`` salt value
 * "parameter_status": logged as an array
 * "backend_key_data"
-* "data_rows": integer. When one or many ``DataRow`` messages are parsed, the total returned rows
-* "data_size": in bytes. When one or many ``DataRow`` messages are parsed, the total size in bytes of the data returned
+* "data_rows": integer. When one or many ``DataRow`` messages are parsed, the
+  total returned rows
+* "data_size": in bytes. When one or many ``DataRow`` messages are parsed, the
+  total size in bytes of the data returned
 * "command_completed": string. Informs the command just completed by the backend
-* "ssl_accepted": bool. With this event, the initial PGSQL SSL Handshake negotiation is complete in terms of tracking and logging. The session will be upgraded to use TLS encryption
+* "ssl_accepted": bool. With this event, the initial PGSQL SSL Handshake
+  negotiation is complete in terms of tracking and logging. The session will be
+  upgraded to use TLS encryption
 
 Examples
 ~~~~~~~~
 
-The two ``pgsql`` events in this example represent a rejected ``SSL handshake`` and a following connection request where the authentication method indicated by the backend was ``md5``::
+The two ``pgsql`` events in this example represent a rejected ``SSL handshake``
+and a following connection request where the authentication method indicated by
+the backend was ``md5``::
 
   {
     "timestamp": "2021-11-24T16:56:19.435242+0000",
@@ -2562,6 +2595,97 @@ The two ``pgsql`` events in this example represent a rejected ``SSL handshake`` 
       }
     }
   }
+
+``AuthenticationOk``: a response indicating that the connection was successfully
+established.::
+
+  {
+    "pgsql": {
+      "tx_id": 3,
+      "response": {
+        "message": "authentication_ok",
+        "parameter_status": [
+          {
+            "application_name": "psql"
+          },
+          {
+            "client_encoding": "UTF8"
+          },
+          {
+            "date_style": "ISO, MDY"
+          },
+          {
+            "integer_datetimes": "on"
+          },
+          {
+            "interval_style": "postgres"
+          },
+          {
+            "is_superuser": "on"
+          },
+          {
+            "server_encoding": "UTF8"
+          },
+          {
+            "server_version": "13.6 (Debian 13.6-1.pgdg110+1)"
+          },
+          {
+            "session_authorization": "rules"
+          },
+          {
+            "standard_conforming_strings": "on"
+          },
+          {
+            "time_zone": "Etc/UTC"
+          }
+        ],
+        "process_id": 28954,
+        "secret_key": 889887985
+      }
+    }
+  }
+
+.. note::
+   In Suricata, the ``AuthenticationOk`` message is also where the backend's
+   ``process_id`` and ``secret_key`` are logged. These must be sent by the
+   frontend when it issues a ``CancelRequest`` message (seen below).
+
+A ``CancelRequest`` message::
+
+   {
+      "timestamp": "2023-12-07T15:46:56.971150+0000",
+      "flow_id": 775771889500133,
+      "event_type": "pgsql",
+      "src_ip": "100.88.2.140",
+      "src_port": 39706,
+      "dest_ip": "100.96.199.113",
+      "dest_port": 5432,
+      "proto": "TCP",
+      "pkt_src": "stream (flow timeout)",
+      "pgsql": {
+        "tx_id": 1,
+        "request": {
+          "message": "cancel_request",
+          "process_id": 28954,
+          "secret_key": 889887985
+        }
+      }
+   }
+
+.. note::
+   As the ``CancelRequest`` message is sent over a new connection, the way to
+   correlate it with the proper frontend/flow from which it originates is by
+   querying on ``process_id`` and ``secret_key`` seen in the
+   ``AuthenticationOk`` event.
+
+References:
+  * `PostgreSQL protocol - Canceling Requests in Progress`_
+  * `PostgreSQL message format - BackendKeyData`_
+
+.. _PostgreSQL protocol - Canceling Requests in Progress: https://www.postgresql
+   .org/docs/current/protocol-flow.html#PROTOCOL-FLOW-CANCELING-REQUESTS
+.. _PostgreSQL message format - BackendKeyData: https://www.postgresql.org/docs
+   /current/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-BACKENDKEYDATA
 
 
 Event type: IKE

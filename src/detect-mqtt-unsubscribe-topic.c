@@ -108,7 +108,7 @@ static uint8_t DetectEngineInspectMQTTUnsubscribeTopic(DetectEngineCtx *de_ctx,
             break;
 
         const bool match = DetectEngineContentInspection(de_ctx, det_ctx, s, engine->smd, NULL, f,
-                (uint8_t *)buffer->inspect, buffer->inspect_len, buffer->inspect_offset,
+                buffer->inspect, buffer->inspect_len, buffer->inspect_offset,
                 DETECT_CI_FLAGS_SINGLE, DETECT_ENGINE_CONTENT_INSPECTION_MODE_STATE);
         if (match) {
             return DETECT_ENGINE_INSPECT_SIG_MATCH;
@@ -203,13 +203,11 @@ void DetectMQTTUnsubscribeTopicRegister (void)
                 unsubscribe_topic_match_limit);
     }
 
-    DetectAppLayerMpmRegister2("mqtt.unsubscribe.topic", SIG_FLAG_TOSERVER, 1,
-            PrefilterMpmMQTTUnsubscribeTopicRegister, NULL,
-            ALPROTO_MQTT, 1);
+    DetectAppLayerMpmRegister("mqtt.unsubscribe.topic", SIG_FLAG_TOSERVER, 1,
+            PrefilterMpmMQTTUnsubscribeTopicRegister, NULL, ALPROTO_MQTT, 1);
 
-    DetectAppLayerInspectEngineRegister2("mqtt.unsubscribe.topic",
-            ALPROTO_MQTT, SIG_FLAG_TOSERVER, 1,
-            DetectEngineInspectMQTTUnsubscribeTopic, NULL);
+    DetectAppLayerInspectEngineRegister("mqtt.unsubscribe.topic", ALPROTO_MQTT, SIG_FLAG_TOSERVER,
+            1, DetectEngineInspectMQTTUnsubscribeTopic, NULL);
 
     DetectBufferTypeSetDescriptionByName("mqtt.unsubscribe.topic",
             "unsubscribe topic query");

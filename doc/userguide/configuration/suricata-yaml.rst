@@ -457,8 +457,8 @@ look at all packets whenever you want.  In the normal mode a pcap file
 is created in the default-log-dir. It can also be created elsewhere if
 a absolute path is set in the yaml-file.
 
-The file that is saved in example the default -log-dir
-/var/log/suricata, can be be opened with every program which supports
+The file that is saved in example the ``default-log-dir``
+`/var/log/suricata`, can be be opened with every program which supports
 the pcap file format. This can be Wireshark, TCPdump, Suricata, Snort
 and many others.
 
@@ -466,25 +466,13 @@ The pcap-log option can be enabled and disabled.
 
 There is a size limit for the pcap-log file that can be set. The
 default limit is 32 MB. If the log-file reaches this limit, the file
-will be rotated and a new one will be created. The pcap-log option
-has an extra functionality for "Sguil":http://sguil.sourceforge.net/
-that can be enabled in the 'mode' option. In the sguil mode the
-"sguil_base_dir" indicates the base directory. In this base dir the
-pcaps are created in a Sguil-specific directory structure that is
-based on the day:
-
-::
-
-  $sguil_base_dir/YYYY-MM-DD/$filename.<timestamp>
-
-If you would like to use Suricata with Sguil, do not forget to enable
-(and if necessary modify) the base dir in the suricata.yaml file.
+will be rotated and a new one will be created.
 Remember that in the 'normal' mode, the file will be saved in
 default-log-dir or in the absolute path (if set).
 
 The pcap files can be compressed before being written to disk by setting
-the compression option to lz4. This option is incompatible with sguil
-mode. Note: On Windows, this option increases disk I/O instead of
+the compression option to lz4.
+Note: On Windows, this option increases disk I/O instead of
 reducing it. When using lz4 compression, you can enable checksums using
 the lz4-checksum option, and you can set the compression level lz4-level
 to a value between 0 and 16, where higher levels result in higher
@@ -514,8 +502,7 @@ the alert.
       # Limit in MB.
       limit: 32
 
-      mode: sguil # "normal" (default) or sguil.
-      sguil_base_dir: /nsm_data/
+      mode: normal # "normal" or multi
       conditional: alerts
 
 Verbose Alerts Log (alert-debug.log)
@@ -656,9 +643,9 @@ For setting the option sgh-mpm-context, you can choose from auto, full
 or single. The default setting is 'auto', meaning Suricata selects
 full or single based on the algorithm you use. 'Full' means that every
 group has its own MPM-context, and 'single' that all groups share one
-MPM-context. The two algorithms ac and ac-gfbs are new in 1.03. These
-algorithms use a single MPM-context if the Sgh-MPM-context setting is
-'auto'. The rest of the algorithms use full in that case.
+MPM-context. The algorithm "ac" uses a single MPM-context if the 
+Sgh-MPM-context setting is 'auto'. The rest of the algorithms use full 
+in that case.
 
 The inspection-recursion-limit option has to mitigate that possible
 bugs in Suricata cause big problems. Often Suricata has to deal with
@@ -1300,7 +1287,7 @@ the default behavior).
 
 Each supported protocol has a dedicated subsection under ``protocols``.
 
-Asn1_max_frames (new in 1.0.3 and 1.1)
+Asn1_max_frames
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Asn1 (`Abstract Syntax One
@@ -1761,7 +1748,7 @@ incompatible with ``decode-mime``. If both are enabled,
 Maximum transactions
 ~~~~~~~~~~~~~~~~~~~~
 
-MQTT, FTP, PostgreSQL, SMB, DCERPC and NFS have each a `max-tx` parameter that can be customized.
+SMTP, MQTT, FTP, PostgreSQL, SMB, DCERPC, HTTP1 and NFS have each a `max-tx` parameter that can be customized.
 `max-tx` refers to the maximum number of live transactions for each flow.
 An app-layer event `protocol.too_many_transactions` is triggered when this value is reached.
 The point of this parameter is to find a balance between the completeness of analysis
@@ -1873,14 +1860,15 @@ Default Log Format
 ~~~~~~~~~~~~~~~~~~
 
 A logging line exists of two parts. First it displays meta information
-(thread id, date etc.), and finally the actual log message. Example:
+(Log-level, Suricata module), and finally the actual log message. Example:
 
 ::
 
-  [27708] 15/10/2010 -- 11:40:07 - (suricata.c:425) <Info> (main) – This is Suricata version 1.0.2
+  i: suricata: This is Suricata version 7.0.2 RELEASE running in USER mode
 
-(Here the part until the – is the meta info, "This is Suricata 1.0.2"
-is the actual message.)
+(Here the part until the second `:` is the meta info, 
+"This is Suricata version 7.0.2 RELEASE running in USER mode" is the actual 
+message.)
 
 It is possible to determine which information will be displayed in
 this line and (the manner how it will be displayed) in which format it

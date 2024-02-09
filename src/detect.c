@@ -152,6 +152,12 @@ static void DetectRun(ThreadVars *th_v,
                 DetectRunFrames(th_v, de_ctx, det_ctx, p, pflow, &scratch);
                 // PACKET_PROFILING_DETECT_END(p, PROF_DETECT_TX);
             }
+            // no update to transactions
+            if (!PKT_IS_PSEUDOPKT(p) && p->app_update_direction == 0 &&
+                    ((PKT_IS_TOSERVER(p) && (p->flow->flags & FLOW_TS_APP_UPDATED) == 0) ||
+                            (PKT_IS_TOCLIENT(p) && (p->flow->flags & FLOW_TC_APP_UPDATED) == 0))) {
+                goto end;
+            }
         } else if (p->proto == IPPROTO_UDP) {
             DetectRunFrames(th_v, de_ctx, det_ctx, p, pflow, &scratch);
         }
@@ -159,6 +165,11 @@ static void DetectRun(ThreadVars *th_v,
         PACKET_PROFILING_DETECT_START(p, PROF_DETECT_TX);
         DetectRunTx(th_v, de_ctx, det_ctx, p, pflow, &scratch);
         PACKET_PROFILING_DETECT_END(p, PROF_DETECT_TX);
+        /* see if we need to increment the inspect_id and reset the de_state */
+        PACKET_PROFILING_DETECT_START(p, PROF_DETECT_TX_UPDATE);
+        AppLayerParserSetTransactionInspectId(
+                pflow, pflow->alparser, pflow->alstate, scratch.flow_flags, (scratch.sgh == NULL));
+        PACKET_PROFILING_DETECT_END(p, PROF_DETECT_TX_UPDATE);
     }
 
 end:
@@ -202,8 +213,6 @@ const SigGroupHead *SigMatchSignaturesGetSgh(const DetectEngineCtx *de_ctx,
         const Packet *p)
 {
     SCEnter();
-
-    int f;
     SigGroupHead *sgh = NULL;
 
     /* if the packet proto is 0 (not set), we're inspecting it against
@@ -218,33 +227,30 @@ const SigGroupHead *SigMatchSignaturesGetSgh(const DetectEngineCtx *de_ctx,
     }
 
     /* select the flow_gh */
-    if (p->flowflags & FLOW_PKT_TOCLIENT)
-        f = 0;
-    else
-        f = 1;
+    const int dir = (p->flowflags & FLOW_PKT_TOCLIENT) == 0;
 
     int proto = IP_GET_IPPROTO(p);
     if (proto == IPPROTO_TCP) {
-        DetectPort *list = de_ctx->flow_gh[f].tcp;
-        SCLogDebug("tcp toserver %p, tcp toclient %p: going to use %p",
-                de_ctx->flow_gh[1].tcp, de_ctx->flow_gh[0].tcp, de_ctx->flow_gh[f].tcp);
-        uint16_t port = f ? p->dp : p->sp;
+        DetectPort *list = de_ctx->flow_gh[dir].tcp;
+        SCLogDebug("tcp toserver %p, tcp toclient %p: going to use %p", de_ctx->flow_gh[1].tcp,
+                de_ctx->flow_gh[0].tcp, de_ctx->flow_gh[dir].tcp);
+        const uint16_t port = dir ? p->dp : p->sp;
         SCLogDebug("tcp port %u -> %u:%u", port, p->sp, p->dp);
         DetectPort *sghport = DetectPortLookupGroup(list, port);
         if (sghport != NULL)
             sgh = sghport->sh;
-        SCLogDebug("TCP list %p, port %u, direction %s, sghport %p, sgh %p",
-                list, port, f ? "toserver" : "toclient", sghport, sgh);
+        SCLogDebug("TCP list %p, port %u, direction %s, sghport %p, sgh %p", list, port,
+                dir ? "toserver" : "toclient", sghport, sgh);
     } else if (proto == IPPROTO_UDP) {
-        DetectPort *list = de_ctx->flow_gh[f].udp;
-        uint16_t port = f ? p->dp : p->sp;
+        DetectPort *list = de_ctx->flow_gh[dir].udp;
+        uint16_t port = dir ? p->dp : p->sp;
         DetectPort *sghport = DetectPortLookupGroup(list, port);
         if (sghport != NULL)
             sgh = sghport->sh;
-        SCLogDebug("UDP list %p, port %u, direction %s, sghport %p, sgh %p",
-                list, port, f ? "toserver" : "toclient", sghport, sgh);
+        SCLogDebug("UDP list %p, port %u, direction %s, sghport %p, sgh %p", list, port,
+                dir ? "toserver" : "toclient", sghport, sgh);
     } else {
-        sgh = de_ctx->flow_gh[f].sgh[proto];
+        sgh = de_ctx->flow_gh[dir].sgh[proto];
     }
 
     SCReturnPtr(sgh, "SigGroupHead");
@@ -578,13 +584,11 @@ static void DetectRunInspectIPOnly(ThreadVars *tv, const DetectEngineCtx *de_ctx
     }
 }
 
-/* returns 0 if no match, 1 if match */
-static inline int DetectRunInspectRuleHeader(
-    const Packet *p,
-    const Flow *f,
-    const Signature *s,
-    const uint32_t sflags,
-    const uint8_t s_proto_flags)
+/** \internal
+ *  \brief inspect the rule header: protocol, ports, etc
+ *  \retval bool false if no match, true if match */
+static inline bool DetectRunInspectRuleHeader(const Packet *p, const Flow *f, const Signature *s,
+        const uint32_t sflags, const uint8_t s_proto_flags)
 {
     /* check if this signature has a requirement for flowvars of some type
      * and if so, if we actually have any in the flow. If not, the sig
@@ -592,77 +596,76 @@ static inline int DetectRunInspectRuleHeader(
     if ((p->flags & PKT_HAS_FLOW) && (sflags & SIG_FLAG_REQUIRE_FLOWVAR)) {
         DEBUG_VALIDATE_BUG_ON(f == NULL);
 
-        int m  = f->flowvar ? 1 : 0;
-
         /* no flowvars? skip this sig */
-        if (m == 0) {
+        const bool fv = f->flowvar != NULL;
+        if (fv == false) {
             SCLogDebug("skipping sig as the flow has no flowvars and sig "
                     "has SIG_FLAG_REQUIRE_FLOWVAR flag set.");
-            return 0;
+            return false;
         }
     }
 
     if ((s_proto_flags & DETECT_PROTO_IPV4) && !PKT_IS_IPV4(p)) {
         SCLogDebug("ip version didn't match");
-        return 0;
+        return false;
     }
     if ((s_proto_flags & DETECT_PROTO_IPV6) && !PKT_IS_IPV6(p)) {
         SCLogDebug("ip version didn't match");
-        return 0;
+        return false;
     }
 
     if (DetectProtoContainsProto(&s->proto, IP_GET_IPPROTO(p)) == 0) {
         SCLogDebug("proto didn't match");
-        return 0;
+        return false;
     }
 
     /* check the source & dst port in the sig */
     if (p->proto == IPPROTO_TCP || p->proto == IPPROTO_UDP || p->proto == IPPROTO_SCTP) {
         if (!(sflags & SIG_FLAG_DP_ANY)) {
             if (p->flags & PKT_IS_FRAGMENT)
-                return 0;
-            DetectPort *dport = DetectPortLookupGroup(s->dp,p->dp);
+                return false;
+            const DetectPort *dport = DetectPortLookupGroup(s->dp, p->dp);
             if (dport == NULL) {
                 SCLogDebug("dport didn't match.");
-                return 0;
+                return false;
             }
         }
         if (!(sflags & SIG_FLAG_SP_ANY)) {
             if (p->flags & PKT_IS_FRAGMENT)
-                return 0;
-            DetectPort *sport = DetectPortLookupGroup(s->sp,p->sp);
+                return false;
+            const DetectPort *sport = DetectPortLookupGroup(s->sp, p->sp);
             if (sport == NULL) {
                 SCLogDebug("sport didn't match.");
-                return 0;
+                return false;
             }
         }
     } else if ((sflags & (SIG_FLAG_DP_ANY|SIG_FLAG_SP_ANY)) != (SIG_FLAG_DP_ANY|SIG_FLAG_SP_ANY)) {
         SCLogDebug("port-less protocol and sig needs ports");
-        return 0;
+        return false;
     }
 
     /* check the destination address */
     if (!(sflags & SIG_FLAG_DST_ANY)) {
         if (PKT_IS_IPV4(p)) {
             if (DetectAddressMatchIPv4(s->addr_dst_match4, s->addr_dst_match4_cnt, &p->dst) == 0)
-                return 0;
+                return false;
         } else if (PKT_IS_IPV6(p)) {
             if (DetectAddressMatchIPv6(s->addr_dst_match6, s->addr_dst_match6_cnt, &p->dst) == 0)
-                return 0;
+                return false;
         }
     }
     /* check the source address */
     if (!(sflags & SIG_FLAG_SRC_ANY)) {
         if (PKT_IS_IPV4(p)) {
             if (DetectAddressMatchIPv4(s->addr_src_match4, s->addr_src_match4_cnt, &p->src) == 0)
-                return 0;
+                return false;
         } else if (PKT_IS_IPV6(p)) {
             if (DetectAddressMatchIPv6(s->addr_src_match6, s->addr_src_match6_cnt, &p->src) == 0)
-                return 0;
+                return false;
         }
     }
 
-    return 1;
+    return true;
 }
 
 /** \internal
@@ -789,7 +792,7 @@ static inline void DetectRulePacketRules(
             }
         }
 
-        if (DetectRunInspectRuleHeader(p, pflow, s, sflags, s_proto_flags) == 0) {
+        if (DetectRunInspectRuleHeader(p, pflow, s, sflags, s_proto_flags) == false) {
             goto next;
         }
 
@@ -919,14 +922,6 @@ static inline void DetectRunPostRules(
     Flow * const pflow,
     DetectRunScratchpad *scratch)
 {
-    /* see if we need to increment the inspect_id and reset the de_state */
-    if (pflow && pflow->alstate) {
-        PACKET_PROFILING_DETECT_START(p, PROF_DETECT_TX_UPDATE);
-        AppLayerParserSetTransactionInspectId(pflow, pflow->alparser, pflow->alstate,
-                scratch->flow_flags, (scratch->sgh == NULL));
-        PACKET_PROFILING_DETECT_END(p, PROF_DETECT_TX_UPDATE);
-    }
-
     /* so now let's iterate the alerts and remove the ones after a pass rule
      * matched (if any). This is done inside PacketAlertFinalize() */
     /* PR: installed "tag" keywords are handled after the threshold inspection */
@@ -1067,7 +1062,7 @@ static bool DetectRunTxInspectRule(ThreadVars *tv,
         RuleMatchCandidateTx *can,
         DetectRunScratchpad *scratch)
 {
-    uint8_t flow_flags = in_flow_flags;
+    const uint8_t flow_flags = in_flow_flags;
     const int direction = (flow_flags & STREAM_TOSERVER) ? 0 : 1;
     uint32_t inspect_flags = stored_flags ? *stored_flags : 0;
     int total_matches = 0;
@@ -1081,7 +1076,7 @@ static bool DetectRunTxInspectRule(ThreadVars *tv,
     /* for a new inspection we inspect pkt header and packet matches */
     if (likely(stored_flags == NULL)) {
         TRACE_SID_TXS(s->id, tx, "first inspect, run packet matches");
-        if (DetectRunInspectRuleHeader(p, f, s, s->flags, s->proto.flags) == 0) {
+        if (DetectRunInspectRuleHeader(p, f, s, s->flags, s->proto.flags) == false) {
             TRACE_SID_TXS(s->id, tx, "DetectRunInspectRuleHeader() no match");
             return false;
         }
@@ -1097,7 +1092,7 @@ static bool DetectRunTxInspectRule(ThreadVars *tv,
     }
 
     const DetectEngineAppInspectionEngine *engine = s->app_inspect;
-    while (engine != NULL) { // TODO could be do {} while as s->app_inspect cannot be null
+    do {
         TRACE_SID_TXS(s->id, tx, "engine %p inspect_flags %x", engine, inspect_flags);
         if (!(inspect_flags & BIT_U32(engine->id)) &&
                 direction == engine->dir)
@@ -1178,7 +1173,7 @@ static bool DetectRunTxInspectRule(ThreadVars *tv,
             break;
         }
         engine = engine->next;
-    }
+    } while (engine != NULL);
     TRACE_SID_TXS(s->id, tx, "inspect_flags %x, total_matches %u, engine %p",
             inspect_flags, total_matches, engine);
 
@@ -1223,7 +1218,7 @@ static bool DetectRunTxInspectRule(ThreadVars *tv,
         } else if ((inspect_flags & DE_STATE_FLAG_FULL_INSPECT) == 0 && mpm_in_progress) {
             TRACE_SID_TXS(s->id, tx, "no need to store no-match sig, "
                     "mpm will revisit it");
-        } else {
+        } else if (inspect_flags != 0 || file_no_match != 0) {
             TRACE_SID_TXS(s->id, tx, "storing state: flags %08x", inspect_flags);
             DetectRunStoreStateTx(scratch->sgh, f, tx->tx_ptr, tx->tx_id, s,
                     inspect_flags, flow_flags, file_no_match);
@@ -1301,6 +1296,81 @@ static inline void StoreDetectFlags(DetectTransaction *tx, const uint8_t flow_fl
     }
 }
 
+// Merge 'state' rules from the regular prefilter
+// updates array_idx on the way
+static inline void RuleMatchCandidateMergeStateRules(
+        DetectEngineThreadCtx *det_ctx, uint32_t *array_idx)
+{
+    // Now, we will merge 2 sorted lists :
+    // the one in det_ctx->tx_candidates
+    // and the one in det_ctx->match_array
+    // For match_array, we take only the relevant elements where s->app_inspect != NULL
+
+    // Basically, we iterate at the same time over the 2 lists
+    // comparing and taking an element from either.
+
+    // Trick is to do so in place in det_ctx->tx_candidates,
+    // so as to minimize the number of moves in det_ctx->tx_candidates.
+    // For this, the algorithm traverses the lists in reverse order.
+    // Otherwise, if the first element of match_array was to be put before
+    // all tx_candidates, we would need to shift all tx_candidates
+
+    // Retain the number of elements sorted in tx_candidates before merge
+    uint32_t j = *array_idx;
+    // First loop only counting the number of elements to add
+    for (uint32_t i = 0; i < det_ctx->match_array_cnt; i++) {
+        const Signature *s = det_ctx->match_array[i];
+        if (s->app_inspect != NULL) {
+            (*array_idx)++;
+        }
+    }
+    // Future number of elements in tx_candidates after merge
+    uint32_t k = *array_idx;
+
+    if (k == j) {
+        // no new element from match_array to merge in tx_candidates
+        return;
+    }
+
+    // variable i is for all elements of match_array (even not relevant ones)
+    // variable j is for elements of tx_candidates before merge
+    // variable k is for elements of tx_candidates after merge
+    for (uint32_t i = det_ctx->match_array_cnt; i > 0;) {
+        const Signature *s = det_ctx->match_array[i - 1];
+        if (s->app_inspect == NULL) {
+            // no relevant element, get the next one from match_array
+            i--;
+            continue;
+        }
+        // we have one element from match_array to merge in tx_candidates
+        k--;
+        if (j > 0) {
+            // j > 0 means there is still at least one element in tx_candidates to merge
+            const RuleMatchCandidateTx *s0 = &det_ctx->tx_candidates[j - 1];
+            if (s->num <= s0->id) {
+                // get next element from previous tx_candidates
+                j--;
+                // take the element from tx_candidates before merge
+                det_ctx->tx_candidates[k].s = det_ctx->tx_candidates[j].s;
+                det_ctx->tx_candidates[k].id = det_ctx->tx_candidates[j].id;
+                det_ctx->tx_candidates[k].flags = det_ctx->tx_candidates[j].flags;
+                det_ctx->tx_candidates[k].stream_reset = det_ctx->tx_candidates[j].stream_reset;
+                continue;
+            }
+        } // otherwise
+        // get next element from match_array
+        i--;
+        // take the element from match_array
+        det_ctx->tx_candidates[k].s = s;
+        det_ctx->tx_candidates[k].id = s->num;
+        det_ctx->tx_candidates[k].flags = NULL;
+        det_ctx->tx_candidates[k].stream_reset = 0;
+    }
+    // Even if k > 0 or j > 0, the loop is over. (Note that j == k now)
+    // The remaining elements in tx_candidates up to k were already sorted
+    // and come before any other element later in the list
+}
+
 static void DetectRunTx(ThreadVars *tv,
                     DetectEngineCtx *de_ctx,
                     DetectEngineThreadCtx *det_ctx,
@@ -1374,24 +1444,10 @@ static void DetectRunTx(ThreadVars *tv,
         }
 
         /* merge 'state' rules from the regular prefilter */
+#ifdef PROFILING
         uint32_t x = array_idx;
-        for (uint32_t i = 0; i < det_ctx->match_array_cnt; i++) {
-            const Signature *s = det_ctx->match_array[i];
-            if (s->app_inspect != NULL) {
-                const SigIntId id = s->num;
-                det_ctx->tx_candidates[array_idx].s = s;
-                det_ctx->tx_candidates[array_idx].id = id;
-                det_ctx->tx_candidates[array_idx].flags = NULL;
-                det_ctx->tx_candidates[array_idx].stream_reset = 0;
-                array_idx++;
-
-                SCLogDebug("%p/%"PRIu64" rule %u (%u) added from 'match' list",
-                        tx.tx_ptr, tx.tx_id, s->id, id);
-            }
-        }
-        do_sort = (array_idx > x); // sort if match added anything
-        SCLogDebug("%p/%" PRIu64 " rules added from 'match' list: %u", tx.tx_ptr, tx.tx_id,
-                array_idx - x);
+#endif
+        RuleMatchCandidateMergeStateRules(det_ctx, &array_idx);
 
         /* merge stored state into results */
         if (tx.de_state != NULL) {
@@ -1643,10 +1699,10 @@ static void DetectRunFrames(ThreadVars *tv, DetectEngineCtx *de_ctx, DetectEngin
 
             /* call individual rule inspection */
             RULE_PROFILING_START(p);
-            int r = DetectRunInspectRuleHeader(p, f, s, s->flags, s->proto.flags);
-            if (r == 1) {
+            bool r = DetectRunInspectRuleHeader(p, f, s, s->flags, s->proto.flags);
+            if (r == true) {
                 r = DetectRunFrameInspectRule(tv, det_ctx, s, f, p, frames, frame);
-                if (r == 1) {
+                if (r == true) {
                     /* match */
                     DetectRunPostMatch(tv, det_ctx, p, s);
 
@@ -1797,9 +1853,11 @@ TmEcode Detect(ThreadVars *tv, Packet *p, void *data)
 
 #ifdef PROFILE_RULES
     /* aggregate statistics */
-    if (SCTIME_SECS(p->ts) != det_ctx->rule_perf_last_sync) {
+    struct timeval ts;
+    gettimeofday(&ts, NULL);
+    if (ts.tv_sec != det_ctx->rule_perf_last_sync) {
         SCProfilingRuleThreatAggregate(det_ctx);
-        det_ctx->rule_perf_last_sync = SCTIME_SECS(p->ts);
+        det_ctx->rule_perf_last_sync = ts.tv_sec;
     }
 #endif
 

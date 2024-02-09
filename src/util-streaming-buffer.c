@@ -123,7 +123,7 @@ StreamingBufferBlock *SBB_RB_FIND_INCLUSIVE(struct SBB *head, StreamingBufferBlo
  *  \brief does data region intersect with list region 'r'
  *  Takes the max gap into account.
  */
-static inline bool RegionsIntersect(const StreamingBuffer *sb, const StreamingBufferConfig *cfg,
+static inline bool RegionsIntersect(const StreamingBufferConfig *cfg,
         const StreamingBufferRegion *r, const uint64_t offset, const uint64_t re)
 {
     /* create the data range for the region, adding the max gap */
@@ -158,7 +158,7 @@ static StreamingBufferRegion *FindFirstRegionForOffset(const StreamingBuffer *sb
 
     StreamingBufferRegion *p = NULL;
     for (; r != NULL; r = r->next) {
-        if (RegionsIntersect(sb, cfg, r, offset, data_re) == true) {
+        if (RegionsIntersect(cfg, r, offset, data_re) == true) {
             *prev = p;
             return r;
         }
@@ -182,7 +182,7 @@ static StreamingBufferRegion *FindLargestRegionForOffset(const StreamingBuffer *
         SCLogDebug("checking: %p/%" PRIu64 "/%" PRIu64 ", offset %" PRIu64 "/%" PRIu64, r,
                 r->stream_offset, reg_re, offset, data_re);
 #endif
-        if (!RegionsIntersect(sb, cfg, r, offset, data_re))
+        if (!RegionsIntersect(cfg, r, offset, data_re))
             return candidate;
 
         if (r->buf_size > candidate->buf_size) {
@@ -200,7 +200,7 @@ static StreamingBufferRegion *FindRightEdge(const StreamingBuffer *sb,
     const uint64_t data_re = offset + len;
     StreamingBufferRegion *candidate = r;
     for (; r != NULL; r = r->next) {
-        if (!RegionsIntersect(sb, cfg, r, offset, data_re)) {
+        if (!RegionsIntersect(cfg, r, offset, data_re)) {
             SCLogDebug(
                     "r %p is out of scope: %" PRIu64 "/%u/%" PRIu64, r, offset, len, offset + len);
             return candidate;
@@ -842,16 +842,11 @@ static inline void StreamingBufferSlideToOffsetWithRegions(
             r = next;
         }
         SCLogDebug("to_shift %p", to_shift);
-    } else {
-        to_shift = &sb->region;
-        SCLogDebug("shift start region %p", to_shift);
-    }
 
-    // this region is main, or will xfer its buffer to main
-    if (to_shift) {
-        SCLogDebug("main: offset %" PRIu64 " buf %p size %u offset %u", to_shift->stream_offset,
-                to_shift->buf, to_shift->buf_size, to_shift->buf_offset);
-        if (to_shift != &sb->region) {
+        // this region is main, or will xfer its buffer to main
+        if (to_shift && to_shift != &sb->region) {
+            SCLogDebug("main: offset %" PRIu64 " buf %p size %u offset %u", to_shift->stream_offset,
+                    to_shift->buf, to_shift->buf_size, to_shift->buf_offset);
             DEBUG_VALIDATE_BUG_ON(sb->region.buf != NULL);
 
             sb->region.buf = to_shift->buf;
@@ -860,12 +855,20 @@ static inline void StreamingBufferSlideToOffsetWithRegions(
             sb->region.buf_size = to_shift->buf_size;
             sb->region.next = to_shift->next;
 
+            BUG_ON(to_shift == &sb->region);
             FREE(cfg, to_shift, sizeof(*to_shift));
             to_shift = &sb->region;
             sb->regions--;
             DEBUG_VALIDATE_BUG_ON(sb->regions == 0);
         }
 
+    } else {
+        to_shift = &sb->region;
+        SCLogDebug("shift start region %p", to_shift);
+    }
+
+    // this region is main, or will xfer its buffer to main
+    if (to_shift) {
         // Do the shift. If new region is exactly at the slide offset we can skip this.
         DEBUG_VALIDATE_BUG_ON(to_shift->stream_offset > slide_offset);
         const uint32_t s = slide_offset - to_shift->stream_offset;
@@ -1430,11 +1433,11 @@ static StreamingBufferRegion *BufferInsertAtRegion(StreamingBuffer *sb,
             data_offset + data_len);
     ListRegions(sb);
 
-    if (RegionsIntersect(sb, cfg, &sb->region, data_offset, data_offset + data_len)) {
+    if (RegionsIntersect(cfg, &sb->region, data_offset, data_offset + data_len)) {
         SCLogDebug("data_offset %" PRIu64 ", data_len %u intersects with main region (next %p)",
                 data_offset, data_len, sb->region.next);
         if (sb->region.next == NULL ||
-                !RegionsIntersect(sb, cfg, sb->region.next, data_offset, data_offset + data_len)) {
+                !RegionsIntersect(cfg, sb->region.next, data_offset, data_offset + data_len)) {
             SCLogDebug(
                     "data_offset %" PRIu64
                     ", data_len %u intersects with main region, no next or way before next region",

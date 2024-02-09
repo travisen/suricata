@@ -118,10 +118,10 @@ static inline TmEcode ProcessErfDagRecords(ErfDagThreadVars *ewtn, uint8_t *top,
     uint32_t *pkts_read);
 static inline TmEcode ProcessErfDagRecord(ErfDagThreadVars *ewtn, char *prec);
 TmEcode ReceiveErfDagLoop(ThreadVars *, void *data, void *slot);
-TmEcode ReceiveErfDagThreadInit(ThreadVars *, void *, void **);
+TmEcode ReceiveErfDagThreadInit(ThreadVars *, const void *, void **);
 void ReceiveErfDagThreadExitStats(ThreadVars *, void *);
 TmEcode ReceiveErfDagThreadDeinit(ThreadVars *, void *);
-TmEcode DecodeErfDagThreadInit(ThreadVars *, void *, void **);
+TmEcode DecodeErfDagThreadInit(ThreadVars *, const void *, void **);
 TmEcode DecodeErfDagThreadDeinit(ThreadVars *tv, void *data);
 TmEcode DecodeErfDag(ThreadVars *, Packet *, void *);
 void ReceiveErfDagCloseStream(int dagfd, int stream);
@@ -175,8 +175,7 @@ TmModuleDecodeErfDagRegister(void)
  * \param data      data pointer gets populated with
  *
  */
-TmEcode
-ReceiveErfDagThreadInit(ThreadVars *tv, void *initdata, void **data)
+TmEcode ReceiveErfDagThreadInit(ThreadVars *tv, const void *initdata, void **data)
 {
     SCEnter();
     int stream_count = 0;
@@ -186,7 +185,7 @@ ReceiveErfDagThreadInit(ThreadVars *tv, void *initdata, void **data)
         SCReturnInt(TM_ECODE_FAILED);
     }
 
-    ErfDagThreadVars *ewtn = SCMClloc(1, sizeof(ErfDagThreadVars));
+    ErfDagThreadVars *ewtn = SCCalloc(1, sizeof(ErfDagThreadVars));
     if (unlikely(ewtn == NULL)) {
         FatalError("Failed to allocate memory for ERF DAG thread vars.");
     }
@@ -196,14 +195,14 @@ ReceiveErfDagThreadInit(ThreadVars *tv, void *initdata, void **data)
      */
     if (dag_parse_name(initdata, ewtn->dagname, DAGNAME_BUFSIZE,
             &ewtn->dagstream) < 0) {
-        SCLogError("Failed to parse DAG interface: %s", (char *)initdata);
+        SCLogError("Failed to parse DAG interface: %s", (const char *)initdata);
         SCFree(ewtn);
         exit(EXIT_FAILURE);
     }
 
     ewtn->livedev = LiveGetDevice(initdata);
     if (ewtn->livedev == NULL) {
-        SCLogError("Unable to get %s live device", (char *)initdata);
+        SCLogError("Unable to get %s live device", (const char *)initdata);
         SCFree(ewtn);
         SCReturnInt(TM_ECODE_FAILED);
     }
@@ -506,17 +505,13 @@ ProcessErfDagRecord(ErfDagThreadVars *ewtn, char *prec)
         SCReturnInt(TM_ECODE_FAILED);
     }
 
-    /* Convert ERF time to timeval - from libpcap. */
+    /* Convert ERF time to SCTime_t */
     uint64_t ts = dr->ts;
     p->ts = SCTIME_FROM_SECS(ts >> 32);
     ts = (ts & 0xffffffffULL) * 1000000;
     ts += 0x80000000; /* rounding */
     uint64_t usecs = ts >> 32;
-    if (usecs >= 1000000) {
-        usecs -= 1000000;
-        p->ts += SCTIME_FROM_SECS(1);
-    }
-    p->ts += SCTIME_FROM_USECS(usecs);
+    p->ts = SCTIME_ADD_USECS(p->ts, usecs);
 
     StatsIncr(ewtn->tv, ewtn->packets);
     ewtn->bytes += wlen;
@@ -616,8 +611,7 @@ DecodeErfDag(ThreadVars *tv, Packet *p, void *data)
     SCReturnInt(TM_ECODE_OK);
 }
 
-TmEcode
-DecodeErfDagThreadInit(ThreadVars *tv, void *initdata, void **data)
+TmEcode DecodeErfDagThreadInit(ThreadVars *tv, const void *initdata, void **data)
 {
     SCEnter();
     DecodeThreadVars *dtv = NULL;

@@ -81,6 +81,7 @@ static InspectionBuffer *GetKrb5SNameData(DetectEngineThreadCtx *det_ctx,
     }
 
     InspectionBufferSetupMulti(buffer, transforms, b, b_len);
+    buffer->flags = DETECT_CI_FLAGS_SINGLE;
 
     SCReturnPtr(buffer, "InspectionBuffer");
 }
@@ -100,13 +101,11 @@ static uint8_t DetectEngineInspectKrb5SName(DetectEngineCtx *de_ctx, DetectEngin
         struct Krb5PrincipalNameDataArgs cbdata = { local_id, txv, };
         InspectionBuffer *buffer =
                 GetKrb5SNameData(det_ctx, transforms, f, &cbdata, engine->sm_list);
-
         if (buffer == NULL || buffer->inspect == NULL)
             break;
 
-        const bool match = DetectEngineContentInspection(de_ctx, det_ctx, s, engine->smd, NULL, f,
-                (uint8_t *)buffer->inspect, buffer->inspect_len, buffer->inspect_offset,
-                DETECT_CI_FLAGS_SINGLE, DETECT_ENGINE_CONTENT_INSPECTION_MODE_STATE);
+        const bool match = DetectEngineContentInspectionBuffer(de_ctx, det_ctx, s, engine->smd,
+                NULL, f, buffer, DETECT_ENGINE_CONTENT_INSPECTION_MODE_STATE);
         if (match) {
             return DETECT_ENGINE_INSPECT_SIG_MATCH;
         }
@@ -188,13 +187,11 @@ void DetectKrb5SNameRegister(void)
     sigmatch_table[DETECT_AL_KRB5_SNAME].flags |= SIGMATCH_NOOPT|SIGMATCH_INFO_STICKY_BUFFER;
     sigmatch_table[DETECT_AL_KRB5_SNAME].desc = "sticky buffer to match on Kerberos 5 server name";
 
-    DetectAppLayerMpmRegister2("krb5_sname", SIG_FLAG_TOCLIENT, 2,
-            PrefilterMpmKrb5SNameRegister, NULL,
-            ALPROTO_KRB5, 1);
+    DetectAppLayerMpmRegister("krb5_sname", SIG_FLAG_TOCLIENT, 2, PrefilterMpmKrb5SNameRegister,
+            NULL, ALPROTO_KRB5, 1);
 
-    DetectAppLayerInspectEngineRegister2("krb5_sname",
-            ALPROTO_KRB5, SIG_FLAG_TOCLIENT, 0,
-            DetectEngineInspectKrb5SName, NULL);
+    DetectAppLayerInspectEngineRegister(
+            "krb5_sname", ALPROTO_KRB5, SIG_FLAG_TOCLIENT, 0, DetectEngineInspectKrb5SName, NULL);
 
     DetectBufferTypeSetDescriptionByName("krb5_sname",
             "Kerberos 5 ticket server name");

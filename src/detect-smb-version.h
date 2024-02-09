@@ -1,4 +1,4 @@
-/* Copyright (C) 2020 Open Information Security Foundation
+/* Copyright (C) 2022-2023 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -15,16 +15,11 @@
  * 02110-1301, USA.
  */
 
-/**
- * \file
- *
- * \author Sascha Steinbiss <sascha@steinbiss.name>
- */
+#ifndef __DETECT_SMB_VERSION_H__
+#define __DETECT_SMB_VERSION_H__
 
-#ifndef __APP_LAYER_MQTT_H__
-#define __APP_LAYER_MQTT_H__
+/** \brief registers the keyword into the engine. Called from
+ *         detect.c::SigTableSetup() */
+void DetectSmbVersionRegister(void);
 
-void RegisterMQTTParsers(void);
-void MQTTParserRegisterTests(void);
-
-#endif /* __APP_LAYER_MQTT_H__ */
+#endif /* __DETECT_SMB_VERSION_H__ */

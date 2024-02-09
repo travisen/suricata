@@ -280,9 +280,11 @@ bsize
 With the ``bsize`` keyword, you can match on the length of the buffer. This adds
 precision to the content match, previously this could have been done with ``isdataat``.
 
+bsize uses an :ref:`unsigned 64-bit integer <rules-integer-keywords>`.
+
 An optional operator can be specified; if no operator is present, the operator will
 default to '='. When a relational operator is used, e.g., '<', '>' or '<>' (range),
-the bsize value will be compared using the relational operator. Ranges are inclusive.
+the bsize value will be compared using the relational operator. Ranges are exclusive.
 
 If one or more ``content`` keywords precedes ``bsize``, each occurrence of ``content``
 will be inspected and an error will be raised if the content length and the bsize
@@ -325,6 +327,9 @@ Examples of ``bsize`` in a rule:
 
    alert dns any any -> any any (msg:"test bsize rule"; dns.query; content:"middle"; bsize:6<>15; sid:126; rev:1;)
 
+To emphasize how range works: in the example above, a match will occur if
+``bsize`` is greater than 6 and less than 15.
+
 dsize
 -----
 
@@ -335,6 +340,8 @@ not equal 'dsize:!n' less than 'dsize:<n' or greater than 'dsize:>n'
 This may be convenient in detecting buffer overflows.
 
 dsize cannot be used when using app/streamlayer protocol keywords (i.e. http.uri)
+
+dsize uses an :ref:`unsigned 16-bit integer <rules-integer-keywords>`.
 
 Format::
 
@@ -412,23 +419,23 @@ Example::
 
   alert tcp any any -> any any \
 	 (msg:"Byte_Test Example - Num = Value"; \
-	 content:"|00 01 00 02|"; byte_test:2,=,0x01;)
+	 content:"|00 01 00 02|"; byte_test:2,=,0x01,0;)
 
   alert tcp any any -> any any \
 	 (msg:"Byte_Test Example - Num = Value relative to content"; \
-	 content:"|00 01 00 02|"; byte_test:2,=,0x03,relative;)
+	 content:"|00 01 00 02|"; byte_test:2,=,0x03,2,relative;)
 
   alert tcp any any -> any any \
 	 (msg:"Byte_Test Example - Num != Value"; content:"|00 01 00 02|"; \
-	 byte_test:2,!=,0x06;)
+	 byte_test:2,!=,0x06,0;)
 
   alert tcp any any -> any any \ 
          (msg:"Byte_Test Example - Detect Large Values"; content:"|00 01 00 02|"; \
-         byte_test:2,>,1000,relative;)
+         byte_test:2,>,1000,1,relative;)
 
   alert tcp any any -> any any \
 	 (msg:"Byte_Test Example - Lowest bit is set"; \
-	 content:"|00 01 00 02|"; byte_test:2,&,0x01,relative;)
+	 content:"|00 01 00 02|"; byte_test:2,&,0x01,12,relative;)
 
   alert tcp any any -> any any (msg:"Byte_Test Example - Compare to String"; \
  	 content:"foobar"; byte_test:4,=,1337,1,relative,string,dec;)

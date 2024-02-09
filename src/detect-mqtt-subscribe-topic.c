@@ -108,7 +108,7 @@ static uint8_t DetectEngineInspectMQTTSubscribeTopic(DetectEngineCtx *de_ctx,
             break;
 
         const bool match = DetectEngineContentInspection(de_ctx, det_ctx, s, engine->smd, NULL, f,
-                (uint8_t *)buffer->inspect, buffer->inspect_len, buffer->inspect_offset,
+                buffer->inspect, buffer->inspect_len, buffer->inspect_offset,
                 DETECT_CI_FLAGS_SINGLE, DETECT_ENGINE_CONTENT_INSPECTION_MODE_STATE);
         if (match) {
             return DETECT_ENGINE_INSPECT_SIG_MATCH;
@@ -203,12 +203,10 @@ void DetectMQTTSubscribeTopicRegister (void)
                 subscribe_topic_match_limit);
     }
 
-    DetectAppLayerMpmRegister2("mqtt.subscribe.topic", SIG_FLAG_TOSERVER, 1,
-            PrefilterMpmMQTTSubscribeTopicRegister, NULL,
-            ALPROTO_MQTT, 1);
+    DetectAppLayerMpmRegister("mqtt.subscribe.topic", SIG_FLAG_TOSERVER, 1,
+            PrefilterMpmMQTTSubscribeTopicRegister, NULL, ALPROTO_MQTT, 1);
 
-    DetectAppLayerInspectEngineRegister2("mqtt.subscribe.topic",
-            ALPROTO_MQTT, SIG_FLAG_TOSERVER, 1,
+    DetectAppLayerInspectEngineRegister("mqtt.subscribe.topic", ALPROTO_MQTT, SIG_FLAG_TOSERVER, 1,
             DetectEngineInspectMQTTSubscribeTopic, NULL);
 
     DetectBufferTypeSetDescriptionByName("mqtt.subscribe.topic",

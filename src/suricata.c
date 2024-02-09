@@ -127,6 +127,7 @@
 #include "util-ebpf.h"
 #include "util-exception-policy.h"
 #include "util-host-os-info.h"
+#include "util-hugepages.h"
 #include "util-ioctl.h"
 #include "util-landlock.h"
 #include "util-luajit.h"
@@ -1302,6 +1303,8 @@ static bool IsLogDirectoryWritable(const char* str)
     return false;
 }
 
+extern int g_skip_prefilter;
+
 static TmEcode ParseCommandLine(int argc, char** argv, SCInstance *suri)
 {
     int opt;
@@ -1396,6 +1399,9 @@ static TmEcode ParseCommandLine(int argc, char** argv, SCInstance *suri)
         {"simulate-packet-tcp-ssn-memcap", required_argument, 0, 0},
         {"simulate-packet-defrag-memcap", required_argument, 0, 0},
         {"simulate-alert-queue-realloc-failure", 0, 0, 0},
+
+        {"qa-skip-prefilter", 0, &g_skip_prefilter, 1 },
+
         {"include", required_argument, 0, 0},
 
         {NULL, 0, NULL, 0}
@@ -2968,6 +2974,7 @@ int SuricataMain(int argc, char **argv)
         goto out;
     }
 
+    SystemHugepageSnapshot *prerun_snap = SystemHugepageSnapshotCreate();
     SCSetStartTime(&suricata);
     RunModeDispatch(suricata.run_mode, suricata.runmode_custom_mode,
             suricata.capture_plugin_name, suricata.capture_plugin_args);
@@ -3026,7 +3033,11 @@ int SuricataMain(int argc, char **argv)
 
     PostRunStartedDetectSetup(&suricata);
 
-    DPDKEvaluateHugepages();
+    SystemHugepageSnapshot *postrun_snap = SystemHugepageSnapshotCreate();
+    if (run_mode == RUNMODE_DPDK) // only DPDK uses hpages at the moment
+        SystemHugepageEvaluateHugepages(prerun_snap, postrun_snap);
+    SystemHugepageSnapshotDestroy(prerun_snap);
+    SystemHugepageSnapshotDestroy(postrun_snap);
 
     SCPledge();
     SuricataMainLoop(&suricata);

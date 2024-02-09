@@ -45,6 +45,8 @@
 #include "util-time.h"
 #include "util-validate.h"
 #include "util-conf.h"
+#include "detect-flowbits.h"
+#include "util-var-name.h"
 
 static int rule_warnings_only = 0;
 
@@ -701,10 +703,10 @@ static void DumpContent(JsonBuilder *js, const DetectContentData *cd)
         jb_set_uint(js, "depth", cd->depth);
     }
     if (cd->flags & DETECT_CONTENT_DISTANCE) {
-        jb_set_uint(js, "distance", cd->distance);
+        jb_set_int(js, "distance", cd->distance);
     }
     if (cd->flags & DETECT_CONTENT_WITHIN) {
-        jb_set_uint(js, "within", cd->within);
+        jb_set_int(js, "within", cd->within);
     }
     jb_set_bool(js, "fast_pattern", cd->flags & DETECT_CONTENT_FAST_PATTERN);
     jb_set_bool(js, "relative_next", cd->flags & DETECT_CONTENT_RELATIVE_NEXT);
@@ -777,9 +779,9 @@ static void DumpMatches(RuleAnalyzer *ctx, JsonBuilder *js, const SigMatchData *
 
                 jb_open_object(js, "byte_jump");
                 jb_set_uint(js, "nbytes", cd->nbytes);
-                jb_set_uint(js, "offset", cd->offset);
+                jb_set_int(js, "offset", cd->offset);
                 jb_set_uint(js, "multiplier", cd->multiplier);
-                jb_set_uint(js, "post_offset", cd->post_offset);
+                jb_set_int(js, "post_offset", cd->post_offset);
                 switch (cd->base) {
                     case DETECT_BYTEJUMP_BASE_UNSET:
                         jb_set_string(js, "base", "unset");
@@ -822,7 +824,7 @@ static void DumpMatches(RuleAnalyzer *ctx, JsonBuilder *js, const SigMatchData *
 
                 jb_open_object(js, "byte_test");
                 jb_set_uint(js, "nbytes", cd->nbytes);
-                jb_set_uint(js, "offset", cd->offset);
+                jb_set_int(js, "offset", cd->offset);
                 switch (cd->base) {
                     case DETECT_BYTETEST_BASE_UNSET:
                         jb_set_string(js, "base", "unset");
@@ -859,6 +861,46 @@ static void DumpMatches(RuleAnalyzer *ctx, JsonBuilder *js, const SigMatchData *
                 const char *flag = IpOptsFlagToString(cd->ipopt);
                 jb_set_string(js, "option", flag);
                 jb_close(js);
+                break;
+            }
+            case DETECT_FLOWBITS: {
+                const DetectFlowbitsData *cd = (const DetectFlowbitsData *)smd->ctx;
+
+                jb_open_object(js, "flowbits");
+                switch (cd->cmd) {
+                    case DETECT_FLOWBITS_CMD_ISSET:
+                        jb_set_string(js, "cmd", "isset");
+                        break;
+                    case DETECT_FLOWBITS_CMD_ISNOTSET:
+                        jb_set_string(js, "cmd", "isnotset");
+                        break;
+                    case DETECT_FLOWBITS_CMD_SET:
+                        jb_set_string(js, "cmd", "set");
+                        break;
+                    case DETECT_FLOWBITS_CMD_UNSET:
+                        jb_set_string(js, "cmd", "unset");
+                        break;
+                    case DETECT_FLOWBITS_CMD_TOGGLE:
+                        jb_set_string(js, "cmd", "toggle");
+                        break;
+                }
+                bool is_or = false;
+                jb_open_array(js, "names");
+                if (cd->or_list_size == 0) {
+                    jb_append_string(js, VarNameStoreSetupLookup(cd->idx, VAR_TYPE_FLOW_BIT));
+                } else if (cd->or_list_size > 0) {
+                    is_or = true;
+                    for (uint8_t i = 0; i < cd->or_list_size; i++) {
+                        const char *varname =
+                                VarNameStoreSetupLookup(cd->or_list[i], VAR_TYPE_FLOW_BIT);
+                        jb_append_string(js, varname);
+                    }
+                }
+                jb_close(js); // array
+                if (is_or) {
+                    jb_set_string(js, "operator", "or");
+                }
+                jb_close(js); // object
                 break;
             }
         }
@@ -906,9 +948,6 @@ void EngineAnalysisRules2(const DetectEngineCtx *de_ctx, const Signature *s)
     }
     if (s->mask & SIG_MASK_REQUIRE_FLAGS_UNUSUAL) {
         jb_append_string(ctx.js, "tcp_flags_unusual");
-    }
-    if (s->mask & SIG_MASK_REQUIRE_DCERPC) {
-        jb_append_string(ctx.js, "dcerpc");
     }
     if (s->mask & SIG_MASK_REQUIRE_ENGINE_EVENT) {
         jb_append_string(ctx.js, "engine_event");

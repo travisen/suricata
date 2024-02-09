@@ -7,6 +7,7 @@ Suricata Rules
    meta
    header-keywords
    payload-keywords
+   integer-keywords
    transforms
    prefilter-keywords
    flow-keywords
@@ -33,6 +34,8 @@ Suricata Rules
    ike-keywords
    http2-keywords
    quic-keywords
+   nfs-keywords
+   smtp-keywords
    app-layer
    xbits
    thresholding

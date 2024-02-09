@@ -78,8 +78,6 @@ fn log_request(req: &PgsqlFEMessage, flags: u32) -> Result<JsonBuilder, JsonErro
         }) => {
             if flags & PGSQL_LOG_PASSWORDS != 0 {
                 js.set_string_from_bytes("password", payload)?;
-            } else {
-                js.set_string(req.to_str(), "password log disabled")?;
             }
         }
         PgsqlFEMessage::SASLResponse(RegularPacket {
@@ -95,6 +93,14 @@ fn log_request(req: &PgsqlFEMessage, flags: u32) -> Result<JsonBuilder, JsonErro
             payload,
         }) => {
             js.set_string_from_bytes(req.to_str(), payload)?;
+        }
+        PgsqlFEMessage::CancelRequest(CancelRequestMessage {
+            pid,
+            backend_key,
+        }) => {
+            js.set_string("message", "cancel_request")?;
+            js.set_uint("process_id", (*pid).into())?;
+            js.set_uint("secret_key", (*backend_key).into())?;
         }
         PgsqlFEMessage::Terminate(TerminationMessage {
             identifier: _,
@@ -228,11 +234,10 @@ fn log_response(res: &PgsqlBEMessage, jb: &mut JsonBuilder) -> Result<(), JsonEr
         }
         PgsqlBEMessage::ConsolidatedDataRow(ConsolidatedDataRowPacket {
             identifier: _,
-            length: _,
             row_cnt,
             data_size,
         }) => {
-            jb.set_uint("data_rows", (*row_cnt).into())?;
+            jb.set_uint("data_rows", *row_cnt)?;
             jb.set_uint("data_size", *data_size)?;
         }
         PgsqlBEMessage::NotificationResponse(NotificationResponse {

@@ -43,10 +43,14 @@
 #include "detect-engine-threshold.h"
 #include "detect-engine-prefilter.h"
 
+#include "rust.h"
+
 #include "detect-engine-payload.h"
 #include "detect-engine-dcepayload.h"
 #include "detect-dns-opcode.h"
 #include "detect-dns-query.h"
+#include "detect-dns-answer-name.h"
+#include "detect-dns-query-name.h"
 #include "detect-tls-sni.h"
 #include "detect-tls-certs.h"
 #include "detect-tls-cert-fingerprint.h"
@@ -76,6 +80,7 @@
 #include "detect-config.h"
 
 #include "detect-smb-share.h"
+#include "detect-smb-version.h"
 
 #include "detect-base64-decode.h"
 #include "detect-base64-data.h"
@@ -115,6 +120,7 @@
 #include "detect-flow.h"
 #include "detect-flow-age.h"
 #include "detect-flow-pkts.h"
+#include "detect-requires.h"
 #include "detect-tcp-window.h"
 #include "detect-ftpbounce.h"
 #include "detect-isdataat.h"
@@ -239,6 +245,7 @@
 
 #include "detect-transform-compress-whitespace.h"
 #include "detect-transform-strip-whitespace.h"
+#include "detect-transform-strip-pseudo-headers.h"
 #include "detect-transform-md5.h"
 #include "detect-transform-sha1.h"
 #include "detect-transform-sha256.h"
@@ -515,6 +522,8 @@ void SigTableSetup(void)
 
     DetectDnsQueryRegister();
     DetectDnsOpcodeRegister();
+    DetectDnsAnswerNameRegister();
+    DetectDnsQueryNameRegister();
     DetectModbusRegister();
     DetectCipServiceRegister();
     DetectEnipCommandRegister();
@@ -569,6 +578,7 @@ void SigTableSetup(void)
     DetectFlowPktsToServerRegister();
     DetectFlowBytesToClientRegister();
     DetectFlowBytesToServerRegister();
+    DetectRequiresRegister();
     DetectWindowRegister();
     DetectRpcRegister();
     DetectFtpbounceRegister();
@@ -609,6 +619,7 @@ void SigTableSetup(void)
     DetectSmbShareRegister();
     DetectSmbNtlmsspUserRegister();
     DetectSmbNtlmsspDomainRegister();
+    DetectSmbVersionRegister();
     DetectTlsRegister();
     DetectTlsValidityRegister();
     DetectTlsVersionRegister();
@@ -698,6 +709,7 @@ void SigTableSetup(void)
 
     DetectTransformCompressWhitespaceRegister();
     DetectTransformStripWhitespaceRegister();
+    DetectTransformStripPseudoHeadersRegister();
     DetectTransformMd5Register();
     DetectTransformSha1Register();
     DetectTransformSha256Register();

@@ -112,6 +112,8 @@
 #define SMTP_EHLO_EXTENSION_STARTTLS
 #define SMTP_EHLO_EXTENSION_8BITMIME
 
+#define SMTP_DEFAULT_MAX_TX 256
+
 typedef struct SMTPInput_ {
     /* current input that is being parsed */
     const uint8_t *buf;
@@ -421,6 +423,18 @@ static void SMTPConfigure(void) {
         smtp_config.raw_extraction = 0;
     }
 
+    uint64_t value = SMTP_DEFAULT_MAX_TX;
+    smtp_config.max_tx = SMTP_DEFAULT_MAX_TX;
+    const char *str = NULL;
+    if (ConfGet("app-layer.protocols.smtp.max-tx", &str) == 1) {
+        if (ParseSizeStringU64(str, &value) < 0) {
+            SCLogWarning("max-tx value cannot be deduced: %s,"
+                         " keeping default",
+                    str);
+        }
+        smtp_config.max_tx = value;
+    }
+
     SCReturn;
 }
 
@@ -436,8 +450,11 @@ static void SMTPSetEvent(SMTPState *s, uint8_t e)
     SCLogDebug("couldn't set event %u", e);
 }
 
-static SMTPTransaction *SMTPTransactionCreate(void)
+static SMTPTransaction *SMTPTransactionCreate(SMTPState *state)
 {
+    if (state->tx_cnt > smtp_config.max_tx) {
+        return NULL;
+    }
     SMTPTransaction *tx = SCCalloc(1, sizeof(*tx));
     if (tx == NULL) {
         return NULL;
@@ -802,7 +819,7 @@ static inline void SMTPTransactionComplete(SMTPState *state)
 {
     DEBUG_VALIDATE_BUG_ON(state->curr_tx == NULL);
     if (state->curr_tx)
-        state->curr_tx->done = 1;
+        state->curr_tx->done = true;
 }
 
 /**
@@ -1170,7 +1187,7 @@ static int SMTPProcessRequest(SMTPState *state, Flow *f, AppLayerParserState *ps
         return 0;
     }
     if (state->curr_tx == NULL || (state->curr_tx->done && !NoNewTx(state, line))) {
-        tx = SMTPTransactionCreate();
+        tx = SMTPTransactionCreate(state);
         if (tx == NULL)
             return -1;
         state->curr_tx = tx;
@@ -1198,36 +1215,19 @@ static int SMTPProcessRequest(SMTPState *state, Flow *f, AppLayerParserState *ps
             state->current_command = SMTP_COMMAND_STARTTLS;
         } else if (line->len >= 4 && SCMemcmpLowercase("data", line->buf, 4) == 0) {
             state->current_command = SMTP_COMMAND_DATA;
-            if (smtp_config.raw_extraction) {
-                if (state->tx_cnt > 1 && !state->curr_tx->done) {
-                    // we did not close the previous tx, set error
-                    SMTPSetEvent(state, SMTP_DECODER_EVENT_UNPARSABLE_CONTENT);
-                    FileCloseFile(&tx->files_ts, &smtp_config.sbcfg, NULL, 0, FILE_TRUNCATED);
-                    tx = SMTPTransactionCreate();
-                    if (tx == NULL)
-                        return -1;
-                    state->curr_tx = tx;
-                    TAILQ_INSERT_TAIL(&state->tx_list, tx, next);
-                    tx->tx_id = state->tx_cnt++;
-                }
+            if (state->curr_tx->is_data) {
+                // We did not receive a confirmation from server
+                // And now client sends a next DATA
+                SMTPSetEvent(state, SMTP_DECODER_EVENT_UNPARSABLE_CONTENT);
+                SCReturnInt(0);
+            } else if (smtp_config.raw_extraction) {
                 if (FileOpenFileWithId(&tx->files_ts, &smtp_config.sbcfg, state->file_track_id++,
                             (uint8_t *)rawmsgname, strlen(rawmsgname), NULL, 0,
                             FILE_NOMD5 | FILE_NOMAGIC) == 0) {
                     SMTPNewFile(tx, tx->files_ts.tail);
                 }
             } else if (smtp_config.decode_mime) {
-                if (tx->mime_state) {
-                    /* We have 2 chained mails and did not detect the end
-                     * of first one. So we start a new transaction. */
-                    tx->mime_state->state_flag = PARSE_ERROR;
-                    SMTPSetEvent(state, SMTP_DECODER_EVENT_UNPARSABLE_CONTENT);
-                    tx = SMTPTransactionCreate();
-                    if (tx == NULL)
-                        return -1;
-                    state->curr_tx = tx;
-                    TAILQ_INSERT_TAIL(&state->tx_list, tx, next);
-                    tx->tx_id = state->tx_cnt++;
-                }
+                DEBUG_VALIDATE_BUG_ON(tx->mime_state);
                 tx->mime_state = MimeDecInitParser(f, SMTPProcessDataChunk);
                 if (tx->mime_state == NULL) {
                     return MIME_DEC_ERR_MEM;
@@ -1243,6 +1243,7 @@ static int SMTPProcessRequest(SMTPState *state, Flow *f, AppLayerParserState *ps
                     tx->msg_tail = tx->mime_state->msg;
                 }
             }
+            state->curr_tx->is_data = true;
             /* Enter immediately data mode without waiting for server reply */
             if (state->parser_state & SMTP_PARSER_STATE_PIPELINING_SERVER) {
                 state->parser_state |= SMTP_PARSER_STATE_COMMAND_DATA_MODE;
@@ -1931,6 +1932,8 @@ static void SMTPTestInitConfig(void)
     smtp_config.content_limit = FILEDATA_CONTENT_LIMIT;
     smtp_config.content_inspect_window = FILEDATA_CONTENT_INSPECT_WINDOW;
     smtp_config.content_inspect_min_size = FILEDATA_CONTENT_INSPECT_MIN_SIZE;
+
+    smtp_config.max_tx = SMTP_DEFAULT_MAX_TX;
 
     smtp_config.sbcfg.buf_size = FILEDATA_CONTENT_INSPECT_WINDOW;
 }

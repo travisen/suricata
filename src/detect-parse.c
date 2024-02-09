@@ -107,18 +107,16 @@ void DetectFileRegisterFileProtocols(DetectFileHandlerTableElmt *reg)
                                 : al_protocols[i].direction;
 
         if (direction & SIG_FLAG_TOCLIENT) {
-            DetectAppLayerMpmRegister2(reg->name, SIG_FLAG_TOCLIENT, reg->priority,
-                    reg->PrefilterFn, reg->GetData, al_protocols[i].al_proto,
-                    al_protocols[i].to_client_progress);
-            DetectAppLayerInspectEngineRegister2(reg->name, al_protocols[i].al_proto,
+            DetectAppLayerMpmRegister(reg->name, SIG_FLAG_TOCLIENT, reg->priority, reg->PrefilterFn,
+                    reg->GetData, al_protocols[i].al_proto, al_protocols[i].to_client_progress);
+            DetectAppLayerInspectEngineRegister(reg->name, al_protocols[i].al_proto,
                     SIG_FLAG_TOCLIENT, al_protocols[i].to_client_progress, reg->Callback,
                     reg->GetData);
         }
         if (direction & SIG_FLAG_TOSERVER) {
-            DetectAppLayerMpmRegister2(reg->name, SIG_FLAG_TOSERVER, reg->priority,
-                    reg->PrefilterFn, reg->GetData, al_protocols[i].al_proto,
-                    al_protocols[i].to_server_progress);
-            DetectAppLayerInspectEngineRegister2(reg->name, al_protocols[i].al_proto,
+            DetectAppLayerMpmRegister(reg->name, SIG_FLAG_TOSERVER, reg->priority, reg->PrefilterFn,
+                    reg->GetData, al_protocols[i].al_proto, al_protocols[i].to_server_progress);
+            DetectAppLayerInspectEngineRegister(reg->name, al_protocols[i].al_proto,
                     SIG_FLAG_TOSERVER, al_protocols[i].to_server_progress, reg->Callback,
                     reg->GetData);
         }
@@ -847,7 +845,8 @@ int SigMatchListSMBelongsTo(const Signature *s, const SigMatch *key_sm)
     return -1;
 }
 
-static int SigParseOptions(DetectEngineCtx *de_ctx, Signature *s, char *optstr, char *output, size_t output_size)
+static int SigParseOptions(DetectEngineCtx *de_ctx, Signature *s, char *optstr, char *output,
+        size_t output_size, bool requires)
 {
     SigTableElmt *st = NULL;
     char *optname = NULL;
@@ -900,6 +899,13 @@ static int SigParseOptions(DetectEngineCtx *de_ctx, Signature *s, char *optstr, 
         }
     }
     optname = optstr;
+
+    /* Check for options that are only to be processed during the
+     * first "requires" pass. */
+    bool requires_only = strcasecmp(optname, "requires") == 0 || strcasecmp(optname, "sid") == 0;
+    if ((requires && !requires_only) || (!requires && requires_only)) {
+        goto finish;
+    }
 
     /* Call option parsing */
     st = SigTableGet(optname);
@@ -1040,6 +1046,7 @@ static int SigParseOptions(DetectEngineCtx *de_ctx, Signature *s, char *optstr, 
     }
     s->init_data->negated = false;
 
+finish:
     if (strlen(optend) > 0) {
         strlcpy(output, optend, output_size);
         return 1;
@@ -1325,9 +1332,11 @@ static inline int SigParseList(char **input, char *output,
 /**
  *  \internal
  *  \brief split a signature string into a few blocks for further parsing
+ *
+ *  \param scan_only just scan, don't validate
  */
-static int SigParseBasics(DetectEngineCtx *de_ctx,
-        Signature *s, const char *sigstr, SignatureParser *parser, uint8_t addrs_direction)
+static int SigParseBasics(DetectEngineCtx *de_ctx, Signature *s, const char *sigstr,
+        SignatureParser *parser, uint8_t addrs_direction, bool scan_only)
 {
     char *index, dup[DETECT_MAX_RULE_SIZE];
 
@@ -1371,6 +1380,10 @@ static int SigParseBasics(DetectEngineCtx *de_ctx,
         }
     }
     strlcpy(parser->opts, index, sizeof(parser->opts));
+
+    if (scan_only) {
+        return 0;
+    }
 
     /* Parse Action */
     if (SigParseAction(s, parser->action) < 0)
@@ -1433,12 +1446,13 @@ static inline bool CheckAscii(const char *str)
  *  \param s memory structure to store the signature in
  *  \param sigstr the raw signature as a null terminated string
  *  \param addrs_direction direction (for bi-directional sigs)
+ *  \param require only scan rule for requires
  *
  *  \param -1 parse error
  *  \param 0 ok
  */
-static int SigParse(DetectEngineCtx *de_ctx, Signature *s,
-        const char *sigstr, uint8_t addrs_direction, SignatureParser *parser)
+static int SigParse(DetectEngineCtx *de_ctx, Signature *s, const char *sigstr,
+        uint8_t addrs_direction, SignatureParser *parser, bool requires)
 {
     SCEnter();
 
@@ -1452,12 +1466,7 @@ static int SigParse(DetectEngineCtx *de_ctx, Signature *s,
         SCReturnInt(-1);
     }
 
-    s->sig_str = SCStrdup(sigstr);
-    if (unlikely(s->sig_str == NULL)) {
-        SCReturnInt(-1);
-    }
-
-    int ret = SigParseBasics(de_ctx, s, sigstr, parser, addrs_direction);
+    int ret = SigParseBasics(de_ctx, s, sigstr, parser, addrs_direction, requires);
     if (ret < 0) {
         SCLogDebug("SigParseBasics failed");
         SCReturnInt(-1);
@@ -1469,21 +1478,27 @@ static int SigParse(DetectEngineCtx *de_ctx, Signature *s,
         char input[buffer_size];
         char output[buffer_size];
         memset(input, 0x00, buffer_size);
-        memcpy(input, parser->opts, strlen(parser->opts)+1);
+        memcpy(input, parser->opts, strlen(parser->opts) + 1);
 
         /* loop the option parsing. Each run processes one option
          * and returns the rest of the option string through the
          * output variable. */
         do {
             memset(output, 0x00, buffer_size);
-            ret = SigParseOptions(de_ctx, s, input, output, buffer_size);
+            ret = SigParseOptions(de_ctx, s, input, output, buffer_size, requires);
             if (ret == 1) {
                 memcpy(input, output, buffer_size);
             }
 
         } while (ret == 1);
+
+        if (ret < 0) {
+            /* Suricata didn't meet the rule requirements, skip. */
+            goto end;
+        }
     }
 
+end:
     DetectIPProtoRemoveAllSMs(de_ctx, s);
 
     SCReturnInt(ret);
@@ -1771,6 +1786,64 @@ int DetectSignatureSetAppProto(Signature *s, AppProto alproto)
     return 0;
 }
 
+static DetectMatchAddressIPv4 *SigBuildAddressMatchArrayIPv4(
+        const DetectAddress *head, uint16_t *match4_cnt)
+{
+    uint16_t cnt = 0;
+
+    for (const DetectAddress *da = head; da != NULL; da = da->next) {
+        cnt++;
+    }
+    if (cnt == 0) {
+        return NULL;
+    }
+    DetectMatchAddressIPv4 *addr_match4 = SCCalloc(cnt, sizeof(DetectMatchAddressIPv4));
+    if (addr_match4 == NULL) {
+        exit(EXIT_FAILURE);
+    }
+
+    uint16_t idx = 0;
+    for (const DetectAddress *da = head; da != NULL; da = da->next) {
+        addr_match4[idx].ip = SCNtohl(da->ip.addr_data32[0]);
+        addr_match4[idx].ip2 = SCNtohl(da->ip2.addr_data32[0]);
+        idx++;
+    }
+    *match4_cnt = cnt;
+    return addr_match4;
+}
+
+static DetectMatchAddressIPv6 *SigBuildAddressMatchArrayIPv6(
+        const DetectAddress *head, uint16_t *match6_cnt)
+{
+    uint16_t cnt = 0;
+    for (const DetectAddress *da = head; da != NULL; da = da->next) {
+        cnt++;
+    }
+    if (cnt == 0) {
+        return NULL;
+    }
+
+    DetectMatchAddressIPv6 *addr_match6 = SCCalloc(cnt, sizeof(DetectMatchAddressIPv6));
+    if (addr_match6 == NULL) {
+        exit(EXIT_FAILURE);
+    }
+
+    uint16_t idx = 0;
+    for (const DetectAddress *da = head; da != NULL; da = da->next) {
+        addr_match6[idx].ip[0] = SCNtohl(da->ip.addr_data32[0]);
+        addr_match6[idx].ip[1] = SCNtohl(da->ip.addr_data32[1]);
+        addr_match6[idx].ip[2] = SCNtohl(da->ip.addr_data32[2]);
+        addr_match6[idx].ip[3] = SCNtohl(da->ip.addr_data32[3]);
+        addr_match6[idx].ip2[0] = SCNtohl(da->ip2.addr_data32[0]);
+        addr_match6[idx].ip2[1] = SCNtohl(da->ip2.addr_data32[1]);
+        addr_match6[idx].ip2[2] = SCNtohl(da->ip2.addr_data32[2]);
+        addr_match6[idx].ip2[3] = SCNtohl(da->ip2.addr_data32[3]);
+        idx++;
+    }
+    *match6_cnt = cnt;
+    return addr_match6;
+}
+
 /**
  *  \internal
  *  \brief build address match array for cache efficient matching
@@ -1780,100 +1853,18 @@ int DetectSignatureSetAppProto(Signature *s, AppProto alproto)
 static void SigBuildAddressMatchArray(Signature *s)
 {
     /* source addresses */
-    uint16_t cnt = 0;
-    uint16_t idx = 0;
-    DetectAddress *da = s->init_data->src->ipv4_head;
-    for ( ; da != NULL; da = da->next) {
-        cnt++;
-    }
-    if (cnt > 0) {
-        s->addr_src_match4 = SCMalloc(cnt * sizeof(DetectMatchAddressIPv4));
-        if (s->addr_src_match4 == NULL) {
-            exit(EXIT_FAILURE);
-        }
-
-        for (da = s->init_data->src->ipv4_head; da != NULL; da = da->next) {
-            s->addr_src_match4[idx].ip = SCNtohl(da->ip.addr_data32[0]);
-            s->addr_src_match4[idx].ip2 = SCNtohl(da->ip2.addr_data32[0]);
-            idx++;
-        }
-        s->addr_src_match4_cnt = cnt;
-    }
-
+    s->addr_src_match4 =
+            SigBuildAddressMatchArrayIPv4(s->init_data->src->ipv4_head, &s->addr_src_match4_cnt);
     /* destination addresses */
-    cnt = 0;
-    idx = 0;
-    da = s->init_data->dst->ipv4_head;
-    for ( ; da != NULL; da = da->next) {
-        cnt++;
-    }
-    if (cnt > 0) {
-        s->addr_dst_match4 = SCMalloc(cnt * sizeof(DetectMatchAddressIPv4));
-        if (s->addr_dst_match4 == NULL) {
-            exit(EXIT_FAILURE);
-        }
-
-        for (da = s->init_data->dst->ipv4_head; da != NULL; da = da->next) {
-            s->addr_dst_match4[idx].ip = SCNtohl(da->ip.addr_data32[0]);
-            s->addr_dst_match4[idx].ip2 = SCNtohl(da->ip2.addr_data32[0]);
-            idx++;
-        }
-        s->addr_dst_match4_cnt = cnt;
-    }
+    s->addr_dst_match4 =
+            SigBuildAddressMatchArrayIPv4(s->init_data->dst->ipv4_head, &s->addr_dst_match4_cnt);
 
     /* source addresses IPv6 */
-    cnt = 0;
-    idx = 0;
-    da = s->init_data->src->ipv6_head;
-    for ( ; da != NULL; da = da->next) {
-        cnt++;
-    }
-    if (cnt > 0) {
-        s->addr_src_match6 = SCMalloc(cnt * sizeof(DetectMatchAddressIPv6));
-        if (s->addr_src_match6 == NULL) {
-            exit(EXIT_FAILURE);
-        }
-
-        for (da = s->init_data->src->ipv6_head; da != NULL; da = da->next) {
-            s->addr_src_match6[idx].ip[0] = SCNtohl(da->ip.addr_data32[0]);
-            s->addr_src_match6[idx].ip[1] = SCNtohl(da->ip.addr_data32[1]);
-            s->addr_src_match6[idx].ip[2] = SCNtohl(da->ip.addr_data32[2]);
-            s->addr_src_match6[idx].ip[3] = SCNtohl(da->ip.addr_data32[3]);
-            s->addr_src_match6[idx].ip2[0] = SCNtohl(da->ip2.addr_data32[0]);
-            s->addr_src_match6[idx].ip2[1] = SCNtohl(da->ip2.addr_data32[1]);
-            s->addr_src_match6[idx].ip2[2] = SCNtohl(da->ip2.addr_data32[2]);
-            s->addr_src_match6[idx].ip2[3] = SCNtohl(da->ip2.addr_data32[3]);
-            idx++;
-        }
-        s->addr_src_match6_cnt = cnt;
-    }
-
+    s->addr_src_match6 =
+            SigBuildAddressMatchArrayIPv6(s->init_data->src->ipv6_head, &s->addr_src_match6_cnt);
     /* destination addresses IPv6 */
-    cnt = 0;
-    idx = 0;
-    da = s->init_data->dst->ipv6_head;
-    for ( ; da != NULL; da = da->next) {
-        cnt++;
-    }
-    if (cnt > 0) {
-        s->addr_dst_match6 = SCMalloc(cnt * sizeof(DetectMatchAddressIPv6));
-        if (s->addr_dst_match6 == NULL) {
-            exit(EXIT_FAILURE);
-        }
-
-        for (da = s->init_data->dst->ipv6_head; da != NULL; da = da->next) {
-            s->addr_dst_match6[idx].ip[0] = SCNtohl(da->ip.addr_data32[0]);
-            s->addr_dst_match6[idx].ip[1] = SCNtohl(da->ip.addr_data32[1]);
-            s->addr_dst_match6[idx].ip[2] = SCNtohl(da->ip.addr_data32[2]);
-            s->addr_dst_match6[idx].ip[3] = SCNtohl(da->ip.addr_data32[3]);
-            s->addr_dst_match6[idx].ip2[0] = SCNtohl(da->ip2.addr_data32[0]);
-            s->addr_dst_match6[idx].ip2[1] = SCNtohl(da->ip2.addr_data32[1]);
-            s->addr_dst_match6[idx].ip2[2] = SCNtohl(da->ip2.addr_data32[2]);
-            s->addr_dst_match6[idx].ip2[3] = SCNtohl(da->ip2.addr_data32[3]);
-            idx++;
-        }
-        s->addr_dst_match6_cnt = cnt;
-    }
+    s->addr_dst_match6 =
+            SigBuildAddressMatchArrayIPv6(s->init_data->dst->ipv6_head, &s->addr_dst_match6_cnt);
 }
 
 static int SigMatchListLen(SigMatch *sm)
@@ -2123,10 +2114,7 @@ static int SigValidate(DetectEngineCtx *de_ctx, Signature *s)
             AppLayerHtpNeedFileInspection();
         }
     }
-    if (s->id == 0) {
-        SCLogError("Signature missing required value \"sid\".");
-        SCReturnInt(0);
-    }
+
     SCReturnInt(1);
 }
 
@@ -2144,16 +2132,43 @@ static Signature *SigInitHelper(DetectEngineCtx *de_ctx, const char *sigstr,
     if (sig == NULL)
         goto error;
 
+    sig->sig_str = SCStrdup(sigstr);
+    if (unlikely(sig->sig_str == NULL)) {
+        goto error;
+    }
+
     /* default gid to 1 */
     sig->gid = 1;
 
-    int ret = SigParse(de_ctx, sig, sigstr, dir, &parser);
+    /* We do a first parse of the rule in a requires, or scan-only
+     * mode. Syntactic errors will be picked up here, but the only
+     * part of the rule that is validated completely is the "requires"
+     * keyword. */
+    int ret = SigParse(de_ctx, sig, sigstr, dir, &parser, true);
+    if (ret == -4) {
+        /* Rule requirements not met. */
+        de_ctx->sigerror_silent = true;
+        de_ctx->sigerror_ok = true;
+        de_ctx->sigerror_requires = true;
+        goto error;
+    } else if (ret < 0) {
+        goto error;
+    }
+
+    /* Check for a SID before continuuing. */
+    if (sig->id == 0) {
+        SCLogError("Signature missing required value \"sid\".");
+        goto error;
+    }
+
+    /* Now completely parse the rule. */
+    ret = SigParse(de_ctx, sig, sigstr, dir, &parser, false);
+    BUG_ON(ret == -4);
     if (ret == -3) {
         de_ctx->sigerror_silent = true;
         de_ctx->sigerror_ok = true;
         goto error;
-    }
-    else if (ret == -2) {
+    } else if (ret == -2) {
         de_ctx->sigerror_silent = true;
         goto error;
     } else if (ret < 0) {
@@ -2300,7 +2315,9 @@ Signature *SigInit(DetectEngineCtx *de_ctx, const char *sigstr)
     SCEnter();
 
     uint32_t oldsignum = de_ctx->signum;
+    de_ctx->sigerror_ok = false;
     de_ctx->sigerror_silent = false;
+    de_ctx->sigerror_requires = false;
 
     Signature *sig;
 
@@ -2671,9 +2688,6 @@ void DetectParseFreeRegex(DetectParseRegex *r)
     if (r->context) {
         pcre2_match_context_free(r->context);
     }
-    if (r->match) {
-        pcre2_match_data_free(r->match);
-    }
 }
 
 void DetectParseFreeRegexes(void)
@@ -2699,7 +2713,6 @@ void DetectParseRegexAddToFreeList(DetectParseRegex *detect_parse)
         FatalError("failed to alloc memory for pcre free list");
     }
     r->regex = detect_parse->regex;
-    r->match = detect_parse->match;
     r->next = g_detect_parse_regex_list;
     g_detect_parse_regex_list = r;
 }
@@ -2719,8 +2732,6 @@ bool DetectSetupParseRegexesOpts(const char *parse_str, DetectParseRegex *detect
                 parse_str, en, errbuffer);
         return false;
     }
-    detect_parse->match = pcre2_match_data_create_from_pattern(detect_parse->regex, NULL);
-
     DetectParseRegexAddToFreeList(detect_parse);
 
     return true;
@@ -2746,7 +2757,6 @@ DetectParseRegex *DetectSetupPCRE2(const char *parse_str, int opts)
         SCFree(detect_parse);
         return NULL;
     }
-    detect_parse->match = pcre2_match_data_create_from_pattern(detect_parse->regex, NULL);
 
     detect_parse->next = g_detect_parse_regex_list;
     g_detect_parse_regex_list = detect_parse;

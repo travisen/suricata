@@ -93,19 +93,17 @@ void DetectTlsCertsRegister(void)
     sigmatch_table[DETECT_AL_TLS_CERTS].flags |= SIGMATCH_NOOPT;
     sigmatch_table[DETECT_AL_TLS_CERTS].flags |= SIGMATCH_INFO_STICKY_BUFFER;
 
-    DetectAppLayerInspectEngineRegister2("tls.certs", ALPROTO_TLS,
-            SIG_FLAG_TOCLIENT, TLS_STATE_CERT_READY,
-            DetectEngineInspectTlsCerts, NULL);
-
-    DetectAppLayerMpmRegister2("tls.certs", SIG_FLAG_TOCLIENT, 2,
-            PrefilterMpmTlsCertsRegister, NULL, ALPROTO_TLS,
-            TLS_STATE_CERT_READY);
-
-    DetectAppLayerInspectEngineRegister2("tls.certs", ALPROTO_TLS, SIG_FLAG_TOSERVER,
+    DetectAppLayerInspectEngineRegister("tls.certs", ALPROTO_TLS, SIG_FLAG_TOCLIENT,
             TLS_STATE_CERT_READY, DetectEngineInspectTlsCerts, NULL);
 
-    DetectAppLayerMpmRegister2("tls.certs", SIG_FLAG_TOSERVER, 2, PrefilterMpmTlsCertsRegister,
-            NULL, ALPROTO_TLS, TLS_STATE_CERT_READY);
+    DetectAppLayerMpmRegister("tls.certs", SIG_FLAG_TOCLIENT, 2, PrefilterMpmTlsCertsRegister, NULL,
+            ALPROTO_TLS, TLS_STATE_CERT_READY);
+
+    DetectAppLayerInspectEngineRegister("tls.certs", ALPROTO_TLS, SIG_FLAG_TOSERVER,
+            TLS_STATE_CERT_READY, DetectEngineInspectTlsCerts, NULL);
+
+    DetectAppLayerMpmRegister("tls.certs", SIG_FLAG_TOSERVER, 2, PrefilterMpmTlsCertsRegister, NULL,
+            ALPROTO_TLS, TLS_STATE_CERT_READY);
 
     DetectBufferTypeSetDescriptionByName("tls.certs", "TLS certificate");
 
@@ -195,7 +193,7 @@ static uint8_t DetectEngineInspectTlsCerts(DetectEngineCtx *de_ctx, DetectEngine
             break;
 
         const bool match = DetectEngineContentInspection(de_ctx, det_ctx, s, engine->smd, NULL, f,
-                (uint8_t *)buffer->inspect, buffer->inspect_len, buffer->inspect_offset,
+                buffer->inspect, buffer->inspect_len, buffer->inspect_offset,
                 DETECT_CI_FLAGS_SINGLE, DETECT_ENGINE_CONTENT_INSPECTION_MODE_STATE);
         if (match) {
             return DETECT_ENGINE_INSPECT_SIG_MATCH;
@@ -352,7 +350,7 @@ void DetectTlsCertChainLenRegister(void)
     sigmatch_table[KEYWORD_ID].Setup = DetectTLSCertChainLenSetup;
     sigmatch_table[KEYWORD_ID].Free = DetectTLSCertChainLenFree;
 
-    DetectAppLayerInspectEngineRegister2(BUFFER_NAME, ALPROTO_TLS, SIG_FLAG_TOCLIENT,
+    DetectAppLayerInspectEngineRegister(BUFFER_NAME, ALPROTO_TLS, SIG_FLAG_TOCLIENT,
             TLS_STATE_CERT_READY, DetectEngineInspectGenericList, NULL);
 
     g_tls_cert_buffer_id = DetectBufferTypeGetByName(BUFFER_NAME);

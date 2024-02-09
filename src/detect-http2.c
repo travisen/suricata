@@ -177,26 +177,22 @@ void DetectHttp2Register(void)
     sigmatch_table[DETECT_HTTP2_HEADERNAME].Setup = DetectHTTP2headerNameSetup;
     sigmatch_table[DETECT_HTTP2_HEADERNAME].flags |= SIGMATCH_NOOPT | SIGMATCH_INFO_STICKY_BUFFER;
 
-    DetectAppLayerMpmRegister2("http2_header_name", SIG_FLAG_TOCLIENT, 2,
-                               PrefilterMpmHttp2HeaderNameRegister, NULL,
-                               ALPROTO_HTTP2, HTTP2StateOpen);
-    DetectAppLayerInspectEngineRegister2("http2_header_name",
-                                         ALPROTO_HTTP2, SIG_FLAG_TOCLIENT, HTTP2StateOpen,
-                                         DetectEngineInspectHttp2HeaderName, NULL);
-    DetectAppLayerMpmRegister2("http2_header_name", SIG_FLAG_TOSERVER, 2,
-                               PrefilterMpmHttp2HeaderNameRegister, NULL,
-                               ALPROTO_HTTP2, HTTP2StateOpen);
-    DetectAppLayerInspectEngineRegister2("http2_header_name",
-                                         ALPROTO_HTTP2, SIG_FLAG_TOSERVER, HTTP2StateOpen,
-                                         DetectEngineInspectHttp2HeaderName, NULL);
+    DetectAppLayerMpmRegister("http2_header_name", SIG_FLAG_TOCLIENT, 2,
+            PrefilterMpmHttp2HeaderNameRegister, NULL, ALPROTO_HTTP2, HTTP2StateOpen);
+    DetectAppLayerInspectEngineRegister("http2_header_name", ALPROTO_HTTP2, SIG_FLAG_TOCLIENT,
+            HTTP2StateOpen, DetectEngineInspectHttp2HeaderName, NULL);
+    DetectAppLayerMpmRegister("http2_header_name", SIG_FLAG_TOSERVER, 2,
+            PrefilterMpmHttp2HeaderNameRegister, NULL, ALPROTO_HTTP2, HTTP2StateOpen);
+    DetectAppLayerInspectEngineRegister("http2_header_name", ALPROTO_HTTP2, SIG_FLAG_TOSERVER,
+            HTTP2StateOpen, DetectEngineInspectHttp2HeaderName, NULL);
     DetectBufferTypeSupportsMultiInstance("http2_header_name");
     DetectBufferTypeSetDescriptionByName("http2_header_name",
                                          "HTTP2 header name");
     g_http2_header_name_buffer_id = DetectBufferTypeGetByName("http2_header_name");
 
-    DetectAppLayerInspectEngineRegister2(
+    DetectAppLayerInspectEngineRegister(
             "http2", ALPROTO_HTTP2, SIG_FLAG_TOSERVER, 0, DetectEngineInspectGenericList, NULL);
-    DetectAppLayerInspectEngineRegister2(
+    DetectAppLayerInspectEngineRegister(
             "http2", ALPROTO_HTTP2, SIG_FLAG_TOCLIENT, 0, DetectEngineInspectGenericList, NULL);
 
     g_http2_match_buffer_id = DetectBufferTypeRegister("http2");
@@ -703,7 +699,7 @@ static uint8_t DetectEngineInspectHttp2HeaderName(DetectEngineCtx *de_ctx,
             break;
 
         const bool match = DetectEngineContentInspection(de_ctx, det_ctx, s, engine->smd, NULL, f,
-                (uint8_t *)buffer->inspect, buffer->inspect_len, buffer->inspect_offset,
+                buffer->inspect, buffer->inspect_len, buffer->inspect_offset,
                 DETECT_CI_FLAGS_SINGLE, DETECT_ENGINE_CONTENT_INSPECTION_MODE_STATE);
         if (match) {
             return DETECT_ENGINE_INSPECT_SIG_MATCH;

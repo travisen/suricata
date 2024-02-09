@@ -401,7 +401,7 @@ void HTPStateFree(void *state)
         uint64_t total_txs = HTPStateGetTxCnt(state);
         /* free the list of body chunks */
         if (s->conn != NULL) {
-            for (tx_id = 0; tx_id < total_txs; tx_id++) {
+            for (tx_id = s->tx_freed; tx_id < total_txs; tx_id++) {
                 htp_tx_t *tx = HTPStateGetTx(s, tx_id);
                 if (tx != NULL) {
                     HtpTxUserData *htud = (HtpTxUserData *) htp_tx_get_user_data(tx);
@@ -458,8 +458,10 @@ static void HTPStateTransactionFree(void *state, uint64_t id)
             tx->request_progress = HTP_REQUEST_COMPLETE;
             tx->response_progress = HTP_RESPONSE_COMPLETE;
         }
+        // replaces tx in the s->conn->transactions list by NULL
         htp_tx_destroy(tx);
     }
+    s->tx_freed += htp_connp_tx_freed(s->connp);
 }
 
 /**
@@ -2516,6 +2518,10 @@ static void HTPConfigSetDefaultsPhase1(HTPCfgRec *cfg_prec)
 #ifdef HAVE_HTP_CONFIG_SET_COMPRESSION_TIME_LIMIT
     htp_config_set_compression_time_limit(cfg_prec->cfg, HTP_CONFIG_DEFAULT_COMPRESSION_TIME_LIMIT);
 #endif
+#ifdef HAVE_HTP_CONFIG_SET_MAX_TX
+#define HTP_CONFIG_DEFAULT_MAX_TX_LIMIT 512
+    htp_config_set_max_tx(cfg_prec->cfg, HTP_CONFIG_DEFAULT_MAX_TX_LIMIT);
+#endif
     /* libhtp <= 0.5.9 doesn't use soft limit, but it's impossible to set
      * only the hard limit. So we set both here to the (current) htp defaults.
      * The reason we do this is that if the user sets the hard limit in the
@@ -2867,6 +2873,18 @@ static void HTPConfigParseParameters(HTPCfgRec *cfg_prec, ConfNode *s,
             SCLogConfig("Setting HTTP decompression time limit to %" PRIu32 " usec", limit);
             htp_config_set_compression_time_limit(cfg_prec->cfg, (size_t)limit);
 #endif
+#ifdef HAVE_HTP_CONFIG_SET_MAX_TX
+        } else if (strcasecmp("max-tx", p->name) == 0) {
+            uint32_t limit = 0;
+            if (ParseSizeStringU32(p->val, &limit) < 0) {
+                FatalError("failed to parse 'max-tx' "
+                           "from conf file - %s.",
+                        p->val);
+            }
+            /* set default soft-limit with our new hard limit */
+            SCLogConfig("Setting HTTP max-tx limit to %" PRIu32 " bytes", limit);
+            htp_config_set_max_tx(cfg_prec->cfg, (size_t)limit);
+#endif
         } else if (strcasecmp("randomize-inspection-sizes", p->name) == 0) {
             if (!g_disable_randomness) {
                 cfg_prec->randomize = ConfValIsTrue(p->val);
@@ -2905,8 +2923,6 @@ static void HTPConfigParseParameters(HTPCfgRec *cfg_prec, ConfNode *s,
                 if (strcasecmp("enabled", pval->name) == 0) {
                     if (ConfValIsTrue(pval->val)) {
                         cfg_prec->swf_decompression_enabled = 1;
-                        SCLogWarning("Flash decompression is deprecated and will be removed in "
-                                     "Suricata 8; see ticket #6179");
                     } else if (ConfValIsFalse(pval->val)) {
                         cfg_prec->swf_decompression_enabled = 0;
                     } else {
@@ -3078,7 +3094,7 @@ static uint64_t HTPStateGetTxCnt(void *alstate)
         if (size < 0)
             return 0ULL;
         SCLogDebug("size %"PRIu64, size);
-        return (uint64_t)size;
+        return (uint64_t)size + http_state->tx_freed;
     } else {
         return 0ULL;
     }
@@ -3088,8 +3104,8 @@ static void *HTPStateGetTx(void *alstate, uint64_t tx_id)
 {
     HtpState *http_state = (HtpState *)alstate;
 
-    if (http_state != NULL && http_state->conn != NULL)
-        return htp_list_get(http_state->conn->transactions, tx_id);
+    if (http_state != NULL && http_state->conn != NULL && tx_id >= http_state->tx_freed)
+        return htp_list_get(http_state->conn->transactions, tx_id - http_state->tx_freed);
     else
         return NULL;
 }
@@ -3099,9 +3115,9 @@ void *HtpGetTxForH2(void *alstate)
     // gets last transaction
     HtpState *http_state = (HtpState *)alstate;
     if (http_state != NULL && http_state->conn != NULL) {
-        size_t txid = htp_list_array_size(http_state->conn->transactions);
-        if (txid > 0) {
-            return htp_list_get(http_state->conn->transactions, txid - 1);
+        size_t txid = HTPStateGetTxCnt(http_state);
+        if (txid > http_state->tx_freed) {
+            return htp_list_get(http_state->conn->transactions, txid - http_state->tx_freed - 1);
         }
     }
     return NULL;

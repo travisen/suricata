@@ -510,6 +510,20 @@ static int TCPProtoDetect(ThreadVars *tv, TcpReassemblyThreadCtx *ra_ctx,
         if (r != 1) {
             StreamTcpUpdateAppLayerProgress(ssn, direction, data_len);
         }
+        if (r == 0) {
+            if (*alproto_otherdir == ALPROTO_UNKNOWN) {
+                TcpStream *opposing_stream;
+                if (*stream == &ssn->client) {
+                    opposing_stream = &ssn->server;
+                } else {
+                    opposing_stream = &ssn->client;
+                }
+                if (StreamTcpIsSetStreamFlagAppProtoDetectionCompleted(opposing_stream)) {
+                    // can happen in detection-only
+                    AppLayerIncFlowCounter(tv, f);
+                }
+            }
+        }
         if (r < 0) {
             goto parser_error;
         }
@@ -1061,16 +1075,18 @@ void AppLayerSetupCounters(void)
     for (uint8_t p = 0; p < IPPROTOS_MAX; p++) {
         const uint8_t ipproto = ipprotos[p];
         const uint8_t ipproto_map = FlowGetProtoMapping(ipproto);
-        const uint8_t other_ipproto = ipproto == IPPROTO_TCP ? IPPROTO_UDP : IPPROTO_TCP;
         const char *ipproto_suffix = (ipproto == IPPROTO_TCP) ? "_tcp" : "_udp";
+        uint8_t ipprotos_all[256 / 8];
 
         for (AppProto alproto = 0; alproto < ALPROTO_MAX; alproto++) {
             if (alprotos[alproto] == 1) {
                 const char *tx_str = "app_layer.tx.";
                 const char *alproto_str = AppLayerGetProtoName(alproto);
 
-                if (AppLayerParserProtoIsRegistered(ipproto, alproto) &&
-                        AppLayerParserProtoIsRegistered(other_ipproto, alproto)) {
+                memset(ipprotos_all, 0, sizeof(ipprotos_all));
+                AppLayerProtoDetectSupportedIpprotos(alproto, ipprotos_all);
+                if ((ipprotos_all[IPPROTO_TCP / 8] & (1 << (IPPROTO_TCP % 8))) &&
+                        (ipprotos_all[IPPROTO_UDP / 8] & (1 << (IPPROTO_UDP % 8)))) {
                     snprintf(applayer_counter_names[ipproto_map][alproto].name,
                             sizeof(applayer_counter_names[ipproto_map][alproto].name),
                             "%s%s%s", str, alproto_str, ipproto_suffix);

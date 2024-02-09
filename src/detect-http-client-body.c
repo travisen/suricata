@@ -103,15 +103,15 @@ void DetectHttpClientBodyRegister(void)
     sigmatch_table[DETECT_HTTP_REQUEST_BODY].flags |= SIGMATCH_NOOPT;
     sigmatch_table[DETECT_HTTP_REQUEST_BODY].flags |= SIGMATCH_INFO_STICKY_BUFFER;
 
-    DetectAppLayerInspectEngineRegister2("http_client_body", ALPROTO_HTTP1, SIG_FLAG_TOSERVER,
+    DetectAppLayerInspectEngineRegister("http_client_body", ALPROTO_HTTP1, SIG_FLAG_TOSERVER,
             HTP_REQUEST_BODY, DetectEngineInspectBufferHttpBody, NULL);
 
-    DetectAppLayerMpmRegister2("http_client_body", SIG_FLAG_TOSERVER, 2,
+    DetectAppLayerMpmRegister("http_client_body", SIG_FLAG_TOSERVER, 2,
             PrefilterMpmHttpRequestBodyRegister, NULL, ALPROTO_HTTP1, HTP_REQUEST_BODY);
 
-    DetectAppLayerInspectEngineRegister2("http_client_body", ALPROTO_HTTP2, SIG_FLAG_TOSERVER,
+    DetectAppLayerInspectEngineRegister("http_client_body", ALPROTO_HTTP2, SIG_FLAG_TOSERVER,
             HTTP2StateDataClient, DetectEngineInspectFiledata, NULL);
-    DetectAppLayerMpmRegister2("http_client_body", SIG_FLAG_TOSERVER, 2,
+    DetectAppLayerMpmRegister("http_client_body", SIG_FLAG_TOSERVER, 2,
             PrefilterMpmFiledataRegister, NULL, ALPROTO_HTTP2, HTTP2StateDataClient);
 
     DetectBufferTypeSetDescriptionByName("http_client_body",
@@ -325,9 +325,8 @@ static uint8_t DetectEngineInspectBufferHttpBody(DetectEngineCtx *de_ctx,
 
     /* Inspect all the uricontents fetched on each
      * transaction at the app layer */
-    const bool match =
-            DetectEngineContentInspection(de_ctx, det_ctx, s, engine->smd, NULL, f, (uint8_t *)data,
-                    data_len, offset, ci_flags, DETECT_ENGINE_CONTENT_INSPECTION_MODE_STATE);
+    const bool match = DetectEngineContentInspection(de_ctx, det_ctx, s, engine->smd, NULL, f, data,
+            data_len, offset, ci_flags, DETECT_ENGINE_CONTENT_INSPECTION_MODE_STATE);
     if (match) {
         return DETECT_ENGINE_INSPECT_SIG_MATCH;
     }

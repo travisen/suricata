@@ -1,4 +1,4 @@
-/* Copyright (C) 2020-2022 Open Information Security Foundation
+/* Copyright (C) 2020-2023 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -21,7 +21,7 @@ use super::mqtt_message::*;
 use super::parser::*;
 use crate::applayer::*;
 use crate::applayer::{self, LoggerFlags};
-use crate::conf::conf_get;
+use crate::conf::{conf_get, get_memval};
 use crate::core::*;
 use crate::frames::*;
 use nom7::Err;
@@ -112,7 +112,7 @@ pub struct MQTTState {
     connected: bool,
     skip_request: usize,
     skip_response: usize,
-    max_msg_len: usize,
+    max_msg_len: u32,
     tx_index_completed: usize,
 }
 
@@ -142,7 +142,7 @@ impl MQTTState {
             connected: false,
             skip_request: 0,
             skip_response: 0,
-            max_msg_len: unsafe { MAX_MSG_LEN as usize },
+            max_msg_len: unsafe { MAX_MSG_LEN},
             tx_index_completed: 0,
         }
     }
@@ -183,11 +183,11 @@ impl MQTTState {
     }
 
     fn new_tx(&mut self, msg: MQTTMessage, toclient: bool) -> MQTTTransaction {
-	let direction = if toclient {
-	    Direction::ToClient
-	} else {
-	    Direction::ToServer
-	};
+        let direction = if toclient {
+            Direction::ToClient
+        } else {
+            Direction::ToServer
+        };
         let mut tx = MQTTTransaction::new(msg, direction);
         self.tx_id += 1;
         tx.tx_id = self.tx_id;
@@ -217,104 +217,82 @@ impl MQTTState {
         match msg.op {
             MQTTOperation::CONNECT(ref conn) => {
                 self.protocol_version = conn.protocol_version;
+                let mut tx = self.new_tx(msg, toclient);
+                tx.pkt_id = Some(MQTT_CONNECT_PKT_ID);
                 if self.connected {
-                    let mut tx = self.new_tx(msg, toclient);
                     MQTTState::set_event(&mut tx, MQTTEvent::DoubleConnect);
-                    self.transactions.push_back(tx);
-                } else {
-                    let mut tx = self.new_tx(msg, toclient);
-                    tx.pkt_id = Some(MQTT_CONNECT_PKT_ID);
-                    self.transactions.push_back(tx);
                 }
+                self.transactions.push_back(tx);
             }
             MQTTOperation::PUBLISH(ref publish) => {
-                if !self.connected {
-                    let mut tx = self.new_tx(msg, toclient);
-                    MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
-                    self.transactions.push_back(tx);
-                    return;
-                }
-                match msg.header.qos_level {
+                let qos = msg.header.qos_level;
+                let pkt_id = publish.message_id;
+                let mut tx = self.new_tx(msg, toclient);
+                match qos {
                     0 => {
                         // with QOS level 0, we do not need to wait for a
                         // response
-                        let mut tx = self.new_tx(msg, toclient);
                         tx.complete = true;
-                        self.transactions.push_back(tx);
                     }
                     1..=2 => {
-                        if let Some(pkt_id) = publish.message_id {
-                            let mut tx = self.new_tx(msg, toclient);
+                        if let Some(pkt_id) = pkt_id {
                             tx.pkt_id = Some(pkt_id as u32);
-                            self.transactions.push_back(tx);
                         } else {
-                            let mut tx = self.new_tx(msg, toclient);
                             MQTTState::set_event(&mut tx, MQTTEvent::MissingMsgId);
-                            self.transactions.push_back(tx);
                         }
                     }
                     _ => {
-                        let mut tx = self.new_tx(msg, toclient);
                         MQTTState::set_event(&mut tx, MQTTEvent::InvalidQosLevel);
-                        self.transactions.push_back(tx);
                     }
                 }
+                if !self.connected {
+                    MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
+                }
+                self.transactions.push_back(tx);
             }
             MQTTOperation::SUBSCRIBE(ref subscribe) => {
-                if !self.connected {
-                    let mut tx = self.new_tx(msg, toclient);
-                    MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
-                    self.transactions.push_back(tx);
-                    return;
-                }
                 let pkt_id = subscribe.message_id as u32;
-                match msg.header.qos_level {
+                let qos = msg.header.qos_level;
+                let mut tx = self.new_tx(msg, toclient);
+                match qos {
                     0 => {
                         // with QOS level 0, we do not need to wait for a
                         // response
-                        let mut tx = self.new_tx(msg, toclient);
                         tx.complete = true;
-                        self.transactions.push_back(tx);
                     }
                     1..=2 => {
-                        let mut tx = self.new_tx(msg, toclient);
                         tx.pkt_id = Some(pkt_id);
-                        self.transactions.push_back(tx);
                     }
                     _ => {
-                        let mut tx = self.new_tx(msg, toclient);
                         MQTTState::set_event(&mut tx, MQTTEvent::InvalidQosLevel);
-                        self.transactions.push_back(tx);
                     }
                 }
+                if !self.connected {
+                    MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
+                }
+                self.transactions.push_back(tx);
             }
             MQTTOperation::UNSUBSCRIBE(ref unsubscribe) => {
-                if !self.connected {
-                    let mut tx = self.new_tx(msg, toclient);
-                    MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
-                    self.transactions.push_back(tx);
-                    return;
-                }
                 let pkt_id = unsubscribe.message_id as u32;
-                match msg.header.qos_level {
+                let qos = msg.header.qos_level;
+                let mut tx = self.new_tx(msg, toclient);
+                match qos {
                     0 => {
                         // with QOS level 0, we do not need to wait for a
                         // response
-                        let mut tx = self.new_tx(msg, toclient);
                         tx.complete = true;
-                        self.transactions.push_back(tx);
                     }
                     1..=2 => {
-                        let mut tx = self.new_tx(msg, toclient);
                         tx.pkt_id = Some(pkt_id);
-                        self.transactions.push_back(tx);
                     }
                     _ => {
-                        let mut tx = self.new_tx(msg, toclient);
                         MQTTState::set_event(&mut tx, MQTTEvent::InvalidQosLevel);
-                        self.transactions.push_back(tx);
                     }
                 }
+                if !self.connected {
+                    MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
+                }
+                self.transactions.push_back(tx);
             }
             MQTTOperation::CONNACK(ref _connack) => {
                 if let Some(tx) = self.get_tx_by_pkt_id(MQTT_CONNECT_PKT_ID) {
@@ -325,31 +303,24 @@ impl MQTTState {
                 } else {
                     let mut tx = self.new_tx(msg, toclient);
                     MQTTState::set_event(&mut tx, MQTTEvent::MissingConnect);
+                    tx.complete = true;
                     self.transactions.push_back(tx);
                 }
             }
             MQTTOperation::PUBREC(ref v) | MQTTOperation::PUBREL(ref v) => {
-                if !self.connected {
-                    let mut tx = self.new_tx(msg, toclient);
-                    MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
-                    self.transactions.push_back(tx);
-                    return;
-                }
                 if let Some(tx) = self.get_tx_by_pkt_id(v.message_id as u32) {
                     tx.msg.push(msg);
                 } else {
                     let mut tx = self.new_tx(msg, toclient);
                     MQTTState::set_event(&mut tx, MQTTEvent::MissingPublish);
+                    if !self.connected {
+                        MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
+                    }
+                    tx.complete = true;
                     self.transactions.push_back(tx);
                 }
             }
             MQTTOperation::PUBACK(ref v) | MQTTOperation::PUBCOMP(ref v) => {
-                if !self.connected {
-                    let mut tx = self.new_tx(msg, toclient);
-                    MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
-                    self.transactions.push_back(tx);
-                    return;
-                }
                 if let Some(tx) = self.get_tx_by_pkt_id(v.message_id as u32) {
                     tx.msg.push(msg);
                     tx.complete = true;
@@ -357,16 +328,14 @@ impl MQTTState {
                 } else {
                     let mut tx = self.new_tx(msg, toclient);
                     MQTTState::set_event(&mut tx, MQTTEvent::MissingPublish);
+                    if !self.connected {
+                        MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
+                    }
+                    tx.complete = true;
                     self.transactions.push_back(tx);
                 }
             }
             MQTTOperation::SUBACK(ref suback) => {
-                if !self.connected {
-                    let mut tx = self.new_tx(msg, toclient);
-                    MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
-                    self.transactions.push_back(tx);
-                    return;
-                }
                 if let Some(tx) = self.get_tx_by_pkt_id(suback.message_id as u32) {
                     tx.msg.push(msg);
                     tx.complete = true;
@@ -374,16 +343,14 @@ impl MQTTState {
                 } else {
                     let mut tx = self.new_tx(msg, toclient);
                     MQTTState::set_event(&mut tx, MQTTEvent::MissingSubscribe);
+                    if !self.connected {
+                        MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
+                    }
+                    tx.complete = true;
                     self.transactions.push_back(tx);
                 }
             }
             MQTTOperation::UNSUBACK(ref unsuback) => {
-                if !self.connected {
-                    let mut tx = self.new_tx(msg, toclient);
-                    MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
-                    self.transactions.push_back(tx);
-                    return;
-                }
                 if let Some(tx) = self.get_tx_by_pkt_id(unsuback.message_id as u32) {
                     tx.msg.push(msg);
                     tx.complete = true;
@@ -391,6 +358,10 @@ impl MQTTState {
                 } else {
                     let mut tx = self.new_tx(msg, toclient);
                     MQTTState::set_event(&mut tx, MQTTEvent::MissingUnsubscribe);
+                    if !self.connected {
+                        MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
+                    }
+                    tx.complete = true;
                     self.transactions.push_back(tx);
                 }
             }
@@ -406,25 +377,19 @@ impl MQTTState {
                 self.transactions.push_back(tx);
             }
             MQTTOperation::AUTH(_) | MQTTOperation::DISCONNECT(_) => {
-                if !self.connected {
-                    let mut tx = self.new_tx(msg, toclient);
-                    MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
-                    self.transactions.push_back(tx);
-                    return;
-                }
                 let mut tx = self.new_tx(msg, toclient);
                 tx.complete = true;
+                if !self.connected {
+                    MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
+                }
                 self.transactions.push_back(tx);
             }
             MQTTOperation::PINGREQ | MQTTOperation::PINGRESP => {
-                if !self.connected {
-                    let mut tx = self.new_tx(msg, toclient);
-                    MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
-                    self.transactions.push_back(tx);
-                    return;
-                }
                 let mut tx = self.new_tx(msg, toclient);
                 tx.complete = true;
+                if !self.connected {
+                    MQTTState::set_event(&mut tx, MQTTEvent::UnintroducedMessage);
+                }
                 self.transactions.push_back(tx);
             }
         }
@@ -608,7 +573,11 @@ impl MQTTState {
     }
 
     fn set_event_notx(&mut self, event: MQTTEvent, toclient: bool) {
-        let mut tx = MQTTTransaction::new_empty(if toclient { Direction::ToClient } else { Direction::ToServer });
+        let mut tx = MQTTTransaction::new_empty(if toclient {
+            Direction::ToClient
+        } else {
+            Direction::ToServer
+        });
         self.tx_id += 1;
         tx.tx_id = self.tx_id;
         if toclient {
@@ -778,10 +747,8 @@ export_tx_data_get!(rs_mqtt_get_tx_data, MQTTTransaction);
 export_state_data_get!(rs_mqtt_get_state_data, MQTTState);
 
 #[no_mangle]
-pub unsafe extern "C" fn rs_mqtt_register_parser(cfg_max_msg_len: u32) {
+pub unsafe extern "C" fn SCMqttRegisterParser() {
     let default_port = CString::new("[1883]").unwrap();
-    let max_msg_len = &mut MAX_MSG_LEN;
-    *max_msg_len = cfg_max_msg_len;
     let parser = RustParser {
         name: PARSER_NAME.as_ptr() as *const std::os::raw::c_char,
         default_port: default_port.as_ptr(),
@@ -828,6 +795,13 @@ pub unsafe extern "C" fn rs_mqtt_register_parser(cfg_max_msg_len: u32) {
                 MQTT_MAX_TX = v;
             } else {
                 SCLogError!("Invalid value for mqtt.max-tx");
+            }
+        }
+        if let Some(val) = conf_get("app-layer.protocols.mqtt.max-msg-length") {
+            if let Ok(v) = get_memval(val) {
+                MAX_MSG_LEN = v as u32;
+            } else {
+                SCLogError!("Invalid value for mqtt.max-msg-length: {}", val);
             }
         }
     } else {

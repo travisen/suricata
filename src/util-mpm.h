@@ -163,8 +163,9 @@ typedef struct MpmTableElmt_ {
     uint32_t (*Search)(const struct MpmCtx_ *, struct MpmThreadCtx_ *, PrefilterRuleStore *, const uint8_t *, uint32_t);
     void (*PrintCtx)(struct MpmCtx_ *);
     void (*PrintThreadCtx)(struct MpmThreadCtx_ *);
+#ifdef UNITTESTS
     void (*RegisterUnittests)(void);
-    uint8_t flags;
+#endif
 } MpmTableElmt;
 
 extern MpmTableElmt mpm_table[MPM_TABLE_SIZE];

@@ -104,7 +104,7 @@ static uint8_t DetectEngineInspectKrb5CName(DetectEngineCtx *de_ctx, DetectEngin
             break;
 
         const bool match = DetectEngineContentInspection(de_ctx, det_ctx, s, engine->smd, NULL, f,
-                (uint8_t *)buffer->inspect, buffer->inspect_len, buffer->inspect_offset,
+                buffer->inspect, buffer->inspect_len, buffer->inspect_offset,
                 DETECT_CI_FLAGS_SINGLE, DETECT_ENGINE_CONTENT_INSPECTION_MODE_STATE);
         if (match) {
             return DETECT_ENGINE_INSPECT_SIG_MATCH;
@@ -187,13 +187,11 @@ void DetectKrb5CNameRegister(void)
     sigmatch_table[DETECT_AL_KRB5_CNAME].flags |= SIGMATCH_NOOPT|SIGMATCH_INFO_STICKY_BUFFER;
     sigmatch_table[DETECT_AL_KRB5_CNAME].desc = "sticky buffer to match on Kerberos 5 client name";
 
-    DetectAppLayerMpmRegister2("krb5_cname", SIG_FLAG_TOCLIENT, 2,
-            PrefilterMpmKrb5CNameRegister, NULL,
-            ALPROTO_KRB5, 1);
+    DetectAppLayerMpmRegister("krb5_cname", SIG_FLAG_TOCLIENT, 2, PrefilterMpmKrb5CNameRegister,
+            NULL, ALPROTO_KRB5, 1);
 
-    DetectAppLayerInspectEngineRegister2("krb5_cname",
-            ALPROTO_KRB5, SIG_FLAG_TOCLIENT, 0,
-            DetectEngineInspectKrb5CName, NULL);
+    DetectAppLayerInspectEngineRegister(
+            "krb5_cname", ALPROTO_KRB5, SIG_FLAG_TOCLIENT, 0, DetectEngineInspectKrb5CName, NULL);
 
     DetectBufferTypeSetDescriptionByName("krb5_cname",
             "Kerberos 5 ticket client name");

@@ -141,13 +141,12 @@ impl DCERPCUDPState {
     }
 
     fn find_incomplete_tx(&mut self, hdr: &DCERPCHdrUdp) -> Option<&mut DCERPCTransaction> {
-        for tx in &mut self.transactions {
-            if tx.seqnum == hdr.seqnum && tx.activityuuid == hdr.activityuuid && ((hdr.pkt_type == DCERPC_TYPE_REQUEST && !tx.req_done) || (hdr.pkt_type == DCERPC_TYPE_RESPONSE && !tx.resp_done)) {
-                SCLogDebug!("found tx id {}, last tx_id {}, {} {}", tx.id, self.tx_id, tx.seqnum, tx.activityuuid[0]);
-                return Some(tx);
-            }
-        }
-        None
+        return self.transactions.iter_mut().find(|tx| {
+            tx.seqnum == hdr.seqnum
+                && tx.activityuuid == hdr.activityuuid
+                && ((hdr.pkt_type == DCERPC_TYPE_REQUEST && !tx.req_done)
+                    || (hdr.pkt_type == DCERPC_TYPE_RESPONSE && !tx.resp_done))
+        });
     }
 
     pub fn handle_fragment_data(&mut self, hdr: &DCERPCHdrUdp, input: &[u8]) -> bool {
@@ -410,12 +409,7 @@ mod tests {
             0x1c, 0x7d, 0xcf, 0x11,
         ];
 
-        match parser::parse_dcerpc_udp_header(request) {
-            Ok((_rem, _header)) => {
-                { assert!(false); }
-            }
-            _ => {}
-        }
+        assert!(parser::parse_dcerpc_udp_header(request).is_err());
     }
 
     #[test]
@@ -428,13 +422,9 @@ mod tests {
             0x79, 0xbe, 0x01, 0x34, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0xff, 0xff, 0xff, 0xff, 0x68, 0x00, 0x00, 0x00, 0x0a, 0x00,
         ];
-        match parser::parse_dcerpc_udp_header(request) {
-            Ok((rem, header)) => {
-                assert_eq!(4, header.rpc_vers);
-                assert_eq!(80, request.len() - rem.len());
-            }
-            _ => { assert!(false); }
-        }
+        let (rem, header) = parser::parse_dcerpc_udp_header(request).unwrap();
+        assert_eq!(4, header.rpc_vers);
+        assert_eq!(80, request.len() - rem.len());
     }
 
     #[test]
@@ -447,14 +437,10 @@ mod tests {
             0x79, 0xbe, 0x01, 0x34, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0xff, 0xff, 0xff, 0xff, 0x68, 0x00, 0x00, 0x00, 0x0a, 0x00,
         ];
-        match parser::parse_dcerpc_udp_header(request) {
-            Ok((rem, header)) => {
-                assert_eq!(4, header.rpc_vers);
-                assert_eq!(80, request.len() - rem.len());
-                assert_eq!(0, rem.len());
-            }
-            _ => { assert!(false); }
-        }
+        let (rem, header) = parser::parse_dcerpc_udp_header(request).unwrap();
+        assert_eq!(4, header.rpc_vers);
+        assert_eq!(80, request.len() - rem.len());
+        assert_eq!(0, rem.len());
     }
 
     #[test]

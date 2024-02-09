@@ -48,6 +48,7 @@
 #include "util-print.h"
 #include "util-memcmp.h"
 #include "util-profiling.h"
+#include "util-validate.h"
 
 #include "app-layer.h"
 #include "app-layer-parser.h"
@@ -429,26 +430,26 @@ void DetectHttpHeaderRegister(void)
     sigmatch_table[DETECT_HTTP_HEADER].flags |= SIGMATCH_NOOPT;
     sigmatch_table[DETECT_HTTP_HEADER].flags |= SIGMATCH_INFO_STICKY_BUFFER;
 
-    DetectAppLayerInspectEngineRegister2("http_header", ALPROTO_HTTP1, SIG_FLAG_TOSERVER,
+    DetectAppLayerInspectEngineRegister("http_header", ALPROTO_HTTP1, SIG_FLAG_TOSERVER,
             HTP_REQUEST_HEADERS, DetectEngineInspectBufferHttpHeader, NULL);
-    DetectAppLayerMpmRegister2("http_header", SIG_FLAG_TOSERVER, 2,
+    DetectAppLayerMpmRegister("http_header", SIG_FLAG_TOSERVER, 2,
             PrefilterMpmHttpHeaderRequestRegister, NULL, ALPROTO_HTTP1,
             0); /* not used, registered twice: HEADERS/TRAILER */
 
-    DetectAppLayerInspectEngineRegister2("http_header", ALPROTO_HTTP1, SIG_FLAG_TOCLIENT,
+    DetectAppLayerInspectEngineRegister("http_header", ALPROTO_HTTP1, SIG_FLAG_TOCLIENT,
             HTP_RESPONSE_HEADERS, DetectEngineInspectBufferHttpHeader, NULL);
-    DetectAppLayerMpmRegister2("http_header", SIG_FLAG_TOCLIENT, 2,
+    DetectAppLayerMpmRegister("http_header", SIG_FLAG_TOCLIENT, 2,
             PrefilterMpmHttpHeaderResponseRegister, NULL, ALPROTO_HTTP1,
             0); /* not used, registered twice: HEADERS/TRAILER */
 
-    DetectAppLayerInspectEngineRegister2("http_header", ALPROTO_HTTP2, SIG_FLAG_TOSERVER,
+    DetectAppLayerInspectEngineRegister("http_header", ALPROTO_HTTP2, SIG_FLAG_TOSERVER,
             HTTP2StateDataClient, DetectEngineInspectBufferGeneric, GetBuffer2ForTX);
-    DetectAppLayerMpmRegister2("http_header", SIG_FLAG_TOSERVER, 2, PrefilterGenericMpmRegister,
+    DetectAppLayerMpmRegister("http_header", SIG_FLAG_TOSERVER, 2, PrefilterGenericMpmRegister,
             GetBuffer2ForTX, ALPROTO_HTTP2, HTTP2StateDataClient);
 
-    DetectAppLayerInspectEngineRegister2("http_header", ALPROTO_HTTP2, SIG_FLAG_TOCLIENT,
+    DetectAppLayerInspectEngineRegister("http_header", ALPROTO_HTTP2, SIG_FLAG_TOCLIENT,
             HTTP2StateDataServer, DetectEngineInspectBufferGeneric, GetBuffer2ForTX);
-    DetectAppLayerMpmRegister2("http_header", SIG_FLAG_TOCLIENT, 2, PrefilterGenericMpmRegister,
+    DetectAppLayerMpmRegister("http_header", SIG_FLAG_TOCLIENT, 2, PrefilterGenericMpmRegister,
             GetBuffer2ForTX, ALPROTO_HTTP2, HTTP2StateDataServer);
 
     DetectBufferTypeSetDescriptionByName("http_header",
@@ -462,6 +463,8 @@ void DetectHttpHeaderRegister(void)
 
 static int g_http_request_header_buffer_id = 0;
 static int g_http_response_header_buffer_id = 0;
+static int g_request_header_thread_id = 0;
+static int g_response_header_thread_id = 0;
 
 static InspectionBuffer *GetHttp2HeaderData(DetectEngineThreadCtx *det_ctx, const uint8_t flags,
         const DetectEngineTransforms *transforms, Flow *_f, const struct MpmListIdDataArgs *cbdata,
@@ -545,7 +548,7 @@ static uint8_t DetectEngineInspectHttp2Header(DetectEngineCtx *de_ctx,
             break;
 
         const bool match = DetectEngineContentInspection(de_ctx, det_ctx, s, engine->smd, NULL, f,
-                (uint8_t *)buffer->inspect, buffer->inspect_len, buffer->inspect_offset,
+                buffer->inspect, buffer->inspect_len, buffer->inspect_offset,
                 DETECT_CI_FLAGS_SINGLE, DETECT_ENGINE_CONTENT_INSPECTION_MODE_STATE);
         if (match) {
             return DETECT_ENGINE_INSPECT_SIG_MATCH;
@@ -570,6 +573,36 @@ static int PrefilterMpmHttp2HeaderRegister(DetectEngineCtx *de_ctx, SigGroupHead
             mpm_reg->app_v2.tx_min_progress, pectx, PrefilterMpmHttpHeaderFree, mpm_reg->name);
 }
 
+typedef struct HttpMultiBufItem {
+    uint8_t *buffer;
+    size_t len;
+} HttpMultiBufItem;
+
+typedef struct HttpMultiBufHeaderThreadData {
+    // array of items, being defined as a buffer with its length just above
+    HttpMultiBufItem *items;
+    // capacity of items (size of allocation)
+    size_t cap;
+    // length of items (number in use)
+    size_t len;
+} HttpMultiBufHeaderThreadData;
+
+static void *HttpMultiBufHeaderThreadDataInit(void *data)
+{
+    HttpMultiBufHeaderThreadData *td = SCCalloc(1, sizeof(*td));
+    return td;
+}
+
+static void HttpMultiBufHeaderThreadDataFree(void *data)
+{
+    HttpMultiBufHeaderThreadData *td = data;
+    for (size_t i = 0; i < td->cap; i++) {
+        SCFree(td->items[i].buffer);
+    }
+    SCFree(td->items);
+    SCFree(td);
+}
+
 static InspectionBuffer *GetHttp1HeaderData(DetectEngineThreadCtx *det_ctx, const uint8_t flags,
         const DetectEngineTransforms *transforms, Flow *f, const struct MpmListIdDataArgs *cbdata,
         int list_id)
@@ -583,10 +616,15 @@ static InspectionBuffer *GetHttp1HeaderData(DetectEngineThreadCtx *det_ctx, cons
     if (buffer->initialized)
         return buffer;
 
-    HttpHeaderThreadData *hdr_td = NULL;
-    HttpHeaderBuffer *buf =
-            HttpHeaderGetBufferSpace(det_ctx, f, flags, g_keyword_thread_id, &hdr_td);
-    if (unlikely(buf == NULL)) {
+    int kw_thread_id;
+    if (flags & STREAM_TOSERVER) {
+        kw_thread_id = g_request_header_thread_id;
+    } else {
+        kw_thread_id = g_response_header_thread_id;
+    }
+    HttpMultiBufHeaderThreadData *hdr_td =
+            DetectThreadCtxGetGlobalKeywordThreadCtx(det_ctx, kw_thread_id);
+    if (unlikely(hdr_td == NULL)) {
         return NULL;
     }
 
@@ -597,33 +635,53 @@ static InspectionBuffer *GetHttp1HeaderData(DetectEngineThreadCtx *det_ctx, cons
     } else {
         headers = tx->response_headers;
     }
-    if (cbdata->local_id < htp_table_size(headers)) {
-        htp_header_t *h = htp_table_get_index(headers, cbdata->local_id, NULL);
-        size_t size1 = bstr_size(h->name);
-        size_t size2 = bstr_size(h->value);
-        size_t b_len = size1 + 2 + size2;
-        if (b_len > buf->size) {
-            if (HttpHeaderExpandBuffer(hdr_td, buf, b_len) != 0) {
+    size_t no_of_headers = htp_table_size(headers);
+    if (cbdata->local_id == 0) {
+        // We initialize a big buffer on first item
+        // Then, we will just use parts of it
+        hdr_td->len = 0;
+        if (hdr_td->cap < no_of_headers) {
+            void *new_buffer = SCRealloc(hdr_td->items, no_of_headers * sizeof(HttpMultiBufItem));
+            if (unlikely(new_buffer == NULL)) {
                 return NULL;
             }
+            hdr_td->items = new_buffer;
+            // zeroes the new part of the items
+            memset(hdr_td->items + hdr_td->cap, 0,
+                    (no_of_headers - hdr_td->cap) * sizeof(HttpMultiBufItem));
+            hdr_td->cap = no_of_headers;
         }
-        memcpy(buf->buffer, bstr_ptr(h->name), bstr_size(h->name));
-        buf->buffer[size1] = ':';
-        buf->buffer[size1 + 1] = ' ';
-        memcpy(buf->buffer + size1 + 2, bstr_ptr(h->value), bstr_size(h->value));
-        buf->len = b_len;
-    } else {
-        InspectionBufferSetupMultiEmpty(buffer);
-        return NULL;
-    }
-    if (buf->len == 0) {
-        InspectionBufferSetupMultiEmpty(buffer);
-        return NULL;
+        for (size_t i = 0; i < no_of_headers; i++) {
+            htp_header_t *h = htp_table_get_index(headers, i, NULL);
+            size_t size1 = bstr_size(h->name);
+            size_t size2 = bstr_size(h->value);
+            size_t size = size1 + size2 + 2;
+            if (hdr_td->items[i].len < size) {
+                // Use realloc, as this pointer is not freed until HttpMultiBufHeaderThreadDataFree
+                hdr_td->items[i].buffer = SCRealloc(hdr_td->items[i].buffer, size);
+                if (unlikely(hdr_td->items[i].buffer == NULL)) {
+                    return NULL;
+                }
+            }
+            memcpy(hdr_td->items[i].buffer, bstr_ptr(h->name), size1);
+            hdr_td->items[i].buffer[size1] = ':';
+            hdr_td->items[i].buffer[size1 + 1] = ' ';
+            memcpy(hdr_td->items[i].buffer + size1 + 2, bstr_ptr(h->value), size2);
+            hdr_td->items[i].len = size;
+        }
+        hdr_td->len = no_of_headers;
     }
 
-    InspectionBufferSetupMulti(buffer, transforms, buf->buffer, buf->len);
-
-    SCReturnPtr(buffer, "InspectionBuffer");
+    // cbdata->local_id is the index of the requested header buffer
+    // hdr_td->len is the number of header buffers
+    if (cbdata->local_id < hdr_td->len) {
+        // we have one valid header buffer
+        InspectionBufferSetupMulti(buffer, transforms, hdr_td->items[cbdata->local_id].buffer,
+                hdr_td->items[cbdata->local_id].len);
+        SCReturnPtr(buffer, "InspectionBuffer");
+    } // else there are no more header buffer to get
+    InspectionBufferSetupMultiEmpty(buffer);
+    return NULL;
 }
 
 static void PrefilterTxHttp1Header(DetectEngineThreadCtx *det_ctx, const void *pectx, Packet *p,
@@ -724,18 +782,20 @@ void DetectHttpRequestHeaderRegister(void)
     sigmatch_table[DETECT_HTTP_REQUEST_HEADER].flags |=
             SIGMATCH_NOOPT | SIGMATCH_INFO_STICKY_BUFFER;
 
-    DetectAppLayerMpmRegister2("http_request_header", SIG_FLAG_TOSERVER, 2,
+    DetectAppLayerMpmRegister("http_request_header", SIG_FLAG_TOSERVER, 2,
             PrefilterMpmHttp2HeaderRegister, NULL, ALPROTO_HTTP2, HTTP2StateOpen);
-    DetectAppLayerInspectEngineRegister2("http_request_header", ALPROTO_HTTP2, SIG_FLAG_TOSERVER,
+    DetectAppLayerInspectEngineRegister("http_request_header", ALPROTO_HTTP2, SIG_FLAG_TOSERVER,
             HTTP2StateOpen, DetectEngineInspectHttp2Header, NULL);
-    DetectAppLayerMpmRegister2("http_request_header", SIG_FLAG_TOSERVER, 2,
+    DetectAppLayerMpmRegister("http_request_header", SIG_FLAG_TOSERVER, 2,
             PrefilterMpmHttp1HeaderRegister, NULL, ALPROTO_HTTP1, 0);
-    DetectAppLayerInspectEngineRegister2("http_request_header", ALPROTO_HTTP1, SIG_FLAG_TOSERVER,
+    DetectAppLayerInspectEngineRegister("http_request_header", ALPROTO_HTTP1, SIG_FLAG_TOSERVER,
             HTP_REQUEST_HEADERS, DetectEngineInspectHttp1Header, NULL);
 
     DetectBufferTypeSetDescriptionByName("http_request_header", "HTTP header name and value");
     g_http_request_header_buffer_id = DetectBufferTypeGetByName("http_request_header");
     DetectBufferTypeSupportsMultiInstance("http_request_header");
+    g_request_header_thread_id = DetectRegisterThreadCtxGlobalFuncs("http_request_header",
+            HttpMultiBufHeaderThreadDataInit, NULL, HttpMultiBufHeaderThreadDataFree);
 }
 
 static int DetectHTTPResponseHeaderSetup(DetectEngineCtx *de_ctx, Signature *s, const char *arg)
@@ -759,18 +819,20 @@ void DetectHttpResponseHeaderRegister(void)
     sigmatch_table[DETECT_HTTP_RESPONSE_HEADER].flags |=
             SIGMATCH_NOOPT | SIGMATCH_INFO_STICKY_BUFFER;
 
-    DetectAppLayerMpmRegister2("http_response_header", SIG_FLAG_TOCLIENT, 2,
+    DetectAppLayerMpmRegister("http_response_header", SIG_FLAG_TOCLIENT, 2,
             PrefilterMpmHttp2HeaderRegister, NULL, ALPROTO_HTTP2, HTTP2StateOpen);
-    DetectAppLayerInspectEngineRegister2("http_response_header", ALPROTO_HTTP2, SIG_FLAG_TOCLIENT,
+    DetectAppLayerInspectEngineRegister("http_response_header", ALPROTO_HTTP2, SIG_FLAG_TOCLIENT,
             HTTP2StateOpen, DetectEngineInspectHttp2Header, NULL);
-    DetectAppLayerMpmRegister2("http_response_header", SIG_FLAG_TOCLIENT, 2,
+    DetectAppLayerMpmRegister("http_response_header", SIG_FLAG_TOCLIENT, 2,
             PrefilterMpmHttp1HeaderRegister, NULL, ALPROTO_HTTP1, 0);
-    DetectAppLayerInspectEngineRegister2("http_response_header", ALPROTO_HTTP1, SIG_FLAG_TOCLIENT,
+    DetectAppLayerInspectEngineRegister("http_response_header", ALPROTO_HTTP1, SIG_FLAG_TOCLIENT,
             HTP_RESPONSE_HEADERS, DetectEngineInspectHttp1Header, NULL);
 
     DetectBufferTypeSetDescriptionByName("http_response_header", "HTTP header name and value");
     g_http_response_header_buffer_id = DetectBufferTypeGetByName("http_response_header");
     DetectBufferTypeSupportsMultiInstance("http_response_header");
+    g_response_header_thread_id = DetectRegisterThreadCtxGlobalFuncs("http_response_header",
+            HttpMultiBufHeaderThreadDataInit, NULL, HttpMultiBufHeaderThreadDataFree);
 }
 
 /************************************Unittests*********************************/

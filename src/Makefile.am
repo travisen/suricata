@@ -36,7 +36,6 @@ noinst_HEADERS = \
 	app-layer-krb5.h \
 	app-layer-modbus.h \
 	app-layer-quic.h \
-	app-layer-mqtt.h \
 	app-layer-nfs-tcp.h \
 	app-layer-nfs-udp.h \
 	app-layer-ntp.h \
@@ -121,8 +120,10 @@ noinst_HEADERS = \
 	detect-detection-filter.h \
 	detect-distance.h \
 	detect-dnp3.h \
+	detect-dns-answer-name.h \
 	detect-dns-opcode.h \
 	detect-dns-query.h \
+	detect-dns-query-name.h \
 	detect-dsize.h \
 	detect-engine-address.h \
 	detect-engine-address-ipv4.h \
@@ -278,6 +279,7 @@ noinst_HEADERS = \
 	detect-rawbytes.h \
 	detect-reference.h \
 	detect-replace.h \
+	detect-requires.h \
 	detect-rev.h \
 	detect-rfb-name.h \
 	detect-rfb-secresult.h \
@@ -294,6 +296,7 @@ noinst_HEADERS = \
 	detect-sip-uri.h \
 	detect-smb-ntlmssp.h \
 	detect-smb-share.h \
+	detect-smb-version.h \
 	detect-snmp-community.h \
 	detect-snmp-pdu_type.h \
 	detect-snmp-usm.h \
@@ -347,6 +350,7 @@ noinst_HEADERS = \
 	detect-transform-pcrexform.h \
 	detect-transform-sha1.h \
 	detect-transform-sha256.h \
+	detect-transform-strip-pseudo-headers.h \
 	detect-transform-strip-whitespace.h \
 	detect-transform-urldecode.h \
 	detect-transform-xor.h \
@@ -552,6 +556,7 @@ noinst_HEADERS = \
 	util-hash-string.h \
 	util-host-info.h \
 	util-host-os-info.h \
+	util-hugepages.h \
 	util-hyperscan.h \
 	util-ioctl.h \
 	util-ip.h \
@@ -652,7 +657,6 @@ libsuricata_c_a_SOURCES = \
 	app-layer-krb5.c \
 	app-layer-modbus.c \
 	app-layer-quic.c \
-	app-layer-mqtt.c \
 	app-layer-nfs-tcp.c \
 	app-layer-nfs-udp.c \
 	app-layer-ntp.c \
@@ -736,8 +740,10 @@ libsuricata_c_a_SOURCES = \
 	detect-detection-filter.c \
 	detect-distance.c \
 	detect-dnp3.c \
+	detect-dns-answer-name.c \
 	detect-dns-opcode.c \
 	detect-dns-query.c \
+	detect-dns-query-name.c \
 	detect-dsize.c \
 	detect-engine-address.c \
 	detect-engine-address-ipv4.c \
@@ -891,6 +897,7 @@ libsuricata_c_a_SOURCES = \
 	detect-rawbytes.c \
 	detect-reference.c \
 	detect-replace.c \
+	detect-requires.c \
 	detect-rev.c \
 	detect-rfb-name.c \
 	detect-rfb-secresult.c \
@@ -907,6 +914,7 @@ libsuricata_c_a_SOURCES = \
 	detect-sip-uri.c \
 	detect-smb-ntlmssp.c \
 	detect-smb-share.c \
+	detect-smb-version.c \
 	detect-snmp-community.c \
 	detect-snmp-pdu_type.c \
 	detect-snmp-usm.c \
@@ -960,6 +968,7 @@ libsuricata_c_a_SOURCES = \
 	detect-transform-pcrexform.c \
 	detect-transform-sha1.c \
 	detect-transform-sha256.c \
+	detect-transform-strip-pseudo-headers.c \
 	detect-transform-strip-whitespace.c \
 	detect-transform-urldecode.c \
 	detect-transform-xor.c \
@@ -1151,6 +1160,7 @@ libsuricata_c_a_SOURCES = \
 	util-hash-string.c \
 	util-host-info.c \
 	util-host-os-info.c \
+	util-hugepages.c \
 	util-hyperscan.c \
 	util-ioctl.c \
 	util-ip.c \

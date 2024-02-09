@@ -48,6 +48,7 @@
 
 #include "util-error.h"
 #include "util-debug.h"
+#include "util-validate.h"
 #include "util-cidr.h"
 #include "util-unittest.h"
 #include "util-unittest-helper.h"
@@ -347,7 +348,7 @@ int SigGroupHeadAppendSig(const DetectEngineCtx *de_ctx, SigGroupHead **sgh,
 
     /* enable the sig in the bitarray */
     (*sgh)->init->sig_array[s->num / 8] |= 1 << (s->num % 8);
-
+    (*sgh)->init->max_sig_id = MAX(s->num, (*sgh)->init->max_sig_id);
     return 0;
 
 error:
@@ -405,6 +406,8 @@ int SigGroupHeadCopySigs(DetectEngineCtx *de_ctx, SigGroupHead *src, SigGroupHea
     if (src->init->score)
         (*dst)->init->score = MAX((*dst)->init->score, src->init->score);
 
+    if (src->init->max_sig_id)
+        (*dst)->init->max_sig_id = MAX((*dst)->init->max_sig_id, src->init->max_sig_id);
     return 0;
 
 error:
@@ -422,9 +425,9 @@ error:
 void SigGroupHeadSetSigCnt(SigGroupHead *sgh, uint32_t max_idx)
 {
     uint32_t sig;
-
+    sgh->init->max_sig_id = MAX(max_idx, sgh->init->max_sig_id);
     sgh->init->sig_cnt = 0;
-    for (sig = 0; sig < max_idx + 1; sig++) {
+    for (sig = 0; sig < sgh->init->max_sig_id + 1; sig++) {
         if (sgh->init->sig_array[sig / 8] & (1 << (sig % 8)))
             sgh->init->sig_cnt++;
     }
@@ -492,12 +495,13 @@ int SigGroupHeadBuildMatchArray(DetectEngineCtx *de_ctx, SigGroupHead *sgh,
         return 0;
 
     BUG_ON(sgh->init->match_array != NULL);
+    sgh->init->max_sig_id = MAX(sgh->init->max_sig_id, max_idx);
 
     sgh->init->match_array = SCCalloc(sgh->init->sig_cnt, sizeof(Signature *));
     if (sgh->init->match_array == NULL)
         return -1;
 
-    for (sig = 0; sig < max_idx + 1; sig++) {
+    for (sig = 0; sig < sgh->init->max_sig_id + 1; sig++) {
         if (!(sgh->init->sig_array[(sig / 8)] & (1 << (sig % 8))) )
             continue;
 
@@ -513,123 +517,44 @@ int SigGroupHeadBuildMatchArray(DetectEngineCtx *de_ctx, SigGroupHead *sgh,
 }
 
 /**
- *  \brief Set the need magic flag in the sgh.
+ *  \brief Set the need hash flag in the sgh.
  *
  *  \param de_ctx detection engine ctx for the signatures
- *  \param sgh sig group head to set the flag in
+ *  \param sgh sig group head to update
  */
-void SigGroupHeadSetFilemagicFlag(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
+void SigGroupHeadSetupFiles(const DetectEngineCtx *de_ctx, SigGroupHead *sgh)
 {
-#ifdef HAVE_MAGIC
-    Signature *s = NULL;
-    uint32_t sig = 0;
-
     if (sgh == NULL)
         return;
 
-    for (sig = 0; sig < sgh->init->sig_cnt; sig++) {
-        s = sgh->init->match_array[sig];
-        if (s == NULL)
-            continue;
-
-        if (SignatureIsFilemagicInspecting(s)) {
-            sgh->flags |= SIG_GROUP_HEAD_HAVEFILEMAGIC;
-            break;
-        }
-    }
-#endif
-    return;
-}
-
-/**
- *  \brief Set the need size flag in the sgh.
- *
- *  \param de_ctx detection engine ctx for the signatures
- *  \param sgh sig group head to set the flag in
- */
-void SigGroupHeadSetFilesizeFlag(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
-{
-    Signature *s = NULL;
-    uint32_t sig = 0;
-
-    if (sgh == NULL)
-        return;
-
-    for (sig = 0; sig < sgh->init->sig_cnt; sig++) {
-        s = sgh->init->match_array[sig];
+    for (uint32_t sig = 0; sig < sgh->init->sig_cnt; sig++) {
+        const Signature *s = sgh->init->match_array[sig];
         if (s == NULL)
             continue;
 
         if (SignatureIsFilesizeInspecting(s)) {
             sgh->flags |= SIG_GROUP_HEAD_HAVEFILESIZE;
-            break;
         }
-    }
-
-    return;
-}
-
-/**
- *  \brief Set the need hash flag in the sgh.
- *
- *  \param de_ctx detection engine ctx for the signatures
- *  \param sgh sig group head to set the flag in
- */
-void SigGroupHeadSetFileHashFlag(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
-{
-    Signature *s = NULL;
-    uint32_t sig = 0;
-
-    if (sgh == NULL)
-        return;
-
-    for (sig = 0; sig < sgh->init->sig_cnt; sig++) {
-        s = sgh->init->match_array[sig];
-        if (s == NULL)
-            continue;
-
         if (SignatureIsFileMd5Inspecting(s)) {
             sgh->flags |= SIG_GROUP_HEAD_HAVEFILEMD5;
             SCLogDebug("sgh %p has filemd5", sgh);
-            break;
         }
-
         if (SignatureIsFileSha1Inspecting(s)) {
             sgh->flags |= SIG_GROUP_HEAD_HAVEFILESHA1;
             SCLogDebug("sgh %p has filesha1", sgh);
-            break;
         }
-
         if (SignatureIsFileSha256Inspecting(s)) {
             sgh->flags |= SIG_GROUP_HEAD_HAVEFILESHA256;
             SCLogDebug("sgh %p has filesha256", sgh);
-            break;
         }
-    }
-
-    return;
-}
-
-/**
- *  \brief Set the filestore_cnt in the sgh.
- *
- *  \param de_ctx detection engine ctx for the signatures
- *  \param sgh sig group head to set the counter in
- */
-void SigGroupHeadSetFilestoreCount(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
-{
-    Signature *s = NULL;
-    uint32_t sig = 0;
-
-    if (sgh == NULL)
-        return;
-
-    for (sig = 0; sig < sgh->init->sig_cnt; sig++) {
-        s = sgh->init->match_array[sig];
-        if (s == NULL)
-            continue;
-
+#ifdef HAVE_MAGIC
+        if (SignatureIsFilemagicInspecting(s)) {
+            sgh->flags |= SIG_GROUP_HEAD_HAVEFILEMAGIC;
+        }
+#endif
         if (SignatureIsFilestoring(s)) {
+            // should be insured by caller that we do not overflow
+            DEBUG_VALIDATE_BUG_ON(sgh->filestore_cnt == UINT16_MAX);
             sgh->filestore_cnt++;
         }
     }
@@ -766,7 +691,7 @@ int SigGroupHeadContainsSigId(DetectEngineCtx *de_ctx, SigGroupHead *sgh,
 
 #ifdef UNITTESTS
 
-int SigAddressPrepareStage1(DetectEngineCtx *);
+int SigPrepareStage1(DetectEngineCtx *);
 
 /**
  * \test Check if a SigGroupHead hash table is properly allocated and
@@ -823,7 +748,7 @@ static int SigGroupHeadTest02(void)
                                       "content:\"test2\"; content:\"test3\"; sid:5;)");
     FAIL_IF_NULL(s);
 
-    SigAddressPrepareStage1(de_ctx);
+    SigPrepareStage1(de_ctx);
 
     SigGroupHeadAppendSig(de_ctx, &sh, de_ctx->sig_list);
     SigGroupHeadAppendSig(de_ctx, &sh, de_ctx->sig_list->next->next);
@@ -883,7 +808,7 @@ static int SigGroupHeadTest03(void)
                                       "content:\"test2\"; content:\"test3\"; sid:5;)");
     FAIL_IF_NULL(s);
 
-    SigAddressPrepareStage1(de_ctx);
+    SigPrepareStage1(de_ctx);
 
     SigGroupHeadAppendSig(de_ctx, &sh, de_ctx->sig_list);
     SigGroupHeadAppendSig(de_ctx, &sh, de_ctx->sig_list->next->next);
@@ -951,7 +876,7 @@ static int SigGroupHeadTest04(void)
                                       "content:\"test2\"; content:\"test3\"; sid:5;)");
     FAIL_IF_NULL(s);
 
-    SigAddressPrepareStage1(de_ctx);
+    SigPrepareStage1(de_ctx);
 
     SigGroupHeadAppendSig(de_ctx, &src_sh, de_ctx->sig_list);
     SigGroupHeadAppendSig(de_ctx, &src_sh, de_ctx->sig_list->next->next);
@@ -1021,7 +946,7 @@ static int SigGroupHeadTest05(void)
                                       "content:\"test2\"; content:\"test3\"; sid:5;)");
     FAIL_IF_NULL(s);
 
-    SigAddressPrepareStage1(de_ctx);
+    SigPrepareStage1(de_ctx);
 
     SigGroupHeadAppendSig(de_ctx, &sh, de_ctx->sig_list);
     SigGroupHeadAppendSig(de_ctx, &sh, de_ctx->sig_list->next->next);

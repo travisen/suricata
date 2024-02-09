@@ -224,7 +224,7 @@ int PrefilterGenericMpmFrameRegister(DetectEngineCtx *de_ctx, SigGroupHead *sgh,
     return r;
 }
 
-int DetectRunFrameInspectRule(ThreadVars *tv, DetectEngineThreadCtx *det_ctx, const Signature *s,
+bool DetectRunFrameInspectRule(ThreadVars *tv, DetectEngineThreadCtx *det_ctx, const Signature *s,
         Flow *f, Packet *p, const Frames *frames, const Frame *frame)
 {
     BUG_ON(s->frame_inspect == NULL);
@@ -306,13 +306,8 @@ static int DetectFrameInspectUdp(DetectEngineThreadCtx *det_ctx,
     if (buffer->inspect == NULL)
         return DETECT_ENGINE_INSPECT_SIG_NO_MATCH;
 
-    const uint32_t data_len = buffer->inspect_len;
-    const uint8_t *data = buffer->inspect;
-
-    // PrintRawDataFp(stdout, data, data_len);
-
     const bool match = DetectEngineContentInspection(det_ctx->de_ctx, det_ctx, s, engine->smd, p,
-            p->flow, (uint8_t *)data, data_len, 0, buffer->flags,
+            p->flow, buffer->inspect, buffer->inspect_len, 0, buffer->flags,
             DETECT_ENGINE_CONTENT_INSPECTION_MODE_FRAME);
     if (match) {
         SCLogDebug("match!");
@@ -479,7 +474,7 @@ static int FrameStreamDataInspectFunc(
     BUG_ON(fsd->frame->len > 0 && (int64_t)data_len > fsd->frame->len);
 
     const bool match = DetectEngineContentInspection(det_ctx->de_ctx, det_ctx, s, engine->smd, p,
-            p->flow, (uint8_t *)data, data_len, data_offset, buffer->flags,
+            p->flow, data, data_len, data_offset, buffer->flags,
             DETECT_ENGINE_CONTENT_INSPECTION_MODE_FRAME);
     if (match) {
         SCLogDebug("DETECT_ENGINE_INSPECT_SIG_MATCH");
