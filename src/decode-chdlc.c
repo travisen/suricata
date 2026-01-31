@@ -44,7 +44,7 @@ int DecodeCHDLC(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
 {
     DEBUG_VALIDATE_BUG_ON(pkt == NULL);
 
-    StatsIncr(tv, dtv->counter_chdlc);
+    StatsCounterIncr(&tv->stats, dtv->counter_chdlc);
 
     if (unlikely(len < CHDLC_HEADER_LEN)) {
         ENGINE_SET_INVALID_EVENT(p, CHDLC_PKT_TOO_SMALL);
@@ -88,11 +88,11 @@ static int DecodeCHDLCTest01 (void)
 
     DecodeCHDLC(&tv, &dtv, p, raw, sizeof(raw));
 
-    FAIL_IF_NOT(PKT_IS_IPV4(p));
-    FAIL_IF_NOT(PKT_IS_TCP(p));
+    FAIL_IF_NOT(PacketIsIPv4(p));
+    FAIL_IF_NOT(PacketIsTCP(p));
     FAIL_IF_NOT(p->dp == 80);
 
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 #endif /* UNITTESTS */

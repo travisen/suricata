@@ -62,38 +62,45 @@ pub mod nom7 {
     }
 }
 
-#[cfg(not(feature = "debug-validate"))]
-#[macro_export]
-macro_rules! debug_validate_bug_on (
-  ($item:expr) => {};
-);
+pub mod nom8 {
+    use nom8::bytes::streaming::{tag, take_until};
+    use nom8::error::{Error, ParseError};
+    use nom8::ErrorConvert;
+    use nom8::{IResult, Parser};
 
-#[cfg(feature = "debug-validate")]
-#[macro_export]
-macro_rules! debug_validate_bug_on (
-  ($item:expr) => {
-    if $item {
-        panic!("Condition check failed");
+    /// Reimplementation of `take_until_and_consume` for nom 8
+    ///
+    /// `take_until` does not consume the matched tag, and
+    /// `take_until_and_consume` was removed in nom 7. This function
+    /// provides an implementation (specialized for `&[u8]`).
+    pub fn take_until_and_consume<'a, E: ParseError<&'a [u8]>>(
+        t: &'a [u8],
+    ) -> impl FnMut(&'a [u8]) -> IResult<&'a [u8], &'a [u8], E> {
+        move |i: &'a [u8]| {
+            let (i, res) = take_until(t).parse(i)?;
+            let (i, _) = tag(t).parse(i)?;
+            Ok((i, res))
+        }
     }
-  };
-);
 
-#[cfg(not(feature = "debug-validate"))]
-#[macro_export]
-macro_rules! debug_validate_fail (
-  ($msg:expr) => {};
-);
-
-#[cfg(feature = "debug-validate")]
-#[macro_export]
-macro_rules! debug_validate_fail (
-  ($msg:expr) => {
-    // Wrap in a conditional to prevent unreachable code warning in caller.
-    if true {
-      panic!($msg);
+    /// Specialized version of the nom 8 `bits` combinator
+    ///
+    /// The `bits combinator has trouble inferring the transient error type
+    /// used by the tuple parser, because the function is generic and any
+    /// error type would be valid.
+    /// Use an explicit error type (as described in
+    /// https://docs.rs/nom/7.1.0/nom/bits/fn.bits.html) to solve this problem, and
+    /// specialize this function for `&[u8]`.
+    pub fn bits<'a, O, E, P>(parser: P) -> impl FnMut(&'a [u8]) -> IResult<&'a [u8], O, E>
+    where
+        E: ParseError<&'a [u8]>,
+        Error<(&'a [u8], usize)>: ErrorConvert<E>,
+        P: FnMut((&'a [u8], usize)) -> IResult<(&'a [u8], usize), O, Error<(&'a [u8], usize)>>,
+    {
+        // use full path to disambiguate nom `bits` from this current function name
+        nom8::bits::bits(parser)
     }
-  };
-);
+}
 
 /// Convert a String to C-compatible string
 ///
@@ -114,7 +121,7 @@ pub fn rust_string_to_c(s: String) -> *mut c_char {
 ///
 /// s must be allocated by rust, using `CString::new`
 #[no_mangle]
-pub unsafe extern "C" fn rs_cstring_free(s: *mut c_char) {
+pub unsafe extern "C" fn SCRustCStringFree(s: *mut c_char) {
     if s.is_null() {
         return;
     }
@@ -135,7 +142,7 @@ pub fn to_hex(input: &[u8]) -> String {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn rs_to_hex(
+pub unsafe extern "C" fn SCToHex(
     output: *mut u8, out_len: usize, input: *const u8, in_len: usize,
 ) {
     if out_len < 2 * in_len + 1 {
@@ -152,7 +159,7 @@ pub unsafe extern "C" fn rs_to_hex(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn rs_to_hex_sep(
+pub unsafe extern "C" fn SCToHex_sep(
     output: *mut u8, out_len: usize, sep: u8, input: *const u8, in_len: usize,
 ) {
     if out_len < 3 * in_len {

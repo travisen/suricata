@@ -24,11 +24,13 @@
 #include "decode.h"
 #include "detect.h"
 
+#include "rust.h"
 #include "app-layer-frames.h"
 #include "app-layer-parser.h"
 
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-prefilter.h"
 #include "detect-content.h"
@@ -97,7 +99,7 @@ static int DetectFrameSetup(DetectEngineCtx *de_ctx, Signature *s, const char *s
         SCLogError("rule protocol unknown, can't use shorthand notation for frame '%s'", str);
         return -1;
     } else if (rule_alproto == ALPROTO_UNKNOWN) {
-        if (DetectSignatureSetAppProto(s, keyword_alproto) < 0)
+        if (SCDetectSignatureSetAppProto(s, keyword_alproto) < 0)
             return -1;
     } else if (!AppProtoEquals(rule_alproto, keyword_alproto)) {
         SCLogError("frame '%s' protocol '%s' mismatch with rule protocol '%s'", str,
@@ -138,7 +140,7 @@ static int DetectFrameSetup(DetectEngineCtx *de_ctx, Signature *s, const char *s
     if (buffer_id < 0)
         return -1;
 
-    if (DetectBufferSetActiveList(de_ctx, s, buffer_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, buffer_id) < 0)
         return -1;
 
     FrameConfigEnable(keyword_alproto, frame_type);

@@ -25,6 +25,7 @@
 
 #include "suricata-common.h"
 #include "decode.h"
+#include "action-globals.h"
 #include "detect.h"
 #include "threads.h"
 #include "flow.h"
@@ -106,7 +107,7 @@ static int DetectHostbitMatchToggle (Packet *p, const DetectXbitsData *fd)
             else
                 HostLock(p->host_src);
 
-            HostBitToggle(p->host_src, fd->idx, SCTIME_SECS(p->ts) + fd->expire);
+            HostBitToggle(p->host_src, fd->idx, SCTIME_ADD_SECS(p->ts, fd->expire));
             HostUnlock(p->host_src);
             break;
         case DETECT_XBITS_TRACK_IPDST:
@@ -118,7 +119,7 @@ static int DetectHostbitMatchToggle (Packet *p, const DetectXbitsData *fd)
             else
                 HostLock(p->host_dst);
 
-            HostBitToggle(p->host_dst, fd->idx, SCTIME_SECS(p->ts) + fd->expire);
+            HostBitToggle(p->host_dst, fd->idx, SCTIME_ADD_SECS(p->ts, fd->expire));
             HostUnlock(p->host_dst);
             break;
     }
@@ -166,7 +167,7 @@ static int DetectHostbitMatchSet (Packet *p, const DetectXbitsData *fd)
             } else
                 HostLock(p->host_src);
 
-            HostBitSet(p->host_src, fd->idx, SCTIME_SECS(p->ts) + fd->expire);
+            HostBitSet(p->host_src, fd->idx, SCTIME_ADD_SECS(p->ts, fd->expire));
             HostUnlock(p->host_src);
             break;
         case DETECT_XBITS_TRACK_IPDST:
@@ -177,7 +178,7 @@ static int DetectHostbitMatchSet (Packet *p, const DetectXbitsData *fd)
             } else
                 HostLock(p->host_dst);
 
-            HostBitSet(p->host_dst, fd->idx, SCTIME_SECS(p->ts) + fd->expire);
+            HostBitSet(p->host_dst, fd->idx, SCTIME_ADD_SECS(p->ts, fd->expire));
             HostUnlock(p->host_dst);
             break;
     }
@@ -196,7 +197,7 @@ static int DetectHostbitMatchIsset (Packet *p, const DetectXbitsData *fd)
             } else
                 HostLock(p->host_src);
 
-            r = HostBitIsset(p->host_src, fd->idx, SCTIME_SECS(p->ts));
+            r = HostBitIsset(p->host_src, fd->idx, p->ts);
             HostUnlock(p->host_src);
             return r;
         case DETECT_XBITS_TRACK_IPDST:
@@ -207,7 +208,7 @@ static int DetectHostbitMatchIsset (Packet *p, const DetectXbitsData *fd)
             } else
                 HostLock(p->host_dst);
 
-            r = HostBitIsset(p->host_dst, fd->idx, SCTIME_SECS(p->ts));
+            r = HostBitIsset(p->host_dst, fd->idx, p->ts);
             HostUnlock(p->host_dst);
             return r;
     }
@@ -226,7 +227,7 @@ static int DetectHostbitMatchIsnotset (Packet *p, const DetectXbitsData *fd)
             } else
                 HostLock(p->host_src);
 
-            r = HostBitIsnotset(p->host_src, fd->idx, SCTIME_SECS(p->ts));
+            r = HostBitIsnotset(p->host_src, fd->idx, p->ts);
             HostUnlock(p->host_src);
             return r;
         case DETECT_XBITS_TRACK_IPDST:
@@ -237,7 +238,7 @@ static int DetectHostbitMatchIsnotset (Packet *p, const DetectXbitsData *fd)
             } else
                 HostLock(p->host_dst);
 
-            r = HostBitIsnotset(p->host_dst, fd->idx, SCTIME_SECS(p->ts));
+            r = HostBitIsnotset(p->host_dst, fd->idx, p->ts);
             HostUnlock(p->host_dst);
             return r;
     }
@@ -377,7 +378,7 @@ int DetectHostbitSetup (DetectEngineCtx *de_ctx, Signature *s, const char *rawst
         case DETECT_XBITS_CMD_NOALERT:
             if (strlen(fb_name) != 0)
                 goto error;
-            s->flags |= SIG_FLAG_NOALERT;
+            s->action &= ~ACTION_ALERT;
             return 0;
         case DETECT_XBITS_CMD_ISNOTSET:
         case DETECT_XBITS_CMD_ISSET:
@@ -394,7 +395,10 @@ int DetectHostbitSetup (DetectEngineCtx *de_ctx, Signature *s, const char *rawst
     if (unlikely(cd == NULL))
         goto error;
 
-    cd->idx = VarNameStoreRegister(fb_name, VAR_TYPE_HOST_BIT);
+    uint32_t varname_id = VarNameStoreRegister(fb_name, VAR_TYPE_HOST_BIT);
+    if (unlikely(varname_id == 0))
+        goto error;
+    cd->idx = varname_id;
     cd->cmd = fb_cmd;
     cd->tracker = hb_dir;
     cd->type = VAR_TYPE_HOST_BIT;
@@ -412,7 +416,7 @@ int DetectHostbitSetup (DetectEngineCtx *de_ctx, Signature *s, const char *rawst
         case DETECT_XBITS_CMD_ISNOTSET:
         case DETECT_XBITS_CMD_ISSET:
             /* checks, so packet list */
-            if (SigMatchAppendSMToList(de_ctx, s, DETECT_HOSTBITS, (SigMatchCtx *)cd,
+            if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_HOSTBITS, (SigMatchCtx *)cd,
                         DETECT_SM_LIST_MATCH) == NULL) {
                 goto error;
             }
@@ -422,7 +426,7 @@ int DetectHostbitSetup (DetectEngineCtx *de_ctx, Signature *s, const char *rawst
         case DETECT_XBITS_CMD_UNSET:
         case DETECT_XBITS_CMD_TOGGLE:
             /* modifiers, only run when entire sig has matched */
-            if (SigMatchAppendSMToList(de_ctx, s, DETECT_HOSTBITS, (SigMatchCtx *)cd,
+            if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_HOSTBITS, (SigMatchCtx *)cd,
                         DETECT_SM_LIST_POSTMATCH) == NULL) {
                 goto error;
             }
@@ -457,6 +461,7 @@ void DetectHostbitFree (DetectEngineCtx *de_ctx, void *ptr)
 
 static void HostBitsTestSetup(void)
 {
+    StorageCleanup();
     StorageInit();
     HostBitInitCtx();
     StorageFinalize();
@@ -465,7 +470,7 @@ static void HostBitsTestSetup(void)
 
 static void HostBitsTestShutdown(void)
 {
-    HostCleanup();
+    HostShutdown();
     StorageCleanup();
 }
 
@@ -569,6 +574,7 @@ static int HostBitsTestSig01(void)
     DetectEngineCtx *de_ctx = NULL;
 
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
     p->src.family = AF_INET;
     p->dst.family = AF_INET;
     p->payload = buf;
@@ -590,10 +596,11 @@ static int HostBitsTestSig01(void)
 
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
 
+    PacketFree(p);
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
-    PacketFree(p);
     HostBitsTestShutdown();
+    StatsThreadCleanup(&th_v.stats);
     PASS;
 }
 
@@ -670,6 +677,7 @@ static int HostBitsTestSig03(void)
     int idx = 0;
 
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
     p->src.family = AF_INET;
     p->dst.family = AF_INET;
     p->payload = buf;
@@ -694,11 +702,11 @@ static int HostBitsTestSig03(void)
 
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
 
+    PacketFree(p);
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
     HostBitsTestShutdown();
-
-    SCFree(p);
+    StatsThreadCleanup(&th_v.stats);
     PASS;
 }
 

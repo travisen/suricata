@@ -1,4 +1,4 @@
-/* Copyright (C) 2018-2020 Open Information Security Foundation
+/* Copyright (C) 2018-2025 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -28,10 +28,12 @@
 #include "detect.h"
 #include "threads.h"
 #include "datasets.h"
+#include "datasets-context-json.h"
 #include "detect-dataset.h"
 
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-state.h"
 
@@ -40,9 +42,13 @@
 #include "util-misc.h"
 #include "util-path.h"
 #include "util-conf.h"
+#include "util-validate.h"
 
-int DetectDatasetMatch (ThreadVars *, DetectEngineThreadCtx *, Packet *,
-        const Signature *, const SigMatchCtx *);
+#define DETECT_DATASET_CMD_SET      0
+#define DETECT_DATASET_CMD_UNSET    1
+#define DETECT_DATASET_CMD_ISNOTSET 2
+#define DETECT_DATASET_CMD_ISSET    3
+
 static int DetectDatasetSetup (DetectEngineCtx *, Signature *, const char *);
 void DetectDatasetFree (DetectEngineCtx *, void *);
 
@@ -58,7 +64,58 @@ void DetectDatasetRegister (void)
 /*
     1 match
     0 no match
-    -1 can't match
+ */
+static int DetectDatajsonBufferMatch(DetectEngineThreadCtx *det_ctx, const DetectDatasetData *sd,
+        const uint8_t *data, const uint32_t data_len)
+{
+    if (data == NULL || data_len == 0)
+        return 0;
+
+    switch (sd->cmd) {
+        case DETECT_DATASET_CMD_ISSET: {
+            // PrintRawDataFp(stdout, data, data_len);
+            DataJsonResultType r = DatajsonLookup(sd->set, data, data_len);
+            SCLogDebug("r found: %d, len: %u", r.found, r.json.len);
+            if (!r.found)
+                return 0;
+            if (r.json.len > 0) {
+                /* we need to add 3 on length check for the added quotes and colon when
+                building the json string */
+                if (r.json.len + strlen(sd->json_key) + 3 < SIG_JSON_CONTENT_ITEM_LEN) {
+                    if (DetectEngineThreadCtxGetJsonContext(det_ctx) < 0) {
+                        DatajsonUnlockElt(&r);
+                        return 0;
+                    }
+                    snprintf(det_ctx->json_content[det_ctx->json_content_len].json_content,
+                            SIG_JSON_CONTENT_ITEM_LEN, "\"%s\":%s", sd->json_key, r.json.value);
+                    det_ctx->json_content[det_ctx->json_content_len].id = sd->id;
+                    det_ctx->json_content_len++;
+                    SCLogDebug("Added json content %u (alloc length %u)", det_ctx->json_content_len,
+                            det_ctx->json_content_capacity);
+                }
+            }
+            DatajsonUnlockElt(&r);
+            return 1;
+        }
+        case DETECT_DATASET_CMD_ISNOTSET: {
+            // PrintRawDataFp(stdout, data, data_len);
+            DataJsonResultType r = DatajsonLookup(sd->set, data, data_len);
+            SCLogDebug("r found: %d, len: %u", r.found, r.json.len);
+            if (r.found) {
+                DatajsonUnlockElt(&r);
+                return 0;
+            }
+            return 1;
+        }
+        default:
+            DEBUG_VALIDATE_BUG_ON("unknown dataset with json command");
+    }
+    return 0;
+}
+
+/*
+    1 match
+    0 no match
  */
 int DetectDatasetBufferMatch(DetectEngineThreadCtx *det_ctx,
     const DetectDatasetData *sd,
@@ -66,6 +123,10 @@ int DetectDatasetBufferMatch(DetectEngineThreadCtx *det_ctx,
 {
     if (data == NULL || data_len == 0)
         return 0;
+
+    if ((sd->format == DATASET_FORMAT_JSON) || (sd->format == DATASET_FORMAT_NDJSON)) {
+        return DetectDatajsonBufferMatch(det_ctx, sd, data, data_len);
+    }
 
     switch (sd->cmd) {
         case DETECT_DATASET_CMD_ISSET: {
@@ -86,31 +147,41 @@ int DetectDatasetBufferMatch(DetectEngineThreadCtx *det_ctx,
         }
         case DETECT_DATASET_CMD_SET: {
             //PrintRawDataFp(stdout, data, data_len);
-            int r = DatasetAdd(sd->set, data, data_len);
+            int r = SCDatasetAdd(sd->set, data, data_len);
+            if (r == 1)
+                return 1;
+            break;
+        }
+        case DETECT_DATASET_CMD_UNSET: {
+            int r = DatasetRemove(sd->set, data, data_len);
             if (r == 1)
                 return 1;
             break;
         }
         default:
-            abort();
+            DEBUG_VALIDATE_BUG_ON("unknown dataset command");
     }
     return 0;
 }
 
 static int DetectDatasetParse(const char *str, char *cmd, int cmd_len, char *name, int name_len,
         enum DatasetTypes *type, char *load, size_t load_size, char *save, size_t save_size,
-        uint64_t *memcap, uint32_t *hashsize)
+        uint64_t *memcap, uint32_t *hashsize, DatasetFormats *format, char *value_key,
+        size_t value_key_size, char *array_key, size_t array_key_size, char *enrichment_key,
+        size_t enrichment_key_size, bool *remove_key)
 {
     bool cmd_set = false;
     bool name_set = false;
     bool load_set = false;
     bool save_set = false;
     bool state_set = false;
+    bool format_set = false;
 
     char copy[strlen(str)+1];
     strlcpy(copy, str, sizeof(copy));
     char *xsaveptr = NULL;
     char *key = strtok_r(copy, ",", &xsaveptr);
+
     while (key != NULL) {
         while (*key != '\0' && isblank(*key)) {
             key++;
@@ -144,10 +215,12 @@ static int DetectDatasetParse(const char *str, char *cmd, int cmd_len, char *nam
             name_set = true;
         } else {
             if (val == NULL) {
-                return -1;
-            }
-
-            if (strcmp(key, "type") == 0) {
+                /* only non fixed place option without value is remove_key */
+                if (strcmp(key, "remove_key") == 0) {
+                    *remove_key = true;
+                } else
+                    return -1;
+            } else if (strcmp(key, "type") == 0) {
                 SCLogDebug("type %s", val);
 
                 if (strcmp(val, "md5") == 0) {
@@ -169,7 +242,7 @@ static int DetectDatasetParse(const char *str, char *cmd, int cmd_len, char *nam
 
             } else if (strcmp(key, "save") == 0) {
                 if (save_set) {
-                    SCLogWarning("'save' can only appear once");
+                    SCLogError("'save' can only appear once");
                     return -1;
                 }
                 SCLogDebug("save %s", val);
@@ -177,7 +250,7 @@ static int DetectDatasetParse(const char *str, char *cmd, int cmd_len, char *nam
                 save_set = true;
             } else if (strcmp(key, "load") == 0) {
                 if (load_set) {
-                    SCLogWarning("'load' can only appear once");
+                    SCLogError("'load' can only appear once");
                     return -1;
                 }
                 SCLogDebug("load %s", val);
@@ -185,14 +258,57 @@ static int DetectDatasetParse(const char *str, char *cmd, int cmd_len, char *nam
                 load_set = true;
             } else if (strcmp(key, "state") == 0) {
                 if (state_set) {
-                    SCLogWarning("'state' can only appear once");
+                    SCLogError("'state' can only appear once");
                     return -1;
                 }
                 SCLogDebug("state %s", val);
                 strlcpy(load, val, load_size);
                 strlcpy(save, val, save_size);
                 state_set = true;
+            } else if (strcmp(key, "format") == 0) {
+                if (format_set) {
+                    SCLogError("'format' can only appear once");
+                    return -1;
+                }
+                SCLogDebug("format %s", val);
+                if (strcmp(val, "csv") == 0) {
+                    *format = DATASET_FORMAT_CSV;
+                } else if (strcmp(val, "ndjson") == 0) {
+                    *format = DATASET_FORMAT_NDJSON;
+                } else if (strcmp(val, "json") == 0) {
+                    *format = DATASET_FORMAT_JSON;
+                } else {
+                    SCLogError("unknown format %s", val);
+                    return -1;
+                }
+                format_set = true;
+            } else if (strcmp(key, "value_key") == 0) {
+                if (strlen(val) > value_key_size) {
+                    SCLogError("'key' value too long (limit is %zu)", value_key_size);
+                    return -1;
+                }
+                strlcpy(value_key, val, value_key_size);
+            } else if (strcmp(key, "array_key") == 0) {
+                if (strlen(val) > array_key_size) {
+                    SCLogError("'key' value too long (limit is %zu)", array_key_size);
+                    return -1;
+                }
+                strlcpy(array_key, val, array_key_size);
+            } else if (strcmp(key, "context_key") == 0) {
+                for (size_t i = 0; i < strlen(val); i++) {
+                    if (!isalnum(val[i]) && val[i] != '_') {
+                        SCLogError("context_key can only contain alphanumeric characters and "
+                                   "underscores");
+                        return -1;
+                    }
+                }
+                if (strlen(val) > enrichment_key_size) {
+                    SCLogError("'key' value too long (limit is %zu)", enrichment_key_size);
+                    return -1;
+                }
+                strlcpy(enrichment_key, val, enrichment_key_size);
             }
+
             if (strcmp(key, "memcap") == 0) {
                 if (ParseSizeStringU64(val, memcap) < 0) {
                     SCLogWarning("invalid value for memcap: %s,"
@@ -218,7 +334,7 @@ static int DetectDatasetParse(const char *str, char *cmd, int cmd_len, char *nam
     }
 
     if ((load_set || save_set) && state_set) {
-        SCLogWarning("'state' can not be mixed with 'load' and 'save'");
+        SCLogError("'state' can not be mixed with 'load' and 'save'");
         return -1;
     }
 
@@ -252,7 +368,6 @@ static void GetDirName(const char *in, char *out, size_t outs)
     char *dir = dirname(tmp);
     BUG_ON(dir == NULL);
     strlcpy(out, dir, outs);
-    return;
 }
 
 static int SetupLoadPath(const DetectEngineCtx *de_ctx,
@@ -273,7 +388,7 @@ static int SetupLoadPath(const DetectEngineCtx *de_ctx,
 
     SCLogDebug("rule_file %s dir %s", de_ctx->rule_file, dir);
     char path[PATH_MAX];
-    if (snprintf(path, sizeof(path), "%s/%s", dir, load) >= (int)sizeof(path)) // TODO windows path
+    if (PathMerge(path, sizeof(path), dir, load) < 0)
         return -1;
 
     if (SCPathExists(path)) {
@@ -304,7 +419,7 @@ static int SetupSavePath(const DetectEngineCtx *de_ctx,
     SCLogDebug("save %s", save);
 
     int allow_save = 1;
-    if (ConfGetBool("datasets.rules.allow-write", &allow_save)) {
+    if (SCConfGetBool("datasets.rules.allow-write", &allow_save)) {
         if (!allow_save) {
             SCLogError("Rules containing save/state datasets have been disabled");
             return -1;
@@ -312,7 +427,7 @@ static int SetupSavePath(const DetectEngineCtx *de_ctx,
     }
 
     int allow_absolute = 0;
-    (void)ConfGetBool("datasets.rules.allow-absolute-filenames", &allow_absolute);
+    (void)SCConfGetBool("datasets.rules.allow-absolute-filenames", &allow_absolute);
     if (allow_absolute) {
         SCLogNotice("Allowing absolute filename for dataset rule: %s", save);
     } else {
@@ -330,13 +445,15 @@ static int SetupSavePath(const DetectEngineCtx *de_ctx,
     // data dir
     const char *dir = ConfigGetDataDirectory();
     BUG_ON(dir == NULL); // should not be able to fail
-    char path[PATH_MAX];
-    if (snprintf(path, sizeof(path), "%s/%s", dir, save) >= (int)sizeof(path)) // TODO windows path
-        return -1;
+    if (!PathIsAbsolute(save)) {
+        char path[PATH_MAX];
+        if (PathMerge(path, sizeof(path), dir, save) < 0)
+            return -1;
 
-    /* TODO check if location exists and is writable */
+        /* TODO check if location exists and is writable */
 
-    strlcpy(save, path, save_size);
+        strlcpy(save, path, save_size);
+    }
 
     return 0;
 }
@@ -351,6 +468,11 @@ int DetectDatasetSetup (DetectEngineCtx *de_ctx, Signature *s, const char *rawst
     enum DatasetTypes type = DATASET_TYPE_NOTSET;
     char load[PATH_MAX] = "";
     char save[PATH_MAX] = "";
+    DatasetFormats format = DATASET_FORMAT_CSV;
+    char value_key[SIG_JSON_CONTENT_KEY_LEN] = "";
+    char array_key[SIG_JSON_CONTENT_KEY_LEN] = "";
+    char enrichment_key[SIG_JSON_CONTENT_KEY_LEN] = "";
+    bool remove_key = false;
 
     if (DetectBufferGetActiveList(de_ctx, s) == -1) {
         SCLogError("datasets are only supported for sticky buffers");
@@ -364,7 +486,9 @@ int DetectDatasetSetup (DetectEngineCtx *de_ctx, Signature *s, const char *rawst
     }
 
     if (!DetectDatasetParse(rawstr, cmd_str, sizeof(cmd_str), name, sizeof(name), &type, load,
-                sizeof(load), save, sizeof(save), &memcap, &hashsize)) {
+                sizeof(load), save, sizeof(save), &memcap, &hashsize, &format, value_key,
+                sizeof(value_key), array_key, sizeof(array_key), enrichment_key,
+                sizeof(enrichment_key), &remove_key)) {
         return -1;
     }
 
@@ -373,12 +497,35 @@ int DetectDatasetSetup (DetectEngineCtx *de_ctx, Signature *s, const char *rawst
     } else if (strcmp(cmd_str,"isnotset") == 0) {
         cmd = DETECT_DATASET_CMD_ISNOTSET;
     } else if (strcmp(cmd_str,"set") == 0) {
+        if ((format == DATASET_FORMAT_JSON) || (format == DATASET_FORMAT_NDJSON)) {
+            SCLogError("json format is not supported for 'set' command");
+            return -1;
+        }
         cmd = DETECT_DATASET_CMD_SET;
     } else if (strcmp(cmd_str,"unset") == 0) {
+        if ((format == DATASET_FORMAT_JSON) || (format == DATASET_FORMAT_NDJSON)) {
+            SCLogError("json format is not supported for 'unset' command");
+            return -1;
+        }
         cmd = DETECT_DATASET_CMD_UNSET;
     } else {
         SCLogError("dataset action \"%s\" is not supported.", cmd_str);
         return -1;
+    }
+
+    if ((format == DATASET_FORMAT_JSON) || (format == DATASET_FORMAT_NDJSON)) {
+        if (strlen(save) != 0) {
+            SCLogError("json format is not supported with 'save' or 'state' option");
+            return -1;
+        }
+        if (strlen(enrichment_key) == 0) {
+            SCLogError("json format needs a 'context_key' parameter");
+            return -1;
+        }
+        if (strlen(value_key) == 0) {
+            SCLogError("json format needs a 'value_key' parameter");
+            return -1;
+        }
     }
 
     /* if just 'load' is set, we load data from the same dir as the
@@ -401,13 +548,19 @@ int DetectDatasetSetup (DetectEngineCtx *de_ctx, Signature *s, const char *rawst
     }
 
     SCLogDebug("name '%s' load '%s' save '%s'", name, load, save);
-    Dataset *set = DatasetGet(name, type, save, load, memcap, hashsize);
+    Dataset *set = NULL;
+
+    if (format == DATASET_FORMAT_JSON) {
+        set = DatajsonGet(name, type, load, memcap, hashsize, value_key, array_key,
+                DATASET_FORMAT_JSON, remove_key);
+    } else if (format == DATASET_FORMAT_NDJSON) {
+        set = DatajsonGet(name, type, load, memcap, hashsize, value_key, NULL,
+                DATASET_FORMAT_NDJSON, remove_key);
+    } else {
+        set = DatasetGet(name, type, save, load, memcap, hashsize);
+    }
     if (set == NULL) {
         SCLogError("failed to set up dataset '%s'.", name);
-        return -1;
-    }
-    if (set->hash && SC_ATOMIC_GET(set->hash->memcap_reached)) {
-        SCLogError("dataset too large for set memcap");
         return -1;
     }
 
@@ -417,6 +570,11 @@ int DetectDatasetSetup (DetectEngineCtx *de_ctx, Signature *s, const char *rawst
 
     cd->set = set;
     cd->cmd = cmd;
+    cd->format = format;
+    if ((format == DATASET_FORMAT_JSON) || (format == DATASET_FORMAT_NDJSON)) {
+        strlcpy(cd->json_key, enrichment_key, sizeof(cd->json_key));
+    }
+    cd->id = s;
 
     SCLogDebug("cmd %s, name %s",
         cmd_str, strlen(name) ? name : "(none)");
@@ -424,7 +582,7 @@ int DetectDatasetSetup (DetectEngineCtx *de_ctx, Signature *s, const char *rawst
     /* Okay so far so good, lets get this into a SigMatch
      * and put it in the Signature. */
 
-    if (SigMatchAppendSMToList(de_ctx, s, DETECT_DATASET, (SigMatchCtx *)cd, list) == NULL) {
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_DATASET, (SigMatchCtx *)cd, list) == NULL) {
         goto error;
     }
     return 0;

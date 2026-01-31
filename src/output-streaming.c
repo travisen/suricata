@@ -48,37 +48,33 @@ typedef struct OutputStreamingLoggerThreadData_ {
  * it's perfectly valid that have multiple instances of the same
  * log module (e.g. http.log) with different output ctx'. */
 typedef struct OutputStreamingLogger_ {
-    StreamingLogger LogFunc;
-    OutputCtx *output_ctx;
+    SCStreamingLogger LogFunc;
+    void *initdata;
     struct OutputStreamingLogger_ *next;
     const char *name;
     LoggerId logger_id;
-    enum OutputStreamingType type;
+    enum SCOutputStreamingType type;
     ThreadInitFunc ThreadInit;
     ThreadDeinitFunc ThreadDeinit;
-    ThreadExitPrintStatsFunc ThreadExitPrintStats;
 } OutputStreamingLogger;
 
 static OutputStreamingLogger *list = NULL;
 
-int OutputRegisterStreamingLogger(LoggerId id, const char *name,
-    StreamingLogger LogFunc, OutputCtx *output_ctx,
-    enum OutputStreamingType type, ThreadInitFunc ThreadInit,
-    ThreadDeinitFunc ThreadDeinit,
-    ThreadExitPrintStatsFunc ThreadExitPrintStats)
+int SCOutputRegisterStreamingLogger(LoggerId id, const char *name, SCStreamingLogger LogFunc,
+        void *initdata, enum SCOutputStreamingType type, ThreadInitFunc ThreadInit,
+        ThreadDeinitFunc ThreadDeinit)
 {
     OutputStreamingLogger *op = SCCalloc(1, sizeof(*op));
     if (op == NULL)
         return -1;
 
     op->LogFunc = LogFunc;
-    op->output_ctx = output_ctx;
+    op->initdata = initdata;
     op->name = name;
     op->logger_id = id;
     op->type = type;
     op->ThreadInit = ThreadInit;
     op->ThreadDeinit = ThreadDeinit;
-    op->ThreadExitPrintStats = ThreadExitPrintStats;
 
     if (list == NULL)
         list = op;
@@ -102,7 +98,7 @@ typedef struct StreamerCallbackData_ {
     OutputLoggerThreadStore *store;
     ThreadVars *tv;
     Packet *p;
-    enum OutputStreamingType type;
+    enum SCOutputStreamingType type;
 } StreamerCallbackData;
 
 static int Streamer(void *cbdata, Flow *f, const uint8_t *data, uint32_t data_len, uint64_t tx_id, uint8_t flags)
@@ -182,19 +178,18 @@ static int HttpBodyIterator(Flow *f, int close, void *cbdata, uint8_t iflags)
         }
 
         SCLogDebug("tx %p", tx);
-        HtpTxUserData *htud = (HtpTxUserData *) htp_tx_get_user_data(tx);
-        if (htud != NULL) {
-            SCLogDebug("htud %p", htud);
-            HtpBody *body = NULL;
-            if (iflags & OUTPUT_STREAMING_FLAG_TOSERVER)
-                body = &htud->request_body;
-            else if (iflags & OUTPUT_STREAMING_FLAG_TOCLIENT)
-                body = &htud->response_body;
+        HtpTxUserData *htud = (HtpTxUserData *)htp_tx_get_user_data(tx);
+        SCLogDebug("htud %p", htud);
+        HtpBody *body = NULL;
+        if (iflags & OUTPUT_STREAMING_FLAG_TOSERVER)
+            body = &htud->request_body;
+        else if (iflags & OUTPUT_STREAMING_FLAG_TOCLIENT)
+            body = &htud->response_body;
 
-            if (body == NULL) {
-                SCLogDebug("no body");
-                goto next;
-            }
+        if (body == NULL) {
+            SCLogDebug("no body");
+            goto next;
+        }
             if (body->first == NULL) {
                 SCLogDebug("no body chunks");
                 goto next;
@@ -240,7 +235,6 @@ static int HttpBodyIterator(Flow *f, int close, void *cbdata, uint8_t iflags)
                 Streamer(cbdata, f, NULL, 0, tx_id,
                          iflags|OUTPUT_STREAMING_FLAG_CLOSE|OUTPUT_STREAMING_FLAG_TRANSACTION);
             }
-        }
     }
     return 0;
 }
@@ -279,7 +273,8 @@ static int TcpDataLogger (Flow *f, TcpSession *ssn, TcpStream *stream,
             progress, &progress, eof);
 
     if (progress > STREAM_LOG_PROGRESS(stream)) {
-        uint32_t slide = progress - STREAM_LOG_PROGRESS(stream);
+        DEBUG_VALIDATE_BUG_ON(progress - STREAM_LOG_PROGRESS(stream) > UINT32_MAX);
+        uint32_t slide = (uint32_t)(progress - STREAM_LOG_PROGRESS(stream));
         stream->log_progress_rel += slide;
     }
 
@@ -376,7 +371,7 @@ static TmEcode OutputStreamingLogThreadInit(ThreadVars *tv, const void *initdata
     while (logger) {
         if (logger->ThreadInit) {
             void *retptr = NULL;
-            if (logger->ThreadInit(tv, (void *)logger->output_ctx, &retptr) == TM_ECODE_OK) {
+            if (logger->ThreadInit(tv, logger->initdata, &retptr) == TM_ECODE_OK) {
                 OutputLoggerThreadStore *ts = SCCalloc(1, sizeof(*ts));
                 /* todo */ BUG_ON(ts == NULL);
 
@@ -392,7 +387,7 @@ static TmEcode OutputStreamingLogThreadInit(ThreadVars *tv, const void *initdata
                     tmp->next = ts;
                 }
 
-                SCLogInfo("%s is now set up", logger->name);
+                SCLogDebug("%s is now set up", logger->name);
             }
         }
 
@@ -425,22 +420,6 @@ static TmEcode OutputStreamingLogThreadDeinit(ThreadVars *tv, void *thread_data)
     return TM_ECODE_OK;
 }
 
-static void OutputStreamingLogExitPrintStats(ThreadVars *tv, void *thread_data) {
-    OutputStreamingLoggerThreadData *op_thread_data =
-            (OutputStreamingLoggerThreadData *)thread_data;
-    OutputLoggerThreadStore *store = op_thread_data->store;
-    OutputStreamingLogger *logger = list;
-
-    while (logger && store) {
-        if (logger->ThreadExitPrintStats) {
-            logger->ThreadExitPrintStats(tv, store->thread_data);
-        }
-
-        logger = logger->next;
-        store = store->next;
-    }
-}
-
 static uint32_t OutputStreamingLoggerGetActiveCount(void)
 {
     uint32_t cnt = 0;
@@ -451,9 +430,8 @@ static uint32_t OutputStreamingLoggerGetActiveCount(void)
 }
 
 void OutputStreamingLoggerRegister(void) {
-    OutputRegisterRootLogger(OutputStreamingLogThreadInit,
-        OutputStreamingLogThreadDeinit, OutputStreamingLogExitPrintStats,
-        OutputStreamingLog, OutputStreamingLoggerGetActiveCount);
+    OutputRegisterRootLogger(OutputStreamingLogThreadInit, OutputStreamingLogThreadDeinit,
+            OutputStreamingLog, OutputStreamingLoggerGetActiveCount);
 }
 
 void OutputStreamingShutdown(void)

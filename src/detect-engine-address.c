@@ -85,7 +85,6 @@ void DetectAddressFree(DetectAddress *ag)
         return;
 
     SCFree(ag);
-    return;
 }
 
 /**
@@ -137,30 +136,12 @@ DetectAddress *DetectAddressCopy(DetectAddress *orig)
     return ag;
 }
 
-#ifdef DEBUG
 /**
- * \brief Prints the address data information for all the DetectAddress
- *        instances in the DetectAddress list sent as the argument.
- *
- * \param head Pointer to a list of DetectAddress instances.
- */
-void DetectAddressPrintList(DetectAddress *head)
-{
-    SCLogInfo("list:");
-    for (DetectAddress *cur = head; cur != NULL; cur = cur->next) {
-        DetectAddressPrint(cur);
-    }
-    SCLogInfo("endlist");
-}
-#endif
-
-/**
- * \internal
  * \brief Frees a list of DetectAddress instances.
  *
  * \param head Pointer to a list of DetectAddress instances to be freed.
  */
-static void DetectAddressCleanupList(DetectAddress *head)
+void DetectAddressCleanupList(DetectAddress *head)
 {
     for (DetectAddress *cur = head; cur != NULL; ) {
         DetectAddress *next = cur->next;
@@ -861,11 +842,12 @@ static int DetectAddressParseInternal(const DetectEngineCtx *de_ctx, DetectAddre
 
                 SCLogDebug("rule_var_address %s", rule_var_address);
                 if ((negate + n_set) % 2) {
-                    temp_rule_var_address = SCMalloc(strlen(rule_var_address) + 3);
+                    /* add +1 to safisfy gcc 15 + -Wformat-truncation=2 */
+                    const size_t str_size = strlen(rule_var_address) + 3 + 1;
+                    temp_rule_var_address = SCMalloc(str_size);
                     if (unlikely(temp_rule_var_address == NULL))
                         goto error;
-                    snprintf(temp_rule_var_address, strlen(rule_var_address) + 3,
-                             "[%s]", rule_var_address);
+                    snprintf(temp_rule_var_address, str_size, "[%s]", rule_var_address);
                 } else {
                     temp_rule_var_address = SCStrdup(rule_var_address);
                     if (unlikely(temp_rule_var_address == NULL))
@@ -929,11 +911,12 @@ static int DetectAddressParseInternal(const DetectEngineCtx *de_ctx, DetectAddre
 
                 SCLogDebug("rule_var_address %s", rule_var_address);
                 if ((negate + n_set) % 2) {
-                    temp_rule_var_address = SCMalloc(strlen(rule_var_address) + 3);
+                    /* add +1 to safisfy gcc 15 + -Wformat-truncation=2 */
+                    const size_t str_size = strlen(rule_var_address) + 3 + 1;
+                    temp_rule_var_address = SCMalloc(str_size);
                     if (unlikely(temp_rule_var_address == NULL))
                         goto error;
-                    snprintf(temp_rule_var_address, strlen(rule_var_address) + 3,
-                            "[%s]", rule_var_address);
+                    snprintf(temp_rule_var_address, str_size, "[%s]", rule_var_address);
                 } else {
                     temp_rule_var_address = SCStrdup(rule_var_address);
                     if (unlikely(temp_rule_var_address == NULL))
@@ -1238,7 +1221,7 @@ int DetectAddressTestConfVars(void)
 
     ResolvedVariablesList var_list = TAILQ_HEAD_INITIALIZER(var_list);
 
-    ConfNode *address_vars_node = ConfGetNode("vars.address-groups");
+    SCConfNode *address_vars_node = SCConfGetNode("vars.address-groups");
     if (address_vars_node == NULL) {
         return 0;
     }
@@ -1246,7 +1229,7 @@ int DetectAddressTestConfVars(void)
     DetectAddressHead *gh = NULL;
     DetectAddressHead *ghn = NULL;
 
-    ConfNode *seq_node;
+    SCConfNode *seq_node;
     TAILQ_FOREACH(seq_node, &address_vars_node->head, next) {
         SCLogDebug("Testing %s - %s", seq_node->name, seq_node->val);
 
@@ -1359,7 +1342,6 @@ void DetectAddressMapFree(DetectEngineCtx *de_ctx)
 
     HashListTableFree(de_ctx->address_table);
     de_ctx->address_table = NULL;
-    return;
 }
 
 static bool DetectAddressMapAdd(DetectEngineCtx *de_ctx, const char *string,
@@ -1377,7 +1359,7 @@ static bool DetectAddressMapAdd(DetectEngineCtx *de_ctx, const char *string,
     map->address = address;
     map->contains_negation = contains_negation;
 
-    if (HashListTableAdd(de_ctx->address_table, (void *)map, 0) != 0) {
+    if (HashListTableAdd(de_ctx->address_table, map, 0) != 0) {
         SCFree(map->string);
         SCFree(map);
         return false;
@@ -1504,8 +1486,6 @@ void DetectAddressHeadCleanup(DetectAddressHead *gh)
             gh->ipv6_head = NULL;
         }
     }
-
-    return;
 }
 
 /**
@@ -1804,8 +1784,6 @@ static void DetectAddressPrint(DetectAddress *gr)
         SCLogDebug("%s/%s", ip, mask);
 //        printf("%s/%s", ip, mask);
     }
-
-    return;
 }
 #endif
 
@@ -4362,7 +4340,7 @@ static int AddressTestCutIPv401(void)
 
 static int AddressTestCutIPv402(void)
 {
-    DetectAddress *a, *b, *c;
+    DetectAddress *a, *b, *c = NULL;
     a = DetectAddressParseSingle("1.2.3.0/255.255.255.0");
     b = DetectAddressParseSingle("1.2.2.0-1.2.3.4");
 
@@ -4386,7 +4364,7 @@ error:
 
 static int AddressTestCutIPv403(void)
 {
-    DetectAddress *a, *b, *c;
+    DetectAddress *a, *b, *c = NULL;
     a = DetectAddressParseSingle("1.2.3.0/255.255.255.0");
     b = DetectAddressParseSingle("1.2.2.0-1.2.3.4");
 
@@ -4417,7 +4395,7 @@ error:
 
 static int AddressTestCutIPv404(void)
 {
-    DetectAddress *a, *b, *c;
+    DetectAddress *a, *b, *c = NULL;
     a = DetectAddressParseSingle("1.2.3.3-1.2.3.6");
     b = DetectAddressParseSingle("1.2.3.0-1.2.3.5");
 
@@ -4449,7 +4427,7 @@ error:
 
 static int AddressTestCutIPv405(void)
 {
-    DetectAddress *a, *b, *c;
+    DetectAddress *a, *b, *c = NULL;
     a = DetectAddressParseSingle("1.2.3.3-1.2.3.6");
     b = DetectAddressParseSingle("1.2.3.0-1.2.3.9");
 
@@ -4480,7 +4458,7 @@ error:
 
 static int AddressTestCutIPv406(void)
 {
-    DetectAddress *a, *b, *c;
+    DetectAddress *a, *b, *c = NULL;
     a = DetectAddressParseSingle("1.2.3.0-1.2.3.9");
     b = DetectAddressParseSingle("1.2.3.3-1.2.3.6");
 
@@ -4511,7 +4489,7 @@ error:
 
 static int AddressTestCutIPv407(void)
 {
-    DetectAddress *a, *b, *c;
+    DetectAddress *a, *b, *c = NULL;
     a = DetectAddressParseSingle("1.2.3.0-1.2.3.6");
     b = DetectAddressParseSingle("1.2.3.0-1.2.3.9");
 
@@ -4540,7 +4518,7 @@ error:
 
 static int AddressTestCutIPv408(void)
 {
-    DetectAddress *a, *b, *c;
+    DetectAddress *a, *b, *c = NULL;
     a = DetectAddressParseSingle("1.2.3.3-1.2.3.9");
     b = DetectAddressParseSingle("1.2.3.0-1.2.3.9");
 
@@ -4569,7 +4547,7 @@ error:
 
 static int AddressTestCutIPv409(void)
 {
-    DetectAddress *a, *b, *c;
+    DetectAddress *a, *b, *c = NULL;
     a = DetectAddressParseSingle("1.2.3.0-1.2.3.9");
     b = DetectAddressParseSingle("1.2.3.0-1.2.3.6");
 
@@ -4598,7 +4576,7 @@ error:
 
 static int AddressTestCutIPv410(void)
 {
-    DetectAddress *a, *b, *c;
+    DetectAddress *a, *b, *c = NULL;
     a = DetectAddressParseSingle("1.2.3.0-1.2.3.9");
     b = DetectAddressParseSingle("1.2.3.3-1.2.3.9");
 
@@ -4689,15 +4667,15 @@ static int AddressConfVarsTest01(void)
 
     int result = 0;
 
-    ConfCreateContextBackup();
-    ConfInit();
-    ConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
+    SCConfCreateContextBackup();
+    SCConfInit();
+    SCConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
 
     if (DetectAddressTestConfVars() < 0 && DetectPortTestConfVars() < 0)
         result = 1;
 
-    ConfDeInit();
-    ConfRestoreContextBackup();
+    SCConfDeInit();
+    SCConfRestoreContextBackup();
 
     return result;
 }
@@ -4725,15 +4703,15 @@ static int AddressConfVarsTest02(void)
 
     int result = 0;
 
-    ConfCreateContextBackup();
-    ConfInit();
-    ConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
+    SCConfCreateContextBackup();
+    SCConfInit();
+    SCConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
 
     if (DetectAddressTestConfVars() == 0 && DetectPortTestConfVars() < 0)
         result = 1;
 
-    ConfDeInit();
-    ConfRestoreContextBackup();
+    SCConfDeInit();
+    SCConfRestoreContextBackup();
 
     return result;
 }
@@ -4761,15 +4739,15 @@ static int AddressConfVarsTest03(void)
 
     int result = 0;
 
-    ConfCreateContextBackup();
-    ConfInit();
-    ConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
+    SCConfCreateContextBackup();
+    SCConfInit();
+    SCConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
 
     if (DetectAddressTestConfVars() < 0 && DetectPortTestConfVars() < 0)
         result = 1;
 
-    ConfDeInit();
-    ConfRestoreContextBackup();
+    SCConfDeInit();
+    SCConfRestoreContextBackup();
 
     return result;
 }
@@ -4797,15 +4775,15 @@ static int AddressConfVarsTest04(void)
 
     int result = 0;
 
-    ConfCreateContextBackup();
-    ConfInit();
-    ConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
+    SCConfCreateContextBackup();
+    SCConfInit();
+    SCConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
 
     if (DetectAddressTestConfVars() == 0 && DetectPortTestConfVars() == 0)
         result = 1;
 
-    ConfDeInit();
-    ConfRestoreContextBackup();
+    SCConfDeInit();
+    SCConfRestoreContextBackup();
 
     return result;
 }
@@ -4833,9 +4811,9 @@ static int AddressConfVarsTest05(void)
 
     int result = 0;
 
-    ConfCreateContextBackup();
-    ConfInit();
-    ConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
+    SCConfCreateContextBackup();
+    SCConfInit();
+    SCConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
 
     if (DetectAddressTestConfVars() != -1 && DetectPortTestConfVars() != -1)
         goto end;
@@ -4843,10 +4821,10 @@ static int AddressConfVarsTest05(void)
     result = 1;
 
  end:
-    ConfDeInit();
-    ConfRestoreContextBackup();
+     SCConfDeInit();
+     SCConfRestoreContextBackup();
 
-    return result;
+     return result;
 }
 
 static int AddressConfVarsTest06(void)
@@ -5000,14 +4978,14 @@ static int AddressConfVarsTest06(void)
             "    EXTERNAL_NET: \"any\"\n"
             "\n";
 
-    ConfCreateContextBackup();
-    ConfInit();
-    ConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
+    SCConfCreateContextBackup();
+    SCConfInit();
+    SCConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
 
     FAIL_IF(0 != DetectAddressTestConfVars());
 
-    ConfDeInit();
-    ConfRestoreContextBackup();
+    SCConfDeInit();
+    SCConfRestoreContextBackup();
 
     PASS;
 }

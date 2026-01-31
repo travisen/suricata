@@ -118,7 +118,8 @@ static int FilestorePostMatchWithOptions(Packet *p, Flow *f, const DetectFilesto
     switch (filestore->direction) {
         case FILESTORE_DIR_DEFAULT:
             rule_dir = 1;
-            break;
+            // will use both sides if scope is not default
+            // fallthrough
         case FILESTORE_DIR_BOTH:
             toserver_dir = 1;
             toclient_dir = 1;
@@ -158,18 +159,27 @@ static int FilestorePostMatchWithOptions(Packet *p, Flow *f, const DetectFilesto
         DEBUG_VALIDATE_BUG_ON(txv == NULL);
         if (txv != NULL) {
             AppLayerTxData *txd = AppLayerParserGetTxData(f->proto, f->alproto, txv);
-            DEBUG_VALIDATE_BUG_ON(txd == NULL);
-            if (txd != NULL) {
-                txd->file_flags |= FLOWFILE_STORE;
+            if (toclient_dir) {
+                txd->file_flags |= FLOWFILE_STORE_TC;
             }
+                if (toserver_dir) {
+                    txd->file_flags |= FLOWFILE_STORE_TS;
+                }
         }
     } else if (this_flow) {
         /* set in flow and AppLayerStateData */
-        f->file_flags |= FLOWFILE_STORE;
-
         AppLayerStateData *sd = AppLayerParserGetStateData(f->proto, f->alproto, f->alstate);
-        if (sd != NULL) {
-            sd->file_flags |= FLOWFILE_STORE;
+        if (toclient_dir) {
+            f->file_flags |= FLOWFILE_STORE_TC;
+            if (sd != NULL) {
+                sd->file_flags |= FLOWFILE_STORE_TC;
+            }
+        }
+        if (toserver_dir) {
+            f->file_flags |= FLOWFILE_STORE_TS;
+            if (sd != NULL) {
+                sd->file_flags |= FLOWFILE_STORE_TS;
+            }
         }
     } else {
         FileStoreFileById(fc, file_id);
@@ -224,7 +234,7 @@ static int DetectFilestorePostMatch(DetectEngineThreadCtx *det_ctx,
                 p->flow->proto, p->flow->alproto, alstate, det_ctx->filestore[u].tx_id);
         DEBUG_VALIDATE_BUG_ON(txv == NULL);
         if (txv) {
-            AppLayerGetFileState files = AppLayerParserGetTxFiles(p->flow, alstate, txv, flags);
+            AppLayerGetFileState files = AppLayerParserGetTxFiles(p->flow, txv, flags);
             FileContainer *ffc_tx = files.fc;
             DEBUG_VALIDATE_BUG_ON(ffc_tx == NULL);
             if (ffc_tx) {
@@ -344,7 +354,7 @@ static int DetectFilestoreSetup (DetectEngineCtx *de_ctx, Signature *s, const ch
             SCLogDebug("reload-detected; re-checking feature presence; DE version now %"PRIu32,
                        de_ctx->version);
         }
-        if (!RequiresFeature(FEATURE_OUTPUT_FILESTORE)) {
+        if (!SCRequiresFeature(FEATURE_OUTPUT_FILESTORE)) {
             SCLogWarning("One or more rule(s) depends on the "
                          "file-store output log which is not enabled. "
                          "Enable the output \"file-store\".");
@@ -458,14 +468,14 @@ static int DetectFilestoreSetup (DetectEngineCtx *de_ctx, Signature *s, const ch
         AppLayerHtpNeedFileInspection();
     }
 
-    if (SigMatchAppendSMToList(
+    if (SCSigMatchAppendSMToList(
                 de_ctx, s, DETECT_FILESTORE, (SigMatchCtx *)fd, g_file_match_list_id) == NULL) {
         DetectFilestoreFree(de_ctx, fd);
         goto error;
     }
     s->filestore_ctx = fd;
 
-    if (SigMatchAppendSMToList(
+    if (SCSigMatchAppendSMToList(
                 de_ctx, s, DETECT_FILESTORE_POSTMATCH, NULL, DETECT_SM_LIST_POSTMATCH) == NULL) {
         goto error;
     }
@@ -500,23 +510,20 @@ static void DetectFilestoreFree(DetectEngineCtx *de_ctx, void *ptr)
  */
 static int DetectFilestoreTest01(void)
 {
-    DetectEngineCtx *de_ctx = NULL;
-    int result = 1;
-
-    de_ctx = DetectEngineCtxInit();
+    DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     FAIL_IF(de_ctx == NULL);
 
     de_ctx->flags |= DE_QUIET;
 
-    de_ctx->sig_list = SigInit(de_ctx,"alert http any any -> any any "
-                               "(bypass; filestore; "
-                               "content:\"message\"; http_host; "
-                               "sid:1;)");
-    FAIL_IF_NOT_NULL(de_ctx->sig_list);
+    Signature *s = DetectEngineAppendSig(de_ctx, "alert http any any -> any any "
+                                                 "(bypass; filestore; "
+                                                 "content:\"message\"; http_host; "
+                                                 "sid:1;)");
+    FAIL_IF_NOT_NULL(s);
 
     DetectEngineCtxFree(de_ctx);
 
-    return result;
+    PASS;
 }
 
 void DetectFilestoreRegisterTests(void)

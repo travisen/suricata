@@ -37,6 +37,7 @@
 #include "detect.h"
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-state.h"
 #include "detect-engine-prefilter.h"
@@ -81,13 +82,12 @@ static InspectionBuffer *GetData2(DetectEngineThreadCtx *det_ctx,
         uint32_t b_len = 0;
         const uint8_t *b = NULL;
 
-        if (rs_http2_tx_get_request_line(txv, &b, &b_len) != 1)
+        if (SCHttp2TxGetRequestLine(txv, &b, &b_len) != 1)
             return NULL;
         if (b == NULL || b_len == 0)
             return NULL;
 
-        InspectionBufferSetup(det_ctx, list_id, buffer, b, b_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(det_ctx, list_id, buffer, b, b_len, transforms);
     }
 
     return buffer;
@@ -98,22 +98,23 @@ static InspectionBuffer *GetData2(DetectEngineThreadCtx *det_ctx,
  */
 void DetectHttpRequestLineRegister(void)
 {
-    sigmatch_table[DETECT_AL_HTTP_REQUEST_LINE].name = "http.request_line";
-    sigmatch_table[DETECT_AL_HTTP_REQUEST_LINE].alias = "http_request_line";
-    sigmatch_table[DETECT_AL_HTTP_REQUEST_LINE].desc = "sticky buffer to match on the HTTP request line";
-    sigmatch_table[DETECT_AL_HTTP_REQUEST_LINE].url = "/rules/http-keywords.html#http-request-line";
-    sigmatch_table[DETECT_AL_HTTP_REQUEST_LINE].Match = NULL;
-    sigmatch_table[DETECT_AL_HTTP_REQUEST_LINE].Setup = DetectHttpRequestLineSetup;
+    sigmatch_table[DETECT_HTTP_REQUEST_LINE].name = "http.request_line";
+    sigmatch_table[DETECT_HTTP_REQUEST_LINE].alias = "http_request_line";
+    sigmatch_table[DETECT_HTTP_REQUEST_LINE].desc =
+            "sticky buffer to match on the HTTP request line";
+    sigmatch_table[DETECT_HTTP_REQUEST_LINE].url = "/rules/http-keywords.html#http-request-line";
+    sigmatch_table[DETECT_HTTP_REQUEST_LINE].Match = NULL;
+    sigmatch_table[DETECT_HTTP_REQUEST_LINE].Setup = DetectHttpRequestLineSetup;
 #ifdef UNITTESTS
-    sigmatch_table[DETECT_AL_HTTP_REQUEST_LINE].RegisterTests = DetectHttpRequestLineRegisterTests;
+    sigmatch_table[DETECT_HTTP_REQUEST_LINE].RegisterTests = DetectHttpRequestLineRegisterTests;
 #endif
-    sigmatch_table[DETECT_AL_HTTP_REQUEST_LINE].flags |= SIGMATCH_NOOPT|SIGMATCH_INFO_STICKY_BUFFER;
+    sigmatch_table[DETECT_HTTP_REQUEST_LINE].flags |= SIGMATCH_NOOPT | SIGMATCH_INFO_STICKY_BUFFER;
 
     DetectAppLayerInspectEngineRegister("http_request_line", ALPROTO_HTTP1, SIG_FLAG_TOSERVER,
-            HTP_REQUEST_LINE, DetectEngineInspectBufferGeneric, GetData);
+            HTP_REQUEST_PROGRESS_LINE, DetectEngineInspectBufferGeneric, GetData);
 
     DetectAppLayerMpmRegister("http_request_line", SIG_FLAG_TOSERVER, 2,
-            PrefilterGenericMpmRegister, GetData, ALPROTO_HTTP1, HTP_REQUEST_LINE);
+            PrefilterGenericMpmRegister, GetData, ALPROTO_HTTP1, HTP_REQUEST_PROGRESS_LINE);
 
     DetectAppLayerInspectEngineRegister("http_request_line", ALPROTO_HTTP2, SIG_FLAG_TOSERVER,
             HTTP2StateDataClient, DetectEngineInspectBufferGeneric, GetData2);
@@ -141,10 +142,10 @@ void DetectHttpRequestLineRegister(void)
  */
 static int DetectHttpRequestLineSetup(DetectEngineCtx *de_ctx, Signature *s, const char *arg)
 {
-    if (DetectBufferSetActiveList(de_ctx, s, g_http_request_line_buffer_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_http_request_line_buffer_id) < 0)
         return -1;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_HTTP) < 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_HTTP) < 0)
         return -1;
 
     return 0;
@@ -158,14 +159,14 @@ static InspectionBuffer *GetData(DetectEngineThreadCtx *det_ctx,
     InspectionBuffer *buffer = InspectionBufferGet(det_ctx, list_id);
     if (buffer->inspect == NULL) {
         htp_tx_t *tx = (htp_tx_t *)txv;
-        if (unlikely(tx->request_line == NULL)) {
+        if (unlikely(htp_tx_request_line(tx) == NULL)) {
             return NULL;
         }
-        const uint32_t data_len = bstr_len(tx->request_line);
-        const uint8_t *data = bstr_ptr(tx->request_line);
+        const uint32_t data_len = (uint32_t)bstr_len(htp_tx_request_line(tx));
+        const uint8_t *data = bstr_ptr(htp_tx_request_line(tx));
 
-        InspectionBufferSetup(det_ctx, list_id, buffer, data, data_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(
+                det_ctx, list_id, buffer, data, data_len, transforms);
     }
     return buffer;
 }

@@ -101,11 +101,6 @@ void *HostAllocStorageById(Host *h, HostStorageId id)
     return StorageAllocByIdPrealloc(h->storage, STORAGE_HOST, id.id);
 }
 
-void HostFreeStorageById(Host *h, HostStorageId id)
-{
-    StorageFreeById(h->storage, STORAGE_HOST, id.id);
-}
-
 void HostFreeStorage(Host *h)
 {
     if (HostStorageSize() > 0)
@@ -128,6 +123,7 @@ static void StorageTestFree(void *x)
 
 static int HostStorageTest01(void)
 {
+    StorageCleanup();
     StorageInit();
 
     HostStorageId id1 = HostStorageRegister("test", 8, StorageTestAlloc, StorageTestFree);
@@ -208,6 +204,7 @@ error:
 
 static int HostStorageTest02(void)
 {
+    StorageCleanup();
     StorageInit();
 
     HostStorageId id1 = HostStorageRegister("test", sizeof(void *), NULL, StorageTestFree);
@@ -258,6 +255,7 @@ error:
 
 static int HostStorageTest03(void)
 {
+    StorageCleanup();
     StorageInit();
 
     HostStorageId id1 = HostStorageRegister("test1", sizeof(void *), NULL, StorageTestFree);

@@ -21,8 +21,8 @@
  * \author Eric Leblond <eric@regit.org>
  */
 
-#ifndef __SOURCE_AFP_H__
-#define __SOURCE_AFP_H__
+#ifndef SURICATA_SOURCE_AFP_H
+#define SURICATA_SOURCE_AFP_H
 
 #ifndef HAVE_PACKET_FANOUT /* not defined if linux/if_packet.h trying to force */
 #define HAVE_PACKET_FANOUT 1
@@ -56,7 +56,7 @@ struct ebpf_timeout_config {
 
 /* value for flags */
 #define AFP_NEED_PEER (1 << 0)
-// (1<<1) vacant
+#define AFP_ENABLE_HWTIMESTAMP (1 << 1)
 #define AFP_SOCK_PROTECT (1<<2)
 #define AFP_EMERGENCY_MODE (1<<3)
 #define AFP_TPACKET_V3 (1<<4)
@@ -75,13 +75,21 @@ struct ebpf_timeout_config {
  * page_size << order. So default value is using the same formula with
  * an order of 3 which guarantee we have some room in the block compared
  * to standard frame size */
-#define AFP_BLOCK_SIZE_DEFAULT_ORDER 3
+#define AFP_BLOCK_SIZE_DEFAULT_ORDER 5
+
+/* Set max packet size to 65561: IP + Ethernet + 3 VLAN tags. */
+#define MAX_PACKET_SIZE 65561
+
+/* Default snaplen to use when defrag enabled. 9k is somewhat
+ * arbitrary but is large enough for the common 9000 jumbo frame plus
+ * some extra headers including tpacket headers. */
+#define DEFAULT_TPACKET_DEFRAG_SNAPLEN 9216
 
 typedef struct AFPIfaceConfig_
 {
     char iface[AFP_IFACE_NAME_LENGTH];
     /* number of threads */
-    int threads;
+    uint16_t threads;
     /* socket buffer size */
     int buffer_size;
     /* ring size in number of packets */
@@ -90,6 +98,8 @@ typedef struct AFPIfaceConfig_
     int block_size;
     /* block timeout for tpacket_v3 in milliseconds */
     int block_timeout;
+    /* block size for tpacket v2 */
+    int v2_block_size;
     /* cluster param */
     uint16_t cluster_id;
     int cluster_type;
@@ -193,4 +203,4 @@ int AFPGetLinkType(const char *ifname);
 
 int AFPIsFanoutSupported(uint16_t cluster_id);
 
-#endif /* __SOURCE_AFP_H__ */
+#endif /* SURICATA_SOURCE_AFP_H */

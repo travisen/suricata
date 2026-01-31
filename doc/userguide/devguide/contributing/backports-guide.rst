@@ -7,14 +7,14 @@ Suricata releases. Most often, this means security and/or bug fixes;
 however, in some cases, features may be backported to previous Suricata releases.
 
 There are multiple versions of Suricata at any given time:
-    * Master
+    * Main
     * Major stable release
     * Old stable release
 
 For example, at the moment, there are 3 releases based on these Suricata branches:
-    * master: 8.0.0-dev, current development branch
-    * main-7.0.x: major stable release (note we're changing our naming conventions)
-    * master-6.0.x: old stable release
+    * main: 9.0.0-dev, current development branch
+    * main-8.0.x: major stable release
+    * main-7.0.x: old stable release
 
 For Suricata's release cadence and *end of life* policies, please check
 https://suricata.io/our-story/eol-policy/.
@@ -33,10 +33,16 @@ issue should be backported, please let us know in the ticket or related PR. But
 sometimes we'll miss those.
 
 The general principle used to determine what will be backported is:
-    * security fixes (please see our `Security Policy <https://github.com/OISF/suricata/blob/master/SECURITY.md>`_)
+    * security fixes (please see our `Security Policy <https://github.com/OISF/suricata/blob/main/SECURITY.md>`_)
     * bug fixes
     * in some cases, new features are backported if there are sufficient reasons to
       backport a new feature.
+
+.. note:: 7.0.x backports
+
+    With the release of Suricata 8.0, Suricata 7 has reached a mature stage of its
+    release cycle. Thus, as a rule, only critical issues (bugs and security),
+    should be considered for backporting.
 
 .. Note:: Exceptions
 
@@ -63,10 +69,10 @@ Creating backport tickets -- new issues
 
 Redmine: for security and bug fixes, when creating a new Redmine issue,
 label the Redmine issue with "Needs backport to x.0", where x.0 is a supported
-Suricata release, e.g, 7.0.x.
+Suricata release, e.g, 8.0.x.
 
-Creating backports tickets -- existing issues/PRs
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Creating backport tickets -- existing issues/PRs
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 We want to minimize the occurrence of "missed backports" -- that is, work that
 should be backported but wasn't. Sometimes this happens when there is no Redmine
@@ -80,21 +86,21 @@ Therefore, we will be periodically reviewing:
 
 Then, also periodically, we will create backport issues from those items
 identified in the previous steps. When doing so, we will evaluate what are the
-relevant target backport releases. Some issues reported against master or the
+relevant target backport releases. Some issues reported against main or the
 current Suricata release may not apply to older releases.
 
 Git Backport Workflow
 ---------------------
 
 If you are working on a task that needs to be backported, only start the
-backporting process once the PR for master has been merged. Then:
+backporting process once the PR for main has been merged. Then:
 
     * *Identify the commit(s) needed* for the backport. Start with the PR that merged
-      the commits into master and select only the commits from the issue being
+      the commits into main and select only the commits from the issue being
       backported.
     * *Bring each commit into the new branch,* one at a time -- starting with the
       oldest commit. Use ``git cherry-pick -x commit-hash``, where ``commit-hash``
-      is the hash to the commit already in master or main-7.0x that is being
+      is the hash to the commit already in main or main-8.0x that is being
       backported, as it maintains the linkage with said cherry-picked commit.
     * *Resolve conflicts:* Some of the cherry-picked commits may contain merge
       conflicts. If the conflicts are small, include the corrections in the
@@ -108,7 +114,7 @@ backporting process once the PR for master has been merged. Then:
 
 .. Note:: Exceptions
 
-   Sometimes, the fix for master will not work for the stable or old releases.
+   Sometimes, the fix for main will not work for the stable or old releases.
    In such cases, the backporting process won't be through cherry-picking, but
    through actually implementing a fix for the specific version.
 
@@ -116,7 +122,7 @@ Create a PR:
 ~~~~~~~~~~~~
 
 Please indicate in the title that this is a backport PR, with something like
-*(7.0.x-backport)*, and add the related milestone label.
+*(8.0.x-backport)*, and add the related milestone label.
 
 In the PR description, indicate the backport ticket.
 

@@ -29,18 +29,18 @@
 #include "stream.h"
 #include "app-layer.h"
 #include "app-layer-parser.h"
+#include "util-config.h"
 #include "util-profiling.h"
 #include "util-validate.h"
 
 /** per thread data for this module, contains a list of per thread
  *  data for the packet loggers. */
 typedef struct OutputTxLoggerThreadData_ {
-    OutputLoggerThreadStore *store[ALPROTO_MAX];
-
     /* thread local data from file api */
     OutputFileLoggerThreadData *file;
     /* thread local data from filedata api */
     OutputFiledataLoggerThreadData *filedata;
+    OutputLoggerThreadStore *store[];
 } OutputTxLoggerThreadData;
 
 /* logger instance, a module + a output ctx,
@@ -50,7 +50,7 @@ typedef struct OutputTxLogger_ {
     AppProto alproto;
     TxLogger LogFunc;
     TxLoggerCondition LogCondition;
-    OutputCtx *output_ctx;
+    void *initdata;
     struct OutputTxLogger_ *next;
     const char *name;
     LoggerId logger_id;
@@ -59,19 +59,22 @@ typedef struct OutputTxLogger_ {
     int ts_log_progress;
     TmEcode (*ThreadInit)(ThreadVars *, const void *, void **);
     TmEcode (*ThreadDeinit)(ThreadVars *, void *);
-    void (*ThreadExitPrintStats)(ThreadVars *, void *);
 } OutputTxLogger;
 
-static OutputTxLogger *list[ALPROTO_MAX] = { NULL };
+static OutputTxLogger **list = NULL;
 
-int OutputRegisterTxLogger(LoggerId id, const char *name, AppProto alproto,
-                           TxLogger LogFunc,
-                           OutputCtx *output_ctx, int tc_log_progress,
-                           int ts_log_progress, TxLoggerCondition LogCondition,
-                           ThreadInitFunc ThreadInit,
-                           ThreadDeinitFunc ThreadDeinit,
-                           void (*ThreadExitPrintStats)(ThreadVars *, void *))
+int SCOutputRegisterTxLogger(LoggerId id, const char *name, AppProto alproto, TxLogger LogFunc,
+        void *initdata, int tc_log_progress, int ts_log_progress, TxLoggerCondition LogCondition,
+        ThreadInitFunc ThreadInit, ThreadDeinitFunc ThreadDeinit)
 {
+    if (list == NULL) {
+        list = SCCalloc(g_alproto_max, sizeof(OutputTxLogger *));
+        if (unlikely(list == NULL)) {
+            SCLogError("Failed to allocate OutputTx list");
+            return -1;
+        }
+    }
+
     if (alproto != ALPROTO_UNKNOWN && !(AppLayerParserIsEnabled(alproto))) {
         SCLogDebug(
                 "%s logger not enabled: protocol %s is disabled", name, AppProtoToString(alproto));
@@ -84,12 +87,11 @@ int OutputRegisterTxLogger(LoggerId id, const char *name, AppProto alproto,
     op->alproto = alproto;
     op->LogFunc = LogFunc;
     op->LogCondition = LogCondition;
-    op->output_ctx = output_ctx;
+    op->initdata = initdata;
     op->name = name;
     op->logger_id = id;
     op->ThreadInit = ThreadInit;
     op->ThreadDeinit = ThreadDeinit;
-    op->ThreadExitPrintStats = ThreadExitPrintStats;
 
     if (alproto == ALPROTO_UNKNOWN) {
         op->tc_log_progress = 0;
@@ -156,7 +158,8 @@ static inline void OutputTxLogFiles(ThreadVars *tv, OutputFileLoggerThreadData *
         packet_dir_ready = eof | tc_ready | tc_eof;
         opposing_tx_ready = ts_ready;
     } else {
-        abort();
+        DEBUG_VALIDATE_BUG_ON(1);
+        return;
     }
 
     SCLogDebug("eof %d ts_ready %d ts_eof %d", eof, ts_ready, ts_eof);
@@ -167,11 +170,9 @@ static inline void OutputTxLogFiles(ThreadVars *tv, OutputFileLoggerThreadData *
             opposing_dir == STREAM_TOSERVER ? "TOSERVER" : "TOCLIENT", packet_dir_ready,
             opposing_dir_ready);
 
-    AppLayerGetFileState app_files =
-            AppLayerParserGetTxFiles(f, FlowGetAppState(f), tx, packet_dir);
+    AppLayerGetFileState app_files = AppLayerParserGetTxFiles(f, tx, packet_dir);
     FileContainer *ffc = app_files.fc;
-    AppLayerGetFileState app_files_opposing =
-            AppLayerParserGetTxFiles(f, FlowGetAppState(f), tx, opposing_dir);
+    AppLayerGetFileState app_files_opposing = AppLayerParserGetTxFiles(f, tx, opposing_dir);
     FileContainer *ffc_opposing = app_files_opposing.fc;
 
     /* see if opposing side is finished: if no file support in this direction, of is not
@@ -185,7 +186,7 @@ static inline void OutputTxLogFiles(ThreadVars *tv, OutputFileLoggerThreadData *
     if (ffc || ffc_opposing)
         SCLogDebug("pcap_cnt %" PRIu64 " flow %p tx %p tx_id %" PRIu64
                    " ffc %p ffc_opposing %p tx_complete %d",
-                p->pcap_cnt, f, tx, tx_id, ffc, ffc_opposing, tx_complete);
+                PcapPacketCntGet(p), f, tx, tx_id, ffc, ffc_opposing, tx_complete);
 
     if (ffc) {
         const bool file_close = ((p->flags & PKT_PSEUDO_STREAM_END)) | eof;
@@ -223,17 +224,17 @@ static inline void OutputTxLogFiles(ThreadVars *tv, OutputFileLoggerThreadData *
     if (!is_file_tx || tx_done) {
         SCLogDebug("is_file_tx %d tx_done %d", is_file_tx, tx_done);
         if (file_td) {
-            txd->logged.flags |= BIT_U32(LOGGER_FILE);
-            SCLogDebug("setting LOGGER_FILE => %08x", txd->logged.flags);
+            txd->logged |= BIT_U32(LOGGER_FILE);
+            SCLogDebug("setting LOGGER_FILE => %08x", txd->logged);
         }
         if (filedata_td) {
-            txd->logged.flags |= BIT_U32(LOGGER_FILEDATA);
-            SCLogDebug("setting LOGGER_FILEDATA => %08x", txd->logged.flags);
+            txd->logged |= BIT_U32(LOGGER_FILEDATA);
+            SCLogDebug("setting LOGGER_FILEDATA => %08x", txd->logged);
         }
     } else {
         SCLogDebug("pcap_cnt %" PRIu64 " flow %p tx %p tx_id %" PRIu64
                    " NOT SETTING FILE FLAGS ffc %p ffc_opposing %p tx_complete %d",
-                p->pcap_cnt, f, tx, tx_id, ffc, ffc_opposing, tx_complete);
+                PcapPacketCntGet(p), f, tx, tx_id, ffc, ffc_opposing, tx_complete);
     }
 }
 
@@ -291,8 +292,8 @@ static void OutputTxLogCallLoggers(ThreadVars *tv, OutputTxLoggerThreadData *op_
         if ((ctx->tx_logged_old & BIT_U32(logger->logger_id)) == 0) {
             SCLogDebug("alproto match %d, logging tx_id %" PRIu64, logger->alproto, tx_id);
 
-            SCLogDebug("pcap_cnt %" PRIu64 ", tx_id %" PRIu64 " logger %d. EOF %s", p->pcap_cnt,
-                    tx_id, logger->logger_id, eof ? "true" : "false");
+            SCLogDebug("pcap_cnt %" PRIu64 ", tx_id %" PRIu64 " logger %d. EOF %s",
+                    PcapPacketCntGet(p), tx_id, logger->logger_id, eof ? "true" : "false");
 
             if (eof) {
                 SCLogDebug("EOF, so log now");
@@ -337,8 +338,13 @@ static TmEcode OutputTxLog(ThreadVars *tv, Packet *p, void *thread_data)
     DEBUG_VALIDATE_BUG_ON(thread_data == NULL);
     if (p->flow == NULL)
         return TM_ECODE_OK;
-    if (!((PKT_IS_PSEUDOPKT(p)) || p->flow->flags & (FLOW_TS_APP_UPDATED | FLOW_TC_APP_UPDATED))) {
+    if (!PKT_IS_PSEUDOPKT(p) && p->app_update_direction == 0 &&
+            ((PKT_IS_TOSERVER(p) && (p->flow->flags & FLOW_TS_APP_UPDATED) == 0) ||
+                    (PKT_IS_TOCLIENT(p) && (p->flow->flags & FLOW_TC_APP_UPDATED) == 0))) {
         SCLogDebug("not pseudo, no app update: skip");
+        return TM_ECODE_OK;
+    }
+    if ((p->flags & PKT_STREAM_EST) == 0 && p->proto == IPPROTO_TCP) {
         return TM_ECODE_OK;
     }
     SCLogDebug("pseudo, or app update: run output");
@@ -348,7 +354,7 @@ static TmEcode OutputTxLog(ThreadVars *tv, Packet *p, void *thread_data)
     Flow * const f = p->flow;
     const uint8_t ipproto = f->proto;
     const AppProto alproto = f->alproto;
-    SCLogDebug("pcap_cnt %u tx logging %u/%s", (uint32_t)p->pcap_cnt, alproto,
+    SCLogDebug("pcap_cnt %u tx logging %u/%s", (uint32_t)PcapPacketCntGet(p), alproto,
             AppProtoToString(alproto));
 
     const bool file_logging_active = (op_thread_data->file || op_thread_data->filedata);
@@ -372,13 +378,11 @@ static TmEcode OutputTxLog(ThreadVars *tv, Packet *p, void *thread_data)
                 logger_expectation, LOGGER_FILE, LOGGER_FILEDATA);
         goto end;
     }
-    SCLogDebug("pcap_cnt %" PRIu64, p->pcap_cnt);
+    SCLogDebug("pcap_cnt %" PRIu64, PcapPacketCntGet(p));
 
     const bool last_pseudo = (p->flowflags & FLOW_PKT_LAST_PSEUDO) != 0;
-    const bool ts_eof = AppLayerParserStateIssetFlag(f->alparser,
-                                (APP_LAYER_PARSER_EOF_TS | APP_LAYER_PARSER_TRUNC_TS)) != 0;
-    const bool tc_eof = AppLayerParserStateIssetFlag(f->alparser,
-                                (APP_LAYER_PARSER_EOF_TC | APP_LAYER_PARSER_TRUNC_TC)) != 0;
+    const bool ts_eof = SCAppLayerParserStateIssetFlag(f->alparser, APP_LAYER_PARSER_EOF_TS) != 0;
+    const bool tc_eof = SCAppLayerParserStateIssetFlag(f->alparser, APP_LAYER_PARSER_EOF_TC) != 0;
 
     const bool eof = last_pseudo || (ts_eof && tc_eof);
     SCLogDebug("eof %d last_pseudo %d ts_eof %d tc_eof %d", eof, last_pseudo, ts_eof, tc_eof);
@@ -390,12 +394,12 @@ static TmEcode OutputTxLog(ThreadVars *tv, Packet *p, void *thread_data)
     uint64_t tx_id = AppLayerParserGetTransactionLogId(f->alparser);
     uint64_t max_id = tx_id;
     int logged = 0;
-    int gap = 0;
+    bool gap = false;
     const bool support_files = AppLayerParserSupportsFiles(ipproto, alproto);
     const uint8_t pkt_dir = STREAM_FLAGS_FOR_PACKET(p);
 
-    SCLogDebug("pcap_cnt %" PRIu64 ": tx_id %" PRIu64 " total_txs %" PRIu64, p->pcap_cnt, tx_id,
-            total_txs);
+    SCLogDebug("pcap_cnt %" PRIu64 ": tx_id %" PRIu64 " total_txs %" PRIu64, PcapPacketCntGet(p),
+            tx_id, total_txs);
 
     AppLayerGetTxIteratorFunc IterFunc = AppLayerGetTxIterator(ipproto, alproto);
     AppLayerGetTxIterState state;
@@ -413,6 +417,8 @@ static TmEcode OutputTxLog(ThreadVars *tv, Packet *p, void *thread_data)
         tx_id = ires.tx_id;
         SCLogDebug("STARTING tx_id %" PRIu64 ", tx %p", tx_id, tx);
 
+        AppLayerTxData *txd = AppLayerParserGetTxData(ipproto, alproto, tx);
+
         const int tx_progress_ts =
                 AppLayerParserGetStateProgress(ipproto, alproto, tx, ts_disrupt_flags);
         const int tx_progress_tc =
@@ -422,18 +428,9 @@ static TmEcode OutputTxLog(ThreadVars *tv, Packet *p, void *thread_data)
         SCLogDebug("file_thread_data %p filedata_thread_data %p", op_thread_data->file,
                 op_thread_data->filedata);
 
-        AppLayerTxData *txd = AppLayerParserGetTxData(ipproto, alproto, tx);
-        if (unlikely(txd == NULL)) {
-            SCLogDebug("NO TXD");
-            /* make sure this tx, which can't be properly logged is skipped */
-            logged = 1;
-            max_id = tx_id;
-            goto next_tx;
-        }
-
         if (file_logging_active) {
-            if (AppLayerParserIsFileTx(txd)) { // need to process each tx that might be a file tx,
-                                               // even if there are not files (yet)
+            if (txd->file_tx != 0) { // need to process each tx that might be a file tx,
+                                     // even if there are not files (yet)
                 const bool ts_ready = (tx_progress_ts == complete_ts);
                 const bool tc_ready = (tx_progress_tc == complete_tc);
                 SCLogDebug("ts_ready %d tc_ready %d", ts_ready, tc_ready);
@@ -449,22 +446,27 @@ static TmEcode OutputTxLog(ThreadVars *tv, Packet *p, void *thread_data)
                 /* call only for the correct direction, except when it looks anything like a end of
                  * transaction or end of stream. Since OutputTxLogFiles has complicated logic around
                  * that, we just leave it to that function to sort things out for now. */
-                if (eval_files || AppLayerParserIsFileTxInDir(txd, pkt_dir)) {
+                if (eval_files || ((txd->file_tx & pkt_dir) != 0)) {
                     OutputTxLogFiles(tv, op_thread_data->file, op_thread_data->filedata, p, f, tx,
                             tx_id, txd, tx_complete, ts_ready, tc_ready, ts_eof, tc_eof, eof);
                 }
             } else if (support_files) {
                 if (op_thread_data->file) {
-                    txd->logged.flags |= BIT_U32(LOGGER_FILE);
-                    SCLogDebug("not a file_tx: setting LOGGER_FILE => %08x", txd->logged.flags);
+                    txd->logged |= BIT_U32(LOGGER_FILE);
+                    SCLogDebug("not a file_tx: setting LOGGER_FILE => %08x", txd->logged);
                 }
                 if (op_thread_data->filedata) {
-                    txd->logged.flags |= BIT_U32(LOGGER_FILEDATA);
-                    SCLogDebug("not a file_tx: setting LOGGER_FILEDATA => %08x", txd->logged.flags);
+                    txd->logged |= BIT_U32(LOGGER_FILEDATA);
+                    SCLogDebug("not a file_tx: setting LOGGER_FILEDATA => %08x", txd->logged);
                 }
             }
         }
-        SCLogDebug("logger: expect %08x, have %08x", logger_expectation, txd->logged.flags);
+        SCLogDebug("logger: expect %08x, have %08x", logger_expectation, txd->logged);
+        if (!txd->updated_tc && !txd->updated_ts && !(tx_progress_ts == complete_ts) &&
+                !(tx_progress_tc == complete_tc) && !ts_eof && !tc_eof) {
+            gap = true;
+            goto next_tx;
+        }
 
         if (list[ALPROTO_UNKNOWN] != 0) {
             OutputTxLogList0(tv, op_thread_data, p, f, tx, tx_id);
@@ -477,20 +479,20 @@ static TmEcode OutputTxLog(ThreadVars *tv, Packet *p, void *thread_data)
         if (txd->config.log_flags & BIT_U8(CONFIG_TYPE_TX)) {
             SCLogDebug("SKIP tx %p/%"PRIu64, tx, tx_id);
             // so that AppLayerParserTransactionsCleanup can clean this tx
-            txd->logged.flags |= logger_expectation;
+            txd->logged |= logger_expectation;
             goto next_tx;
         }
 
-        if (txd->logged.flags == logger_expectation) {
+        if (txd->logged == logger_expectation) {
             SCLogDebug("fully logged");
             /* tx already fully logged */
             goto next_tx;
         }
 
-        SCLogDebug("logger: expect %08x, have %08x", logger_expectation, txd->logged.flags);
+        SCLogDebug("logger: expect %08x, have %08x", logger_expectation, txd->logged);
         const OutputTxLogger *logger = list[alproto];
         const OutputLoggerThreadStore *store = op_thread_data->store[alproto];
-        struct Ctx ctx = { .tx_logged = txd->logged.flags, .tx_logged_old = txd->logged.flags };
+        struct Ctx ctx = { .tx_logged = txd->logged, .tx_logged_old = txd->logged };
         SCLogDebug("logger: expect %08x, have %08x", logger_expectation, ctx.tx_logged);
 
         OutputTxLogCallLoggers(tv, op_thread_data, logger, store, p, f, alstate, tx, tx_id, alproto,
@@ -500,7 +502,7 @@ static TmEcode OutputTxLog(ThreadVars *tv, Packet *p, void *thread_data)
         if (ctx.tx_logged != ctx.tx_logged_old) {
             SCLogDebug("logger: storing %08x (was %08x)", ctx.tx_logged, ctx.tx_logged_old);
             DEBUG_VALIDATE_BUG_ON(txd == NULL);
-            txd->logged.flags |= ctx.tx_logged;
+            txd->logged |= ctx.tx_logged;
         }
 
         /* If all loggers logged set a flag and update the last tx_id
@@ -515,7 +517,7 @@ static TmEcode OutputTxLog(ThreadVars *tv, Packet *p, void *thread_data)
             max_id = tx_id;
             SCLogDebug("max_id %" PRIu64, max_id);
         } else {
-            gap = 1;
+            gap = true;
         }
 next_tx:
         if (!ires.has_next)
@@ -539,19 +541,20 @@ end:
  *  loggers */
 static TmEcode OutputTxLogThreadInit(ThreadVars *tv, const void *_initdata, void **data)
 {
-    OutputTxLoggerThreadData *td = SCCalloc(1, sizeof(*td));
+    OutputTxLoggerThreadData *td =
+            SCCalloc(1, sizeof(*td) + g_alproto_max * sizeof(OutputLoggerThreadStore *));
     if (td == NULL)
         return TM_ECODE_FAILED;
 
     *data = (void *)td;
     SCLogDebug("OutputTxLogThreadInit happy (*data %p)", *data);
 
-    for (AppProto alproto = 0; alproto < ALPROTO_MAX; alproto++) {
+    for (AppProto alproto = 0; alproto < g_alproto_max; alproto++) {
         OutputTxLogger *logger = list[alproto];
         while (logger) {
             if (logger->ThreadInit) {
                 void *retptr = NULL;
-                if (logger->ThreadInit(tv, (void *)logger->output_ctx, &retptr) == TM_ECODE_OK) {
+                if (logger->ThreadInit(tv, logger->initdata, &retptr) == TM_ECODE_OK) {
                     OutputLoggerThreadStore *ts = SCCalloc(1, sizeof(*ts));
                     /* todo */ BUG_ON(ts == NULL);
 
@@ -595,7 +598,7 @@ static TmEcode OutputTxLogThreadDeinit(ThreadVars *tv, void *thread_data)
 {
     OutputTxLoggerThreadData *op_thread_data = (OutputTxLoggerThreadData *)thread_data;
 
-    for (AppProto alproto = 0; alproto < ALPROTO_MAX; alproto++) {
+    for (AppProto alproto = 0; alproto < g_alproto_max; alproto++) {
         OutputLoggerThreadStore *store = op_thread_data->store[alproto];
         OutputTxLogger *logger = list[alproto];
 
@@ -622,29 +625,16 @@ static TmEcode OutputTxLogThreadDeinit(ThreadVars *tv, void *thread_data)
     return TM_ECODE_OK;
 }
 
-static void OutputTxLogExitPrintStats(ThreadVars *tv, void *thread_data)
-{
-    OutputTxLoggerThreadData *op_thread_data = (OutputTxLoggerThreadData *)thread_data;
-
-    for (AppProto alproto = 0; alproto < ALPROTO_MAX; alproto++) {
-        OutputLoggerThreadStore *store = op_thread_data->store[alproto];
-        OutputTxLogger *logger = list[alproto];
-
-        while (logger && store) {
-            if (logger->ThreadExitPrintStats) {
-                logger->ThreadExitPrintStats(tv, store->thread_data);
-            }
-
-            logger = logger->next;
-            store = store->next;
-        }
-    }
-}
-
 static uint32_t OutputTxLoggerGetActiveCount(void)
 {
+    if (list == NULL) {
+        // This may happen in socket mode playing pcaps
+        // when suricata.yaml logs only alerts (and no app-layer events)
+        return 0;
+    }
+
     uint32_t cnt = 0;
-    for (AppProto alproto = 0; alproto < ALPROTO_MAX; alproto++) {
+    for (AppProto alproto = 0; alproto < g_alproto_max; alproto++) {
         for (OutputTxLogger *p = list[alproto]; p != NULL; p = p->next) {
             cnt++;
         }
@@ -665,13 +655,22 @@ static uint32_t OutputTxLoggerGetActiveCount(void)
 
 void OutputTxLoggerRegister (void)
 {
-    OutputRegisterRootLogger(OutputTxLogThreadInit, OutputTxLogThreadDeinit,
-        OutputTxLogExitPrintStats, OutputTxLog, OutputTxLoggerGetActiveCount);
+    BUG_ON(list);
+    list = SCCalloc(g_alproto_max, sizeof(OutputTxLogger *));
+    if (unlikely(list == NULL)) {
+        FatalError("Failed to allocate OutputTx list");
+    }
+    OutputRegisterRootLogger(OutputTxLogThreadInit, OutputTxLogThreadDeinit, OutputTxLog,
+            OutputTxLoggerGetActiveCount);
 }
 
 void OutputTxShutdown(void)
 {
-    for (AppProto alproto = 0; alproto < ALPROTO_MAX; alproto++) {
+    // called in different places because of unix socket mode, and engine-analysis mode
+    if (list == NULL) {
+        return;
+    }
+    for (AppProto alproto = 0; alproto < g_alproto_max; alproto++) {
         OutputTxLogger *logger = list[alproto];
         while (logger) {
             OutputTxLogger *next_logger = logger->next;
@@ -680,4 +679,6 @@ void OutputTxShutdown(void)
         }
         list[alproto] = NULL;
     }
+    SCFree(list);
+    list = NULL;
 }

@@ -29,7 +29,6 @@
 #include "util-reference-config.h"
 #include "conf.h"
 #include "util-unittest.h"
-#include "util-error.h"
 #include "util-debug.h"
 #include "util-fmemopen.h"
 
@@ -50,7 +49,7 @@ void SCRConfReferenceHashFree(void *ch);
 /* used to get the reference.config file path */
 static const char *SCRConfGetConfFilename(const DetectEngineCtx *de_ctx);
 
-void SCReferenceConfInit(DetectEngineCtx *de_ctx)
+void SCReferenceSCConfInit(DetectEngineCtx *de_ctx)
 {
     int en;
     PCRE2_SIZE eo;
@@ -68,7 +67,6 @@ void SCReferenceConfInit(DetectEngineCtx *de_ctx)
     }
     de_ctx->reference_conf_regex_match =
             pcre2_match_data_create_from_pattern(de_ctx->reference_conf_regex, NULL);
-    return;
 }
 
 void SCReferenceConfDeinit(DetectEngineCtx *de_ctx)
@@ -152,13 +150,13 @@ static const char *SCRConfGetConfFilename(const DetectEngineCtx *de_ctx)
 
         /* try loading prefix setting, fall back to global if that
          * fails. */
-        if (ConfGet(config_value, &path) != 1) {
-            if (ConfGet("reference-config-file", &path) != 1) {
+        if (SCConfGet(config_value, &path) != 1) {
+            if (SCConfGet("reference-config-file", &path) != 1) {
                 return (char *)SC_RCONF_DEFAULT_FILE_PATH;
             }
         }
     } else {
-        if (ConfGet("reference-config-file", &path) != 1) {
+        if (SCConfGet("reference-config-file", &path) != 1) {
             return (char *)SC_RCONF_DEFAULT_FILE_PATH;
         }
     }
@@ -168,13 +166,11 @@ static const char *SCRConfGetConfFilename(const DetectEngineCtx *de_ctx)
 /**
  * \brief Releases local resources used by the Reference Config API.
  */
-static void SCRConfDeInitLocalResources(DetectEngineCtx *de_ctx, FILE *fd)
+static void SCRConfDeInitLocalResources(FILE *fd)
 {
     if (fd != NULL) {
         fclose(fd);
     }
-
-    return;
 }
 
 /**
@@ -186,8 +182,6 @@ void SCRConfDeInitContext(DetectEngineCtx *de_ctx)
         HashTableFree(de_ctx->reference_conf_ht);
 
     de_ctx->reference_conf_ht = NULL;
-
-    return;
 }
 
 /**
@@ -321,7 +315,7 @@ static int SCRConfIsLineBlankOrComment(char *line)
 static bool SCRConfParseFile(DetectEngineCtx *de_ctx, FILE *fd)
 {
     char line[1024];
-    int runmode = RunmodeGetCurrent();
+    int runmode = SCRunmodeGet();
     bool is_conf_test_mode = runmode == RUNMODE_CONF_TEST;
     while (fgets(line, sizeof(line), fd) != NULL) {
         if (SCRConfIsLineBlankOrComment(line))
@@ -398,8 +392,6 @@ void SCRConfDeAllocSCRConfReference(SCRConfReference *ref)
 
         SCFree(ref);
     }
-
-    return;
 }
 
 /**
@@ -416,9 +408,9 @@ uint32_t SCRConfReferenceHashFunc(HashTable *ht, void *data, uint16_t datalen)
 {
     SCRConfReference *ref = (SCRConfReference *)data;
     uint32_t hash = 0;
-    int i = 0;
+    size_t i = 0;
 
-    int len = strlen(ref->system);
+    size_t len = strlen(ref->system);
 
     for (i = 0; i < len; i++)
         hash += u8_tolower((unsigned char)ref->system[i]);
@@ -446,8 +438,6 @@ char SCRConfReferenceHashCompareFunc(void *data1, uint16_t datalen1,
 {
     SCRConfReference *ref1 = (SCRConfReference *)data1;
     SCRConfReference *ref2 = (SCRConfReference *)data2;
-    int len1 = 0;
-    int len2 = 0;
 
     if (ref1 == NULL || ref2 == NULL)
         return 0;
@@ -455,10 +445,7 @@ char SCRConfReferenceHashCompareFunc(void *data1, uint16_t datalen1,
     if (ref1->system == NULL || ref2->system == NULL)
         return 0;
 
-    len1 = strlen(ref1->system);
-    len2 = strlen(ref2->system);
-
-    if (len1 == len2 && memcmp(ref1->system, ref2->system, len1) == 0) {
+    if (strcmp(ref1->system, ref2->system) == 0) {
         SCLogDebug("Match found inside Reference-Config hash function");
         return 1;
     }
@@ -475,15 +462,13 @@ char SCRConfReferenceHashCompareFunc(void *data1, uint16_t datalen1,
 void SCRConfReferenceHashFree(void *data)
 {
     SCRConfDeAllocSCRConfReference(data);
-
-    return;
 }
 
 /**
  * \brief Loads the Reference info from the reference.config file.
  *
  *        The reference.config file contains references that can be used in
- *        Signatures.  Each line of the file should  have the following format -
+ *        Signatures.  Each line of the file should have the following format -
  *        config reference: system_name, reference_url.
  *
  * \param de_ctx Pointer to the Detection Engine Context that should be updated
@@ -507,7 +492,7 @@ int SCRConfLoadReferenceConfigFile(DetectEngineCtx *de_ctx, FILE *fd)
     }
 
     bool rc = SCRConfParseFile(de_ctx, fd);
-    SCRConfDeInitLocalResources(de_ctx, fd);
+    SCRConfDeInitLocalResources(fd);
 
     return rc ? 0 : -1;
 }
@@ -612,6 +597,7 @@ static int SCRConfTest01(void)
     if (de_ctx == NULL)
         return result;
 
+    SCRConfDeInitContext(de_ctx);
     FILE *fd = SCRConfGenerateValidDummyReferenceConfigFD01();
     SCRConfLoadReferenceConfigFile(de_ctx, fd);
 
@@ -640,6 +626,7 @@ static int SCRConfTest02(void)
     if (de_ctx == NULL)
         return result;
 
+    SCRConfDeInitContext(de_ctx);
     FILE *fd = SCRConfGenerateInvalidDummyReferenceConfigFD03();
     SCRConfLoadReferenceConfigFile(de_ctx, fd);
 
@@ -667,6 +654,7 @@ static int SCRConfTest03(void)
     if (de_ctx == NULL)
         return result;
 
+    SCRConfDeInitContext(de_ctx);
     FILE *fd = SCRConfGenerateInvalidDummyReferenceConfigFD02();
     SCRConfLoadReferenceConfigFile(de_ctx, fd);
 
@@ -693,6 +681,7 @@ static int SCRConfTest04(void)
     if (de_ctx == NULL)
         return 0;
 
+    SCRConfDeInitContext(de_ctx);
     FILE *fd = SCRConfGenerateValidDummyReferenceConfigFD01();
     SCRConfLoadReferenceConfigFile(de_ctx, fd);
 
@@ -725,6 +714,7 @@ static int SCRConfTest05(void)
     if (de_ctx == NULL)
         return 0;
 
+    SCRConfDeInitContext(de_ctx);
     FILE *fd = SCRConfGenerateInvalidDummyReferenceConfigFD03();
     SCRConfLoadReferenceConfigFile(de_ctx, fd);
 
@@ -757,6 +747,7 @@ static int SCRConfTest06(void)
     if (de_ctx == NULL)
         return 0;
 
+    SCRConfDeInitContext(de_ctx);
     FILE *fd = SCRConfGenerateInvalidDummyReferenceConfigFD02();
     SCRConfLoadReferenceConfigFile(de_ctx, fd);
 
@@ -793,6 +784,4 @@ void SCRConfRegisterTests(void)
     UtRegisterTest("SCRConfTest05", SCRConfTest05);
     UtRegisterTest("SCRConfTest06", SCRConfTest06);
 #endif /* UNITTESTS */
-
-    return;
 }

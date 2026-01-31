@@ -21,8 +21,8 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __DETECT_ENGINE_ALERT_H__
-#define __DETECT_ENGINE_ALERT_H__
+#ifndef SURICATA_DETECT_ENGINE_ALERT_H
+#define SURICATA_DETECT_ENGINE_ALERT_H
 
 #include "suricata-common.h"
 #include "decode.h"
@@ -32,11 +32,11 @@ void AlertQueueInit(DetectEngineThreadCtx *det_ctx);
 void AlertQueueFree(DetectEngineThreadCtx *det_ctx);
 void AlertQueueAppend(DetectEngineThreadCtx *det_ctx, const Signature *s, Packet *p, uint64_t tx_id,
         uint8_t alert_flags);
-void PacketAlertFinalize(DetectEngineCtx *, DetectEngineThreadCtx *, Packet *);
+void PacketAlertFinalize(const DetectEngineCtx *, DetectEngineThreadCtx *, Packet *);
 #ifdef UNITTESTS
 int PacketAlertCheck(Packet *, uint32_t);
 #endif
 void PacketAlertTagInit(void);
 void DetectEngineAlertRegisterTests(void);
 
-#endif /* __DETECT_ENGINE_ALERT_H__ */
+#endif /* SURICATA_DETECT_ENGINE_ALERT_H */

@@ -30,7 +30,7 @@
 #include "util-affinity.h"
 #include "util-runmodes.h"
 
-static int DagConfigGetThreadCount(void *conf)
+static uint16_t DagConfigGetThreadCount(void *conf)
 {
     return 1;
 }
@@ -62,8 +62,6 @@ void RunModeErfDagRegister(void)
             "Workers DAG mode, each thread does all "
             " tasks from acquisition to logging",
             RunModeIdsErfDagWorkers, NULL);
-
-    return;
 }
 
 int RunModeIdsErfDagSingle(void)

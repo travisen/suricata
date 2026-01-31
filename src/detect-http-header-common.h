@@ -21,8 +21,8 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __DETECT_HTTP_HEADER_COMMON_H__
-#define __DETECT_HTTP_HEADER_COMMON_H__
+#ifndef SURICATA_DETECT_HTTP_HEADER_COMMON_H
+#define SURICATA_DETECT_HTTP_HEADER_COMMON_H
 
 typedef struct HttpHeaderBuffer_ {
     uint8_t *buffer;
@@ -42,10 +42,9 @@ typedef struct HttpHeaderThreadData_ {
 void *HttpHeaderThreadDataInit(void *data);
 void HttpHeaderThreadDataFree(void *data);
 
-HttpHeaderBuffer *HttpHeaderGetBufferSpace(DetectEngineThreadCtx *det_ctx, Flow *f, uint8_t flags,
+HttpHeaderBuffer *HttpHeaderGetBufferSpace(DetectEngineThreadCtx *det_ctx, uint8_t flags,
         const int keyword_id, HttpHeaderThreadData **ret_hdr_td);
 
-int HttpHeaderExpandBuffer(HttpHeaderThreadData *td,
-        HttpHeaderBuffer *buf, uint32_t size);
+int HttpHeaderExpandBuffer(HttpHeaderThreadData *td, HttpHeaderBuffer *buf, size_t size);
 
-#endif /* __DETECT_HTTP_HEADER_COMMON_H__ */
+#endif /* SURICATA_DETECT_HTTP_HEADER_COMMON_H */

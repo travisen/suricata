@@ -40,6 +40,7 @@
 
 #include "app-layer-parser.h"
 #include "app-layer-modbus.h"
+#include "rust.h"
 
 void ModbusParserRegisterTests(void);
 
@@ -48,7 +49,7 @@ void ModbusParserRegisterTests(void);
  */
 void RegisterModbusParsers(void)
 {
-    rs_modbus_register_parser();
+    SCRegisterModbusParser();
 #ifdef UNITTESTS
     AppLayerParserRegisterProtocolUnittests(IPPROTO_TCP, ALPROTO_MODBUS, ModbusParserRegisterTests);
 #endif
@@ -267,11 +268,12 @@ static uint8_t invalidLengthPDUWriteMultipleRegistersReq[] = {
                                               /* Function code */           0x10};
 
 /** \test Send Modbus Read Coils request/response. */
-static int ModbusParserTest01(void) {
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
+static int ModbusParserTest01(void)
+{
     Flow f;
     TcpSession ssn;
 
+    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
     FAIL_IF_NULL(alp_tctx);
 
     memset(&f, 0, sizeof(f));
@@ -292,31 +294,31 @@ static int ModbusParserTest01(void) {
     ModbusState *modbus_state = f.alstate;
     FAIL_IF_NULL(modbus_state);
 
-    ModbusMessage request = rs_modbus_state_get_tx_request(modbus_state, 0);
+    ModbusMessage request = SCModbusStateGetTxRequest(modbus_state, 0);
     FAIL_IF_NULL(request._0);
-    FAIL_IF_NOT(rs_modbus_message_get_function(&request) == 1);
-    FAIL_IF_NOT(rs_modbus_message_get_read_request_address(&request) == 0x7890);
-    FAIL_IF_NOT(rs_modbus_message_get_read_request_quantity(&request) == 19);
+    FAIL_IF_NOT(SCModbusMessageGetFunction(&request) == 1);
+    FAIL_IF_NOT(SCModbusMessageGetReadRequestAddress(&request) == 0x7890);
+    FAIL_IF_NOT(SCModbusMessageGetReadRequestQuantity(&request) == 19);
 
     r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_MODBUS,
                             STREAM_TOCLIENT, readCoilsRsp,
                             sizeof(readCoilsRsp));
     FAIL_IF_NOT(r == 0);
+    FAIL_IF_NOT(SCModbusStateGetTxCount(modbus_state) == 1);
 
-    FAIL_IF_NOT(rs_modbus_state_get_tx_count(modbus_state) == 1);
-
+    FLOW_DESTROY(&f);
     AppLayerParserThreadCtxFree(alp_tctx);
     StreamTcpFreeConfig(true);
-    FLOW_DESTROY(&f);
     PASS;
 }
 
 /** \test Send Modbus Write Multiple registers request/response. */
-static int ModbusParserTest02(void) {
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
+static int ModbusParserTest02(void)
+{
     Flow f;
     TcpSession ssn;
 
+    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
     FAIL_IF_NULL(alp_tctx);
 
     memset(&f, 0, sizeof(f));
@@ -337,14 +339,14 @@ static int ModbusParserTest02(void) {
     ModbusState *modbus_state = f.alstate;
     FAIL_IF_NULL(modbus_state);
 
-    ModbusMessage request = rs_modbus_state_get_tx_request(modbus_state, 0);
+    ModbusMessage request = SCModbusStateGetTxRequest(modbus_state, 0);
     FAIL_IF_NULL(request._0);
-    FAIL_IF_NOT(rs_modbus_message_get_function(&request) == 16);
-    FAIL_IF_NOT(rs_modbus_message_get_write_multreq_address(&request) == 0x01);
-    FAIL_IF_NOT(rs_modbus_message_get_write_multreq_quantity(&request) == 2);
+    FAIL_IF_NOT(SCModbusMessageGetFunction(&request) == 16);
+    FAIL_IF_NOT(SCModbusMessageGetWriteMultreqAddress(&request) == 0x01);
+    FAIL_IF_NOT(SCModbusMessageGetWriteMultreqQuantity(&request) == 2);
 
     size_t data_len;
-    const uint8_t *data = rs_modbus_message_get_write_multreq_data(&request, &data_len);
+    const uint8_t *data = SCModbusMessageGetWriteMultreqData(&request, &data_len);
     FAIL_IF_NOT(data_len == 4);
     FAIL_IF_NOT(data[0] == 0x00);
     FAIL_IF_NOT(data[1] == 0x0A);
@@ -355,18 +357,17 @@ static int ModbusParserTest02(void) {
                             STREAM_TOCLIENT, writeMultipleRegistersRsp,
                             sizeof(writeMultipleRegistersRsp));
     FAIL_IF_NOT(r == 0);
+    FAIL_IF_NOT(SCModbusStateGetTxCount(modbus_state) == 1);
 
-    FAIL_IF_NOT(rs_modbus_state_get_tx_count(modbus_state) == 1);
-
+    FLOW_DESTROY(&f);
     AppLayerParserThreadCtxFree(alp_tctx);
     StreamTcpFreeConfig(true);
-    FLOW_DESTROY(&f);
     PASS;
 }
 
 /** \test Send Modbus Read/Write Multiple registers request/response with mismatch value. */
-static int ModbusParserTest03(void) {
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
+static int ModbusParserTest03(void)
+{
     DetectEngineThreadCtx *det_ctx = NULL;
     Flow f;
     Packet *p = NULL;
@@ -374,9 +375,11 @@ static int ModbusParserTest03(void) {
     TcpSession ssn;
     ThreadVars tv;
 
+    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
     FAIL_IF_NULL(alp_tctx);
 
     memset(&tv, 0, sizeof(ThreadVars));
+    StatsThreadInit(&tv.stats);
     memset(&f, 0, sizeof(Flow));
     memset(&ssn, 0, sizeof(TcpSession));
 
@@ -418,17 +421,17 @@ static int ModbusParserTest03(void) {
     ModbusState *modbus_state = f.alstate;
     FAIL_IF_NULL(modbus_state);
 
-    ModbusMessage request = rs_modbus_state_get_tx_request(modbus_state, 0);
+    ModbusMessage request = SCModbusStateGetTxRequest(modbus_state, 0);
     FAIL_IF_NULL(request._0);
 
-    FAIL_IF_NOT(rs_modbus_message_get_function(&request) == 23);
-    FAIL_IF_NOT(rs_modbus_message_get_rw_multreq_read_address(&request) == 0x03);
-    FAIL_IF_NOT(rs_modbus_message_get_rw_multreq_read_quantity(&request) == 6);
-    FAIL_IF_NOT(rs_modbus_message_get_rw_multreq_write_address(&request) == 0x0E);
-    FAIL_IF_NOT(rs_modbus_message_get_rw_multreq_write_quantity(&request) == 3);
+    FAIL_IF_NOT(SCModbusMessageGetFunction(&request) == 23);
+    FAIL_IF_NOT(SCModbusMessageGetRwMultreqReadAddress(&request) == 0x03);
+    FAIL_IF_NOT(SCModbusMessageGetRwMultreqReadQuantity(&request) == 6);
+    FAIL_IF_NOT(SCModbusMessageGetRwMultreqWriteAddress(&request) == 0x0E);
+    FAIL_IF_NOT(SCModbusMessageGetRwMultreqWriteQuantity(&request) == 3);
 
     size_t data_len;
-    uint8_t const *data = rs_modbus_message_get_rw_multreq_write_data(&request, &data_len);
+    uint8_t const *data = SCModbusMessageGetRwMultreqWriteData(&request, &data_len);
     FAIL_IF_NOT(data_len == 6);
     FAIL_IF_NOT(data[0] == 0x12);
     FAIL_IF_NOT(data[1] == 0x34);
@@ -441,33 +444,30 @@ static int ModbusParserTest03(void) {
                             STREAM_TOCLIENT, readWriteMultipleRegistersRsp,
                             sizeof(readWriteMultipleRegistersRsp));
     FAIL_IF_NOT(r == 0);
-
-    FAIL_IF_NOT(rs_modbus_state_get_tx_count(modbus_state) == 1);
+    FAIL_IF_NOT(SCModbusStateGetTxCount(modbus_state) == 1);
 
     /* do detect */
     SigMatchSignatures(&tv, de_ctx, det_ctx, p);
-
     FAIL_IF_NOT(PacketAlertCheck(p, 1));
 
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
-
-    DetectEngineThreadCtxDeinit(&tv, (void *)det_ctx);
-    DetectEngineCtxFree(de_ctx);
+    UTHFreePackets(&p, 1);
+    FLOW_DESTROY(&f);
 
     AppLayerParserThreadCtxFree(alp_tctx);
+    DetectEngineThreadCtxDeinit(&tv, (void *)det_ctx);
+    DetectEngineCtxFree(de_ctx);
     StreamTcpFreeConfig(true);
-    FLOW_DESTROY(&f);
-    UTHFreePackets(&p, 1);
+    StatsThreadCleanup(&tv.stats);
     PASS;
 }
 
 /** \test Send Modbus Force Listen Only Mode request. */
-static int ModbusParserTest04(void) {
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
+static int ModbusParserTest04(void)
+{
     Flow f;
     TcpSession ssn;
 
+    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
     FAIL_IF_NULL(alp_tctx);
 
     memset(&f, 0, sizeof(f));
@@ -488,11 +488,10 @@ static int ModbusParserTest04(void) {
     ModbusState *modbus_state = f.alstate;
     FAIL_IF_NULL(modbus_state);
 
-    ModbusMessage request = rs_modbus_state_get_tx_request(modbus_state, 0);
+    ModbusMessage request = SCModbusStateGetTxRequest(modbus_state, 0);
     FAIL_IF_NULL(request._0);
-
-    FAIL_IF_NOT(rs_modbus_message_get_function(&request) == 8);
-    FAIL_IF_NOT(rs_modbus_message_get_subfunction(&request) == 4);
+    FAIL_IF_NOT(SCModbusMessageGetFunction(&request) == 8);
+    FAIL_IF_NOT(SCModbusMessageGetSubfunction(&request) == 4);
 
     AppLayerParserThreadCtxFree(alp_tctx);
     StreamTcpFreeConfig(true);
@@ -501,8 +500,8 @@ static int ModbusParserTest04(void) {
 }
 
 /** \test Send Modbus invalid Protocol version in request. */
-static int ModbusParserTest05(void) {
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
+static int ModbusParserTest05(void)
+{
     DetectEngineThreadCtx *det_ctx = NULL;
     Flow f;
     Packet *p = NULL;
@@ -510,9 +509,11 @@ static int ModbusParserTest05(void) {
     TcpSession ssn;
     ThreadVars tv;
 
+    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
     FAIL_IF_NULL(alp_tctx);
 
     memset(&tv, 0, sizeof(ThreadVars));
+    StatsThreadInit(&tv.stats);
     memset(&f, 0, sizeof(Flow));
     memset(&ssn, 0, sizeof(TcpSession));
 
@@ -555,25 +556,22 @@ static int ModbusParserTest05(void) {
 
     /* do detect */
     SigMatchSignatures(&tv, de_ctx, det_ctx, p);
-
     FAIL_IF_NOT(PacketAlertCheck(p, 1));
 
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
-
-    DetectEngineThreadCtxDeinit(&tv, (void *)det_ctx);
-    DetectEngineCtxFree(de_ctx);
+    UTHFreePackets(&p, 1);
+    FLOW_DESTROY(&f);
 
     AppLayerParserThreadCtxFree(alp_tctx);
+    DetectEngineThreadCtxDeinit(&tv, (void *)det_ctx);
+    DetectEngineCtxFree(de_ctx);
     StreamTcpFreeConfig(true);
-    FLOW_DESTROY(&f);
-    UTHFreePackets(&p, 1);
+    StatsThreadCleanup(&tv.stats);
     PASS;
 }
 
 /** \test Send Modbus unsolicited response. */
-static int ModbusParserTest06(void) {
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
+static int ModbusParserTest06(void)
+{
     DetectEngineThreadCtx *det_ctx = NULL;
     Flow f;
     Packet *p = NULL;
@@ -581,9 +579,11 @@ static int ModbusParserTest06(void) {
     TcpSession ssn;
     ThreadVars tv;
 
+    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
     FAIL_IF_NULL(alp_tctx);
 
     memset(&tv, 0, sizeof(ThreadVars));
+    StatsThreadInit(&tv.stats);
     memset(&f, 0, sizeof(Flow));
     memset(&ssn, 0, sizeof(TcpSession));
 
@@ -626,25 +626,22 @@ static int ModbusParserTest06(void) {
 
     /* do detect */
     SigMatchSignatures(&tv, de_ctx, det_ctx, p);
-
     FAIL_IF_NOT(PacketAlertCheck(p, 1));
 
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
-
-    DetectEngineThreadCtxDeinit(&tv, (void *)det_ctx);
-    DetectEngineCtxFree(de_ctx);
+    UTHFreePackets(&p, 1);
+    FLOW_DESTROY(&f);
 
     AppLayerParserThreadCtxFree(alp_tctx);
+    DetectEngineThreadCtxDeinit(&tv, (void *)det_ctx);
+    DetectEngineCtxFree(de_ctx);
     StreamTcpFreeConfig(true);
-    FLOW_DESTROY(&f);
-    UTHFreePackets(&p, 1);
+    StatsThreadCleanup(&tv.stats);
     PASS;
 }
 
 /** \test Send Modbus invalid Length request. */
-static int ModbusParserTest07(void) {
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
+static int ModbusParserTest07(void)
+{
     DetectEngineThreadCtx *det_ctx = NULL;
     Flow f;
     Packet *p = NULL;
@@ -652,9 +649,11 @@ static int ModbusParserTest07(void) {
     TcpSession ssn;
     ThreadVars tv;
 
+    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
     FAIL_IF_NULL(alp_tctx);
 
     memset(&tv, 0, sizeof(ThreadVars));
+    StatsThreadInit(&tv.stats);
     memset(&f, 0, sizeof(Flow));
     memset(&ssn, 0, sizeof(TcpSession));
 
@@ -698,25 +697,22 @@ static int ModbusParserTest07(void) {
 
     /* do detect */
     SigMatchSignatures(&tv, de_ctx, det_ctx, p);
-
     FAIL_IF_NOT(PacketAlertCheck(p, 1));
 
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
-
-    DetectEngineThreadCtxDeinit(&tv, (void *)det_ctx);
-    DetectEngineCtxFree(de_ctx);
+    UTHFreePackets(&p, 1);
+    FLOW_DESTROY(&f);
 
     AppLayerParserThreadCtxFree(alp_tctx);
+    DetectEngineThreadCtxDeinit(&tv, (void *)det_ctx);
+    DetectEngineCtxFree(de_ctx);
     StreamTcpFreeConfig(true);
-    FLOW_DESTROY(&f);
-    UTHFreePackets(&p, 1);
+    StatsThreadCleanup(&tv.stats);
     PASS;
 }
 
 /** \test Send Modbus Read Coils request and error response with Exception code invalid. */
-static int ModbusParserTest08(void) {
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
+static int ModbusParserTest08(void)
+{
     DetectEngineThreadCtx *det_ctx = NULL;
     Flow f;
     Packet *p = NULL;
@@ -724,9 +720,11 @@ static int ModbusParserTest08(void) {
     TcpSession ssn;
     ThreadVars tv;
 
+    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
     FAIL_IF_NULL(alp_tctx);
 
     memset(&tv, 0, sizeof(ThreadVars));
+    StatsThreadInit(&tv.stats);
     memset(&f, 0, sizeof(Flow));
     memset(&ssn, 0, sizeof(TcpSession));
 
@@ -767,35 +765,30 @@ static int ModbusParserTest08(void) {
     ModbusState *modbus_state = f.alstate;
     FAIL_IF_NULL(modbus_state);
 
-    ModbusMessage request = rs_modbus_state_get_tx_request(modbus_state, 0);
+    ModbusMessage request = SCModbusStateGetTxRequest(modbus_state, 0);
     FAIL_IF_NULL(request._0);
-
-    FAIL_IF_NOT(rs_modbus_message_get_function(&request) == 1);
-    FAIL_IF_NOT(rs_modbus_message_get_read_request_address(&request) == 0x7890);
-    FAIL_IF_NOT(rs_modbus_message_get_read_request_quantity(&request) == 19);
+    FAIL_IF_NOT(SCModbusMessageGetFunction(&request) == 1);
+    FAIL_IF_NOT(SCModbusMessageGetReadRequestAddress(&request) == 0x7890);
+    FAIL_IF_NOT(SCModbusMessageGetReadRequestQuantity(&request) == 19);
 
     r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_MODBUS,
                             STREAM_TOCLIENT, readCoilsErrorRsp,
                             sizeof(readCoilsErrorRsp));
     FAIL_IF_NOT(r == 0);
-
-    FAIL_IF_NOT(rs_modbus_state_get_tx_count(modbus_state) == 1);
+    FAIL_IF_NOT(SCModbusStateGetTxCount(modbus_state) == 1);
 
     /* do detect */
     SigMatchSignatures(&tv, de_ctx, det_ctx, p);
-
     FAIL_IF_NOT(PacketAlertCheck(p, 1));
 
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
-
-    DetectEngineThreadCtxDeinit(&tv, (void *)det_ctx);
-    DetectEngineCtxFree(de_ctx);
+    UTHFreePackets(&p, 1);
+    FLOW_DESTROY(&f);
 
     AppLayerParserThreadCtxFree(alp_tctx);
+    DetectEngineThreadCtxDeinit(&tv, (void *)det_ctx);
+    DetectEngineCtxFree(de_ctx);
     StreamTcpFreeConfig(true);
-    FLOW_DESTROY(&f);
-    UTHFreePackets(&p, 1);
+    StatsThreadCleanup(&tv.stats);
     PASS;
 }
 
@@ -831,12 +824,11 @@ static int ModbusParserTest09(void) {
     ModbusState *modbus_state = f.alstate;
     FAIL_IF_NULL(modbus_state);
 
-    ModbusMessage request = rs_modbus_state_get_tx_request(modbus_state, 0);
+    ModbusMessage request = SCModbusStateGetTxRequest(modbus_state, 0);
     FAIL_IF_NULL(request._0);
-
-    FAIL_IF_NOT(rs_modbus_message_get_function(&request) == 1);
-    FAIL_IF_NOT(rs_modbus_message_get_read_request_address(&request) == 0x7890);
-    FAIL_IF_NOT(rs_modbus_message_get_read_request_quantity(&request) == 19);
+    FAIL_IF_NOT(SCModbusMessageGetFunction(&request) == 1);
+    FAIL_IF_NOT(SCModbusMessageGetReadRequestAddress(&request) == 0x7890);
+    FAIL_IF_NOT(SCModbusMessageGetReadRequestQuantity(&request) == 19);
 
     input_len = sizeof(readCoilsRsp);
     part2_len = 10;
@@ -849,8 +841,7 @@ static int ModbusParserTest09(void) {
     r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_MODBUS,
                             STREAM_TOCLIENT, input, input_len);
     FAIL_IF_NOT(r == 0);
-
-    FAIL_IF_NOT(rs_modbus_state_get_tx_count(modbus_state) == 1);
+    FAIL_IF_NOT(SCModbusStateGetTxCount(modbus_state) == 1);
 
     AppLayerParserThreadCtxFree(alp_tctx);
     StreamTcpFreeConfig(true);
@@ -863,10 +854,10 @@ static int ModbusParserTest10(void) {
     uint32_t    input_len = sizeof(readCoilsReq) + sizeof(writeMultipleRegistersReq);
     uint8_t     *input, *ptr;
 
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
     Flow f;
     TcpSession ssn;
 
+    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
     FAIL_IF_NULL(alp_tctx);
 
     input  = (uint8_t *) SCMalloc (input_len * sizeof(uint8_t));
@@ -891,18 +882,16 @@ static int ModbusParserTest10(void) {
 
     ModbusState *modbus_state = f.alstate;
     FAIL_IF_NULL(modbus_state);
+    FAIL_IF_NOT(SCModbusStateGetTxCount(modbus_state) == 2);
 
-    FAIL_IF_NOT(rs_modbus_state_get_tx_count(modbus_state) == 2);
-
-    ModbusMessage request = rs_modbus_state_get_tx_request(modbus_state, 1);
+    ModbusMessage request = SCModbusStateGetTxRequest(modbus_state, 1);
     FAIL_IF_NULL(request._0);
-
-    FAIL_IF_NOT(rs_modbus_message_get_function(&request) == 16);
-    FAIL_IF_NOT(rs_modbus_message_get_write_multreq_address(&request) == 0x01);
-    FAIL_IF_NOT(rs_modbus_message_get_write_multreq_quantity(&request) == 2);
+    FAIL_IF_NOT(SCModbusMessageGetFunction(&request) == 16);
+    FAIL_IF_NOT(SCModbusMessageGetWriteMultreqAddress(&request) == 0x01);
+    FAIL_IF_NOT(SCModbusMessageGetWriteMultreqQuantity(&request) == 2);
 
     size_t data_len;
-    uint8_t const *data = rs_modbus_message_get_write_multreq_data(&request, &data_len);
+    uint8_t const *data = SCModbusMessageGetWriteMultreqData(&request, &data_len);
     FAIL_IF_NOT(data_len == 4);
     FAIL_IF_NOT(data[0] == 0x00);
     FAIL_IF_NOT(data[1] == 0x0A);
@@ -921,38 +910,37 @@ static int ModbusParserTest10(void) {
     r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_MODBUS, STREAM_TOCLIENT, input, input_len);
     FAIL_IF_NOT(r == 0);
 
+    FLOW_DESTROY(&f);
     SCFree(input);
     AppLayerParserThreadCtxFree(alp_tctx);
     StreamTcpFreeConfig(true);
-    FLOW_DESTROY(&f);
     PASS;
 }
 
 /** \test Send Modbus exceed Length request. */
-static int ModbusParserTest11(void) {
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
+static int ModbusParserTest11(void)
+{
     DetectEngineThreadCtx *det_ctx = NULL;
     Flow f;
-    Packet *p = NULL;
-    Signature *s = NULL;
     TcpSession ssn;
     ThreadVars tv;
 
     size_t input_len = 65536;
     uint8_t *input = SCCalloc(1, input_len);
-
     FAIL_IF(input == NULL);
 
     memcpy(input, exceededLengthWriteMultipleRegistersReq,
             sizeof(exceededLengthWriteMultipleRegistersReq));
 
+    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
     FAIL_IF(alp_tctx == NULL);
 
     memset(&tv, 0, sizeof(ThreadVars));
+    StatsThreadInit(&tv.stats);
     memset(&f, 0, sizeof(Flow));
     memset(&ssn, 0, sizeof(TcpSession));
 
-    p = UTHBuildPacket(NULL, 0, IPPROTO_TCP);
+    Packet *p = UTHBuildPacket(NULL, 0, IPPROTO_TCP);
 
     FLOW_INITIALIZE(&f);
     f.alproto   = ALPROTO_MODBUS;
@@ -971,11 +959,11 @@ static int ModbusParserTest11(void) {
     FAIL_IF_NULL(de_ctx);
 
     de_ctx->flags |= DE_QUIET;
-    s = DetectEngineAppendSig(de_ctx, "alert modbus any any -> any any "
-                                      "(msg:\"Modbus invalid Length\"; "
-                                      "app-layer-event: "
-                                      "modbus.invalid_length; "
-                                      "sid:1;)");
+    Signature *s = DetectEngineAppendSig(de_ctx, "alert modbus any any -> any any "
+                                                 "(msg:\"Modbus invalid Length\"; "
+                                                 "app-layer-event: "
+                                                 "modbus.invalid_length; "
+                                                 "sid:1;)");
     FAIL_IF_NULL(s);
 
     SigGroupBuild(de_ctx);
@@ -990,35 +978,34 @@ static int ModbusParserTest11(void) {
 
     /* do detect */
     SigMatchSignatures(&tv, de_ctx, det_ctx, p);
-
     FAIL_IF_NOT(PacketAlertCheck(p, 1));
 
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
-
-    DetectEngineThreadCtxDeinit(&tv, (void *)det_ctx);
-    DetectEngineCtxFree(de_ctx);
+    UTHFreePackets(&p, 1);
+    FLOW_DESTROY(&f);
 
     AppLayerParserThreadCtxFree(alp_tctx);
+    DetectEngineThreadCtxDeinit(&tv, (void *)det_ctx);
+    DetectEngineCtxFree(de_ctx);
     StreamTcpFreeConfig(true);
-    FLOW_DESTROY(&f);
-    UTHFreePackets(&p, 1);
+    StatsThreadCleanup(&tv.stats);
+    SCFree(input);
     PASS;
 }
 
 /** \test Send Modbus invalid PDU Length. */
-static int ModbusParserTest12(void) {
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
+static int ModbusParserTest12(void)
+{
     DetectEngineThreadCtx *det_ctx = NULL;
     Flow f;
     Packet *p = NULL;
-    Signature *s = NULL;
     TcpSession ssn;
     ThreadVars tv;
 
+    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
     FAIL_IF_NULL(alp_tctx);
 
     memset(&tv, 0, sizeof(ThreadVars));
+    StatsThreadInit(&tv.stats);
     memset(&f, 0, sizeof(Flow));
     memset(&ssn, 0, sizeof(TcpSession));
 
@@ -1041,11 +1028,11 @@ static int ModbusParserTest12(void) {
     FAIL_IF_NULL(de_ctx);
 
     de_ctx->flags |= DE_QUIET;
-    s = DetectEngineAppendSig(de_ctx, "alert modbus any any -> any any "
-                                      "(msg:\"Modbus invalid Length\"; "
-                                      "app-layer-event: "
-                                      "modbus.invalid_length; "
-                                      "sid:1;)");
+    Signature *s = DetectEngineAppendSig(de_ctx, "alert modbus any any -> any any "
+                                                 "(msg:\"Modbus invalid Length\"; "
+                                                 "app-layer-event: "
+                                                 "modbus.invalid_length; "
+                                                 "sid:1;)");
     FAIL_IF_NULL(s);
 
     SigGroupBuild(de_ctx);
@@ -1062,28 +1049,26 @@ static int ModbusParserTest12(void) {
 
     /* do detect */
     SigMatchSignatures(&tv, de_ctx, det_ctx, p);
-
     FAIL_IF_NOT(PacketAlertCheck(p, 1));
 
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
-
-    DetectEngineThreadCtxDeinit(&tv, (void *)det_ctx);
-    DetectEngineCtxFree(de_ctx);
+    UTHFreePackets(&p, 1);
+    FLOW_DESTROY(&f);
 
     AppLayerParserThreadCtxFree(alp_tctx);
+    DetectEngineThreadCtxDeinit(&tv, (void *)det_ctx);
+    DetectEngineCtxFree(de_ctx);
     StreamTcpFreeConfig(true);
-    FLOW_DESTROY(&f);
-    UTHFreePackets(&p, 1);
+    StatsThreadCleanup(&tv.stats);
     PASS;
 }
 
 /** \test Send Modbus Mask Write register request/response. */
-static int ModbusParserTest13(void) {
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
+static int ModbusParserTest13(void)
+{
     Flow f;
     TcpSession ssn;
 
+    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
     FAIL_IF_NULL(alp_tctx);
 
     memset(&f, 0, sizeof(f));
@@ -1104,19 +1089,17 @@ static int ModbusParserTest13(void) {
     ModbusState *modbus_state = f.alstate;
     FAIL_IF_NULL(modbus_state);
 
-    ModbusMessage request = rs_modbus_state_get_tx_request(modbus_state, 0);
+    ModbusMessage request = SCModbusStateGetTxRequest(modbus_state, 0);
     FAIL_IF_NULL(request._0);
-
-    FAIL_IF_NOT(rs_modbus_message_get_function(&request) == 22);
-    FAIL_IF_NOT(rs_modbus_message_get_and_mask(&request) == 0x00F2);
-    FAIL_IF_NOT(rs_modbus_message_get_or_mask(&request) == 0x0025);
+    FAIL_IF_NOT(SCModbusMessageGetFunction(&request) == 22);
+    FAIL_IF_NOT(SCModbusMessageGetAndMask(&request) == 0x00F2);
+    FAIL_IF_NOT(SCModbusMessageGetOrMask(&request) == 0x0025);
 
     r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_MODBUS,
                             STREAM_TOCLIENT, maskWriteRegisterRsp,
                             sizeof(maskWriteRegisterRsp));
     FAIL_IF_NOT(r == 0);
-
-    FAIL_IF_NOT(rs_modbus_state_get_tx_count(modbus_state) == 1);
+    FAIL_IF_NOT(SCModbusStateGetTxCount(modbus_state) == 1);
 
     AppLayerParserThreadCtxFree(alp_tctx);
     StreamTcpFreeConfig(true);
@@ -1125,11 +1108,12 @@ static int ModbusParserTest13(void) {
 }
 
 /** \test Send Modbus Write single register request/response. */
-static int ModbusParserTest14(void) {
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
+static int ModbusParserTest14(void)
+{
     Flow f;
     TcpSession ssn;
 
+    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
     FAIL_IF_NULL(alp_tctx);
 
     memset(&f, 0, sizeof(f));
@@ -1150,29 +1134,27 @@ static int ModbusParserTest14(void) {
     ModbusState *modbus_state = f.alstate;
     FAIL_IF_NULL(modbus_state);
 
-    ModbusMessage request = rs_modbus_state_get_tx_request(modbus_state, 0);
+    ModbusMessage request = SCModbusStateGetTxRequest(modbus_state, 0);
     FAIL_IF_NULL(request._0);
-
-    FAIL_IF_NOT(rs_modbus_message_get_function(&request) == 6);
-    FAIL_IF_NOT(rs_modbus_message_get_write_address(&request) == 0x0001);
-    FAIL_IF_NOT(rs_modbus_message_get_write_data(&request) == 0x0003);
+    FAIL_IF_NOT(SCModbusMessageGetFunction(&request) == 6);
+    FAIL_IF_NOT(SCModbusMessageGetWriteAddress(&request) == 0x0001);
+    FAIL_IF_NOT(SCModbusMessageGetWriteData(&request) == 0x0003);
 
     r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_MODBUS,
                             STREAM_TOCLIENT, writeSingleRegisterRsp,
                             sizeof(writeSingleRegisterRsp));
     FAIL_IF_NOT(r == 0);
+    FAIL_IF_NOT(SCModbusStateGetTxCount(modbus_state) == 1);
 
-    FAIL_IF_NOT(rs_modbus_state_get_tx_count(modbus_state) == 1);
-
+    FLOW_DESTROY(&f);
     AppLayerParserThreadCtxFree(alp_tctx);
     StreamTcpFreeConfig(true);
-    FLOW_DESTROY(&f);
     PASS;
 }
 
 /** \test Send invalid Modbus Mask Write register request. */
-static int ModbusParserTest15(void) {
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
+static int ModbusParserTest15(void)
+{
     DetectEngineThreadCtx *det_ctx = NULL;
     Flow f;
     Packet *p = NULL;
@@ -1180,9 +1162,11 @@ static int ModbusParserTest15(void) {
     TcpSession ssn;
     ThreadVars tv;
 
+    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
     FAIL_IF_NULL(alp_tctx);
 
     memset(&tv, 0, sizeof(ThreadVars));
+    StatsThreadInit(&tv.stats);
     memset(&f, 0, sizeof(f));
     memset(&ssn, 0, sizeof(ssn));
 
@@ -1223,43 +1207,37 @@ static int ModbusParserTest15(void) {
     ModbusState *modbus_state = f.alstate;
     FAIL_IF_NULL(modbus_state);
 
-    ModbusMessage request = rs_modbus_state_get_tx_request(modbus_state, 0);
+    ModbusMessage request = SCModbusStateGetTxRequest(modbus_state, 0);
     FAIL_IF_NULL(request._0);
-
-    FAIL_IF_NOT(rs_modbus_message_get_function(&request) == 22);
+    FAIL_IF_NOT(SCModbusMessageGetFunction(&request) == 22);
 
     /* do detect */
     SigMatchSignatures(&tv, de_ctx, det_ctx, p);
-
     FAIL_IF_NOT(PacketAlertCheck(p, 1));
 
     r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_MODBUS,
                             STREAM_TOCLIENT, maskWriteRegisterRsp,
                             sizeof(maskWriteRegisterRsp));
     FAIL_IF_NOT(r == 0);
-
-    FAIL_IF_NOT(rs_modbus_state_get_tx_count(modbus_state) == 1);
-    ModbusMessage response = rs_modbus_state_get_tx_response(modbus_state, 0);
+    FAIL_IF_NOT(SCModbusStateGetTxCount(modbus_state) == 1);
+    ModbusMessage response = SCModbusStateGetTxResponse(modbus_state, 0);
     FAIL_IF_NULL(response._0);
+    FAIL_IF_NOT(SCModbusMessageGetFunction(&response) == 22);
 
-    FAIL_IF_NOT(rs_modbus_message_get_function(&response) == 22);
-
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
-
-    DetectEngineThreadCtxDeinit(&tv, (void *)det_ctx);
-    DetectEngineCtxFree(de_ctx);
+    UTHFreePackets(&p, 1);
+    FLOW_DESTROY(&f);
 
     AppLayerParserThreadCtxFree(alp_tctx);
+    DetectEngineThreadCtxDeinit(&tv, (void *)det_ctx);
+    DetectEngineCtxFree(de_ctx);
     StreamTcpFreeConfig(true);
-    FLOW_DESTROY(&f);
-    UTHFreePackets(&p, 1);
+    StatsThreadCleanup(&tv.stats);
     PASS;
 }
 
 /** \test Send invalid Modbus Mask Write register request. */
-static int ModbusParserTest16(void) {
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
+static int ModbusParserTest16(void)
+{
     DetectEngineThreadCtx *det_ctx = NULL;
     Flow f;
     Packet *p = NULL;
@@ -1267,9 +1245,11 @@ static int ModbusParserTest16(void) {
     TcpSession ssn;
     ThreadVars tv;
 
+    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
     FAIL_IF_NULL(alp_tctx);
 
     memset(&tv, 0, sizeof(ThreadVars));
+    StatsThreadInit(&tv.stats);
     memset(&f, 0, sizeof(f));
     memset(&ssn, 0, sizeof(ssn));
 
@@ -1311,19 +1291,17 @@ static int ModbusParserTest16(void) {
     ModbusState *modbus_state = f.alstate;
     FAIL_IF_NULL(modbus_state);
 
-    ModbusMessage request = rs_modbus_state_get_tx_request(modbus_state, 0);
+    ModbusMessage request = SCModbusStateGetTxRequest(modbus_state, 0);
     FAIL_IF_NULL(request._0);
-
-    FAIL_IF_NOT(rs_modbus_message_get_function(&request) == 6);
+    FAIL_IF_NOT(SCModbusMessageGetFunction(&request) == 6);
     size_t data_len;
-    const uint8_t *data = rs_modbus_message_get_bytevec_data(&request, &data_len);
+    const uint8_t *data = SCModbusMessageGetBytevecData(&request, &data_len);
     FAIL_IF_NOT(data_len == 2);
     FAIL_IF_NOT(data[0] == 0x00);
     FAIL_IF_NOT(data[1] == 0x01);
 
     /* do detect */
     SigMatchSignatures(&tv, de_ctx, det_ctx, p);
-
     FAIL_IF_NOT(PacketAlertCheck(p, 1));
 
     r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_MODBUS,
@@ -1331,31 +1309,30 @@ static int ModbusParserTest16(void) {
                             sizeof(writeSingleRegisterRsp));
     FAIL_IF_NOT(r == 0);
 
-    FAIL_IF_NOT(rs_modbus_state_get_tx_count(modbus_state) == 1);
-    ModbusMessage response = rs_modbus_state_get_tx_response(modbus_state, 0);
+    FAIL_IF_NOT(SCModbusStateGetTxCount(modbus_state) == 1);
+    ModbusMessage response = SCModbusStateGetTxResponse(modbus_state, 0);
     FAIL_IF_NULL(response._0);
+    FAIL_IF_NOT(SCModbusMessageGetFunction(&response) == 6);
+    FAIL_IF_NOT(SCModbusMessageGetWriteAddress(&response) == 0x0001);
 
-    FAIL_IF_NOT(rs_modbus_message_get_function(&response) == 6);
-    FAIL_IF_NOT(rs_modbus_message_get_write_address(&response) == 0x0001);
-
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
-
-    DetectEngineThreadCtxDeinit(&tv, (void *)det_ctx);
-    DetectEngineCtxFree(de_ctx);
+    UTHFreePackets(&p, 1);
+    FLOW_DESTROY(&f);
 
     AppLayerParserThreadCtxFree(alp_tctx);
+    DetectEngineThreadCtxDeinit(&tv, (void *)det_ctx);
+    DetectEngineCtxFree(de_ctx);
     StreamTcpFreeConfig(true);
-    FLOW_DESTROY(&f);
-    UTHFreePackets(&p, 1);
-    PASS;}
+    StatsThreadCleanup(&tv.stats);
+    PASS;
+}
 
 /** \test Checks if stream_depth is correct */
-static int ModbusParserTest17(void) {
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
+static int ModbusParserTest17(void)
+{
     Flow f;
     TcpSession ssn;
 
+    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
     FAIL_IF_NULL(alp_tctx);
 
     memset(&f, 0, sizeof(f));
@@ -1371,32 +1348,30 @@ static int ModbusParserTest17(void) {
     int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_MODBUS, STREAM_TOSERVER,
                                 readCoilsReq, sizeof(readCoilsReq));
     FAIL_IF(r != 0);
-
     FAIL_IF(f.alstate == NULL);
-
     FAIL_IF(((TcpSession *)(f.protoctx))->reassembly_depth != MODBUS_CONFIG_DEFAULT_STREAM_DEPTH);
 
     r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_MODBUS, STREAM_TOCLIENT,
                             readCoilsRsp, sizeof(readCoilsRsp));
     FAIL_IF(r != 0);
-
     FAIL_IF(((TcpSession *)(f.protoctx))->reassembly_depth != MODBUS_CONFIG_DEFAULT_STREAM_DEPTH);
 
+    FLOW_DESTROY(&f);
     AppLayerParserThreadCtxFree(alp_tctx);
     StreamTcpFreeConfig(true);
-    FLOW_DESTROY(&f);
     PASS;
 }
 
 /*/ \test Checks if stream depth is correct over 2 TCP packets */
-static int ModbusParserTest18(void) {
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
+static int ModbusParserTest18(void)
+{
     Flow f;
     TcpSession ssn;
 
     uint32_t    input_len = sizeof(readCoilsReq), part2_len = 3;
     uint8_t     *input = readCoilsReq;
 
+    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
     FAIL_IF_NULL(alp_tctx);
 
     memset(&f, 0, sizeof(f));
@@ -1412,15 +1387,12 @@ static int ModbusParserTest18(void) {
     int r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_MODBUS, STREAM_TOSERVER,
                                 input, input_len - part2_len);
     FAIL_IF(r != 1);
-
     FAIL_IF(((TcpSession *)(f.protoctx))->reassembly_depth != MODBUS_CONFIG_DEFAULT_STREAM_DEPTH);
 
     r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_MODBUS, STREAM_TOSERVER,
                             input, input_len);
     FAIL_IF(r != 0);
-
     FAIL_IF(((TcpSession *)(f.protoctx))->reassembly_depth != MODBUS_CONFIG_DEFAULT_STREAM_DEPTH);
-
     FAIL_IF(f.alstate == NULL);
 
     input_len = sizeof(readCoilsRsp);
@@ -1430,24 +1402,22 @@ static int ModbusParserTest18(void) {
     r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_MODBUS, STREAM_TOCLIENT,
                             input, input_len - part2_len);
     FAIL_IF(r != 1);
-
     FAIL_IF(((TcpSession *)(f.protoctx))->reassembly_depth != MODBUS_CONFIG_DEFAULT_STREAM_DEPTH);
 
     r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_MODBUS, STREAM_TOCLIENT,
                             input, input_len);
     FAIL_IF(r != 0);
-
     FAIL_IF(((TcpSession *)(f.protoctx))->reassembly_depth != MODBUS_CONFIG_DEFAULT_STREAM_DEPTH);
 
+    FLOW_DESTROY(&f);
     AppLayerParserThreadCtxFree(alp_tctx);
     StreamTcpFreeConfig(true);
-    FLOW_DESTROY(&f);
     PASS;
 }
 
 /** \test Send Modbus invalid function. */
-static int ModbusParserTest19(void) {
-    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
+static int ModbusParserTest19(void)
+{
     DetectEngineThreadCtx *det_ctx = NULL;
     Flow f;
     Packet *p = NULL;
@@ -1455,9 +1425,11 @@ static int ModbusParserTest19(void) {
     TcpSession ssn;
     ThreadVars tv;
 
+    AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
     FAIL_IF_NULL(alp_tctx);
 
     memset(&tv, 0, sizeof(ThreadVars));
+    StatsThreadInit(&tv.stats);
     memset(&f, 0, sizeof(Flow));
     memset(&ssn, 0, sizeof(TcpSession));
 
@@ -1501,19 +1473,16 @@ static int ModbusParserTest19(void) {
 
     /* do detect */
     SigMatchSignatures(&tv, de_ctx, det_ctx, p);
-
     FAIL_IF_NOT(PacketAlertCheck(p, 1));
 
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
-
-    DetectEngineThreadCtxDeinit(&tv, (void *)det_ctx);
-    DetectEngineCtxFree(de_ctx);
+    UTHFreePackets(&p, 1);
+    FLOW_DESTROY(&f);
 
     AppLayerParserThreadCtxFree(alp_tctx);
+    DetectEngineThreadCtxDeinit(&tv, (void *)det_ctx);
+    DetectEngineCtxFree(de_ctx);
     StreamTcpFreeConfig(true);
-    FLOW_DESTROY(&f);
-    UTHFreePackets(&p, 1);
+    StatsThreadCleanup(&tv.stats);
     PASS;
 }
 #endif /* UNITTESTS */

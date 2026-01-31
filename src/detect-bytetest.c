@@ -28,6 +28,7 @@
 #include "decode.h"
 #include "detect.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-parse.h"
 #include "detect-engine-build.h"
 
@@ -323,7 +324,7 @@ static DetectBytetestData *DetectBytetestParse(
     int res = 0;
     size_t pcre2_len;
     int i;
-    uint32_t nbytes;
+    uint32_t nbytes = 0;
     const char *str_ptr = NULL;
     pcre2_match_data *match = NULL;
 
@@ -334,7 +335,7 @@ static DetectBytetestData *DetectBytetestParse(
         goto error;
     }
 
-    /* Subtract two since two values  are conjoined */
+    /* Subtract two since two values are conjoined */
     for (i = 0; i < (ret - 1); i++) {
         res = pcre2_substring_get_bynumber(match, i + 1, (PCRE2_UCHAR8 **)&str_ptr, &pcre2_len);
         if (res < 0) {
@@ -401,7 +402,7 @@ static DetectBytetestData *DetectBytetestParse(
             data->neg_op = true;
             op_ptr = &args[1][1];
             while (isspace((char)*op_ptr) || (*op_ptr == ',')) op_ptr++;
-            op_offset = op_ptr - &args[1][0];
+            op_offset = (uint32_t)(op_ptr - &args[1][0]);
         } else {
             data->neg_op = false;
         }
@@ -467,12 +468,6 @@ static DetectBytetestData *DetectBytetestParse(
         memmove(data_offset, str_ptr, end_ptr - str_ptr);
         data_offset[end_ptr-str_ptr] = '\0';
         if (data_offset[0] != '-' && isalpha((unsigned char)data_offset[0])) {
-            if (data_offset == NULL) {
-                SCLogError("byte_test supplied with "
-                           "var name for offset.  \"offset\" argument supplied to "
-                           "this function has to be non-NULL");
-                goto error;
-            }
             *offset = SCStrdup(data_offset);
             if (*offset == NULL)
                 goto error;
@@ -610,7 +605,7 @@ static int DetectBytetestSetup(DetectEngineCtx *de_ctx, Signature *s, const char
             sm_list = DETECT_SM_LIST_PMATCH;
         }
 
-        if (DetectSignatureSetAppProto(s, ALPROTO_DCERPC) != 0)
+        if (SCDetectSignatureSetAppProto(s, ALPROTO_DCERPC) != 0)
             goto error;
 
     } else if (data->flags & DETECT_BYTETEST_RELATIVE) {
@@ -645,7 +640,7 @@ static int DetectBytetestSetup(DetectEngineCtx *de_ctx, Signature *s, const char
 
     if (value != NULL) {
         DetectByteIndexType index;
-        if (!DetectByteRetrieveSMVar(value, s, &index)) {
+        if (!DetectByteRetrieveSMVar(value, s, sm_list, &index)) {
             SCLogError("Unknown byte_extract var "
                        "seen in byte_test - %s",
                     value);
@@ -659,7 +654,7 @@ static int DetectBytetestSetup(DetectEngineCtx *de_ctx, Signature *s, const char
 
     if (offset != NULL) {
         DetectByteIndexType index;
-        if (!DetectByteRetrieveSMVar(offset, s, &index)) {
+        if (!DetectByteRetrieveSMVar(offset, s, sm_list, &index)) {
             SCLogError("Unknown byte_extract var "
                        "seen in byte_test - %s",
                     offset);
@@ -673,7 +668,7 @@ static int DetectBytetestSetup(DetectEngineCtx *de_ctx, Signature *s, const char
 
     if (nbytes != NULL) {
         DetectByteIndexType index;
-        if (!DetectByteRetrieveSMVar(nbytes, s, &index)) {
+        if (!DetectByteRetrieveSMVar(nbytes, s, sm_list, &index)) {
             SCLogError("Unknown byte_extract var "
                        "seen in byte_test - %s",
                     nbytes);
@@ -685,7 +680,8 @@ static int DetectBytetestSetup(DetectEngineCtx *de_ctx, Signature *s, const char
         nbytes = NULL;
     }
 
-    if (SigMatchAppendSMToList(de_ctx, s, DETECT_BYTETEST, (SigMatchCtx *)data, sm_list) == NULL) {
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_BYTETEST, (SigMatchCtx *)data, sm_list) ==
+            NULL) {
         goto error;
     }
 
@@ -1052,7 +1048,7 @@ static int DetectBytetestTestParse19(void)
     Signature *s = SigAlloc();
     FAIL_IF_NULL(s);
 
-    FAIL_IF(DetectSignatureSetAppProto(s, ALPROTO_DCERPC) < 0);
+    FAIL_IF(SCDetectSignatureSetAppProto(s, ALPROTO_DCERPC) < 0);
 
     FAIL_IF_NOT(DetectBytetestSetup(NULL, s, "1,=,1,6,dce") == 0);
     FAIL_IF_NOT(DetectBytetestSetup(NULL, s, "1,=,1,6,string,dce") == -1);

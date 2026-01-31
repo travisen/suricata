@@ -49,11 +49,16 @@
 // just due to FFI.
 #![allow(clippy::missing_safety_doc)]
 
+// Allow unknown lints, our MSRV doesn't know them all, for
+// example static_mut_refs.
+#![allow(unknown_lints)]
+
 #[macro_use]
 extern crate bitflags;
 extern crate byteorder;
 extern crate crc;
 extern crate memchr;
+extern crate lru;
 #[macro_use]
 extern crate num_derive;
 extern crate widestring;
@@ -62,17 +67,17 @@ extern crate der_parser;
 extern crate kerberos_parser;
 extern crate tls_parser;
 extern crate x509_parser;
+extern crate ldap_parser;
 
 #[macro_use]
 extern crate suricata_derive;
 
 #[macro_use]
-pub mod log;
-
-#[macro_use]
 pub mod core;
 
 #[macro_use]
+pub mod debug;
+
 pub mod common;
 pub mod conf;
 pub mod jsonbuilder;
@@ -83,11 +88,18 @@ pub mod filecontainer;
 pub mod filetracker;
 pub mod kerberos;
 pub mod detect;
+pub mod utils;
 
-#[cfg(feature = "lua")]
+pub mod ja4;
+pub mod tls_version;
+pub mod handshake;
+pub mod encryption;
+
 pub mod lua;
 
+pub mod dnp3;
 pub mod dns;
+pub mod mdns;
 pub mod nfs;
 pub mod ftp;
 pub mod smb;
@@ -106,6 +118,9 @@ pub mod rfb;
 pub mod mqtt;
 pub mod pgsql;
 pub mod telnet;
+pub mod websocket;
+pub mod enip;
+pub mod pop3;
 pub mod applayertemplate;
 pub mod rdp;
 pub mod x509;
@@ -120,3 +135,12 @@ pub mod lzma;
 pub mod util;
 pub mod ffi;
 pub mod feature;
+pub mod sdp;
+pub mod ldap;
+pub mod flow;
+pub mod direction;
+
+#[allow(unused_imports)]
+pub use suricata_lua_sys;
+//Re-export htp symbols
+pub use htp::c_api::*;

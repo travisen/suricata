@@ -21,19 +21,12 @@
  * \author Brian Rectanus <brectanu@gmail.com>
  */
 
-#ifndef __DETECT_ACK_H__
-#define __DETECT_ACK_H__
-
-/**
- * \brief ack data
- */
-typedef struct DetectAckData_ {
-    uint32_t ack;                    /**< ack to match */
-} DetectAckData;
+#ifndef SURICATA_DETECT_ACK_H
+#define SURICATA_DETECT_ACK_H
 
 /**
  * \brief Registration function for ack: keyword
  */
 void DetectAckRegister(void);
 
-#endif /* __DETECT_ACK_H__ */
+#endif /* SURICATA_DETECT_ACK_H */

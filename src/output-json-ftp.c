@@ -46,30 +46,40 @@
 #include "app-layer-ftp.h"
 #include "output-json-ftp.h"
 
-bool EveFTPLogCommand(void *vtx, JsonBuilder *jb)
+bool EveFTPLogCommand(void *vtx, SCJsonBuilder *jb)
 {
     FTPTransaction *tx = vtx;
     /* Preallocate array objects to simplify failure case */
-    JsonBuilder *js_resplist = NULL;
+    SCJsonBuilder *js_resplist = NULL;
     if (!TAILQ_EMPTY(&tx->response_list)) {
-        js_resplist = jb_new_array();
+        js_resplist = SCJbNewArray();
 
         if (unlikely(js_resplist == NULL)) {
             return false;
         }
     }
-    jb_open_object(jb, "ftp");
-    jb_set_string(jb, "command", tx->command_descriptor->command_name);
-    uint32_t min_length = tx->command_descriptor->command_length + 1; /* command + space */
-    if (tx->request_length > min_length) {
-        jb_set_string_from_bytes(jb,
-                "command_data",
-                (const uint8_t *)tx->request + min_length,
-                tx->request_length - min_length - 1);
-        if (tx->request_truncated) {
-            JB_SET_TRUE(jb, "command_truncated");
-        } else {
-            JB_SET_FALSE(jb, "command_truncated");
+    const char *command_name = NULL;
+    uint8_t command_name_length;
+    if (tx->command_descriptor.command_code != FTP_COMMAND_UNKNOWN) {
+        if (!SCGetFtpCommandInfo(tx->command_descriptor.command_index, &command_name, NULL,
+                    &command_name_length)) {
+            SCLogDebug("Unable to fetch info for FTP command code %d [index %d]",
+                    tx->command_descriptor.command_code, tx->command_descriptor.command_index);
+            return false;
+        }
+    }
+    SCJbOpenObject(jb, "ftp");
+    if (command_name) {
+        SCJbSetString(jb, "command", command_name);
+        uint32_t min_length = command_name_length + 1; /* command + space */
+        if (tx->request_length > min_length) {
+            SCJbSetStringFromBytes(jb, "command_data", (const uint8_t *)tx->request + min_length,
+                    tx->request_length - min_length - 1);
+            if (tx->request_truncated) {
+                JB_SET_TRUE(jb, "command_truncated");
+            } else {
+                JB_SET_FALSE(jb, "command_truncated");
+            }
         }
     }
 
@@ -77,67 +87,59 @@ bool EveFTPLogCommand(void *vtx, JsonBuilder *jb)
 
     if (!TAILQ_EMPTY(&tx->response_list)) {
         int resp_cnt = 0;
-        FTPString *response;
+        FTPResponseWrapper *wrapper;
         bool is_cc_array_open = false;
-        TAILQ_FOREACH(response, &tx->response_list, next) {
+        TAILQ_FOREACH (wrapper, &tx->response_list, next) {
             /* handle multiple lines within the response, \r\n delimited */
-            uint8_t *where = response->str;
-            uint16_t length = 0;
-            uint16_t pos;
-            if (response->len > 0 && response->len <= UINT16_MAX) {
-                length = (uint16_t)response->len - 1;
-            } else if (response->len > UINT16_MAX) {
-                length = UINT16_MAX;
+            if (!wrapper->response) {
+                continue;
             }
+            FTPResponseLine *response = wrapper->response;
+
             if (!reply_truncated && response->truncated) {
                 reply_truncated = true;
             }
-            while ((pos = JsonGetNextLineFromBuffer((const char *)where, length)) != UINT16_MAX) {
-                uint16_t offset = 0;
-                /* Try to find a completion code for this line */
-                if (pos >= 3)  {
-                    /* Gather the completion code if present */
-                    if (isdigit(where[0]) && isdigit(where[1]) && isdigit(where[2])) {
-                        if (!is_cc_array_open) {
-                            jb_open_array(jb, "completion_code");
-                            is_cc_array_open = true;
-                        }
-                        jb_append_string_from_bytes(jb, (const uint8_t *)where, 3);
-                        offset = 4;
-                    }
+            if (response->code_length > 0) {
+                if (!is_cc_array_open) {
+                    SCJbOpenArray(jb, "completion_code");
+                    is_cc_array_open = true;
                 }
-                /* move past 3 character completion code */
-                if (pos >= offset) {
-                    jb_append_string_from_bytes(js_resplist, (const uint8_t *)where + offset, pos - offset);
-                    resp_cnt++;
-                }
-
-                where += pos;
-                length -= pos;
+                SCJbAppendStringFromBytes(
+                        jb, (const uint8_t *)response->code, (uint32_t)response->code_length);
+            }
+            if (response->length) {
+                SCJbAppendStringFromBytes(js_resplist, (const uint8_t *)response->response,
+                        (uint32_t)response->length);
+                resp_cnt++;
             }
         }
 
         if (is_cc_array_open) {
-            jb_close(jb);
+            SCJbClose(jb);
         }
         if (resp_cnt) {
-            jb_close(js_resplist);
-            jb_set_object(jb, "reply", js_resplist);
+            SCJbClose(js_resplist);
+            SCJbSetObject(jb, "reply", js_resplist);
         }
-        jb_free(js_resplist);
+        SCJbFree(js_resplist);
     }
 
     if (tx->dyn_port) {
-        jb_set_uint(jb, "dynamic_port", tx->dyn_port);
+        SCJbSetUint(jb, "dynamic_port", tx->dyn_port);
     }
 
-    if (tx->command_descriptor->command == FTP_COMMAND_PORT ||
-        tx->command_descriptor->command == FTP_COMMAND_EPRT) {
-        if (tx->active) {
-            JB_SET_STRING(jb, "mode", "active");
-        } else {
-            JB_SET_STRING(jb, "mode", "passive");
-        }
+    switch (tx->command_descriptor.command_code) {
+        case FTP_COMMAND_PORT:
+        case FTP_COMMAND_EPRT:
+        case FTP_COMMAND_PASV:
+        case FTP_COMMAND_EPSV:
+            if (tx->active) {
+                JB_SET_STRING(jb, "mode", "active");
+            } else {
+                JB_SET_STRING(jb, "mode", "passive");
+            }
+        default:
+            break;
     }
 
     if (tx->done) {
@@ -151,63 +153,6 @@ bool EveFTPLogCommand(void *vtx, JsonBuilder *jb)
     } else {
         JB_SET_FALSE(jb, "reply_truncated");
     }
-    jb_close(jb);
+    SCJbClose(jb);
     return true;
-}
-
-
-static int JsonFTPLogger(ThreadVars *tv, void *thread_data,
-    const Packet *p, Flow *f, void *state, void *vtx, uint64_t tx_id)
-{
-    SCEnter();
-    OutputJsonThreadCtx *thread = thread_data;
-
-    const char *event_type;
-    if (f->alproto == ALPROTO_FTPDATA) {
-        event_type = "ftp_data";
-    } else {
-        event_type = "ftp";
-    }
-
-    JsonBuilder *jb =
-            CreateEveHeaderWithTxId(p, LOG_DIR_FLOW, event_type, NULL, tx_id, thread->ctx);
-    if (likely(jb)) {
-        if (f->alproto == ALPROTO_FTPDATA) {
-            if (!EveFTPDataAddMetadata(vtx, jb)) {
-                goto fail;
-            }
-        } else {
-            EveFTPLogCommand(vtx, jb);
-        }
-
-        OutputJsonBuilderBuffer(jb, thread);
-
-        jb_free(jb);
-    }
-    return TM_ECODE_OK;
-
-fail:
-    jb_free(jb);
-    return TM_ECODE_FAILED;
-}
-
-static OutputInitResult OutputFTPLogInitSub(ConfNode *conf,
-    OutputCtx *parent_ctx)
-{
-    AppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_FTP);
-    AppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_FTPDATA);
-    return OutputJsonLogInitSub(conf, parent_ctx);
-}
-
-void JsonFTPLogRegister(void)
-{
-    /* Register as an eve sub-module. */
-    OutputRegisterTxSubModule(LOGGER_JSON_TX, "eve-log", "JsonFTPLog", "eve-log.ftp",
-            OutputFTPLogInitSub, ALPROTO_FTP, JsonFTPLogger, JsonLogThreadInit, JsonLogThreadDeinit,
-            NULL);
-    OutputRegisterTxSubModule(LOGGER_JSON_TX, "eve-log", "JsonFTPLog", "eve-log.ftp",
-            OutputFTPLogInitSub, ALPROTO_FTPDATA, JsonFTPLogger, JsonLogThreadInit,
-            JsonLogThreadDeinit, NULL);
-
-    SCLogDebug("FTP JSON logger registered.");
 }

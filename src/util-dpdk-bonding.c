@@ -21,9 +21,6 @@
  * \author Lukas Sismis <lukas.sismis@gmail.com>
  */
 
-#ifndef UTIL_DPDK_BONDING_C
-#define UTIL_DPDK_BONDING_C
-
 #include "suricata-common.h"
 #include "util-dpdk-bonding.h"
 
@@ -55,7 +52,18 @@ uint16_t BondingMemberDevicesGet(
 {
 #ifdef HAVE_DPDK_BOND
 #if RTE_VERSION >= RTE_VERSION_NUM(23, 11, 0, 0)
+
+#if RTE_VERSION < RTE_VERSION_NUM(24, 11, 0, 0) // DPDK 23.11 - 24.07
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif /* RTE_VERSION < RTE_VERSION_NUM(24, 11, 0, 0) */
+
     int32_t len = rte_eth_bond_members_get(bond_pid, bonded_devs, bonded_devs_length);
+
+#if RTE_VERSION < RTE_VERSION_NUM(24, 11, 0, 0)
+#pragma GCC diagnostic pop
+#endif /* RTE_VERSION < RTE_VERSION_NUM(24, 11, 0, 0) */
+
 #else
     int32_t len = rte_eth_bond_slaves_get(bond_pid, bonded_devs, bonded_devs_length);
 #endif /* RTE_VERSION >= RTE_VERSION_NUM(23, 11, 0, 0) */
@@ -121,5 +129,3 @@ const char *BondingDeviceDriverGet(uint16_t bond_pid)
 }
 
 #endif /* HAVE_DPDK */
-
-#endif /* UTIL_DPDK_BONDING_C */

@@ -66,7 +66,7 @@ static int g_modbus_buffer_id = 0;
 static void DetectModbusFree(DetectEngineCtx *de_ctx, void *ptr) {
     SCEnter();
     if (ptr != NULL) {
-        rs_modbus_free(ptr);
+        SCModbusFree(ptr);
     }
     SCReturn;
 }
@@ -86,17 +86,17 @@ static int DetectModbusSetup(DetectEngineCtx *de_ctx, Signature *s, const char *
     SCEnter();
     DetectModbusRust *modbus = NULL;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_MODBUS) != 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_MODBUS) != 0)
         return -1;
 
-    if ((modbus = rs_modbus_parse(str)) == NULL) {
+    if ((modbus = SCModbusParse(str)) == NULL) {
         SCLogError("invalid modbus option");
         goto error;
     }
 
     /* Okay so far so good, lets get this into a SigMatch and put it in the Signature. */
-    if (SigMatchAppendSMToList(
-                de_ctx, s, DETECT_AL_MODBUS, (SigMatchCtx *)modbus, g_modbus_buffer_id) == NULL) {
+    if (SCSigMatchAppendSMToList(
+                de_ctx, s, DETECT_MODBUS, (SigMatchCtx *)modbus, g_modbus_buffer_id) == NULL) {
         goto error;
     }
 
@@ -111,7 +111,7 @@ error:
 static int DetectModbusMatch(DetectEngineThreadCtx *det_ctx, Flow *f, uint8_t flags, void *state,
         void *txv, const Signature *s, const SigMatchCtx *ctx)
 {
-    return rs_modbus_inspect(txv, (void *)ctx);
+    return SCModbusInspect(txv, (void *)ctx);
 }
 
 /**
@@ -119,13 +119,13 @@ static int DetectModbusMatch(DetectEngineThreadCtx *det_ctx, Flow *f, uint8_t fl
  */
 void DetectModbusRegister(void)
 {
-    sigmatch_table[DETECT_AL_MODBUS].name = "modbus";
-    sigmatch_table[DETECT_AL_MODBUS].desc = "match on various properties of Modbus requests";
-    sigmatch_table[DETECT_AL_MODBUS].url = "/rules/modbus-keyword.html#modbus-keyword";
-    sigmatch_table[DETECT_AL_MODBUS].Match = NULL;
-    sigmatch_table[DETECT_AL_MODBUS].Setup = DetectModbusSetup;
-    sigmatch_table[DETECT_AL_MODBUS].Free = DetectModbusFree;
-    sigmatch_table[DETECT_AL_MODBUS].AppLayerTxMatch = DetectModbusMatch;
+    sigmatch_table[DETECT_MODBUS].name = "modbus";
+    sigmatch_table[DETECT_MODBUS].desc = "match on various properties of Modbus requests";
+    sigmatch_table[DETECT_MODBUS].url = "/rules/modbus-keyword.html#modbus-keyword";
+    sigmatch_table[DETECT_MODBUS].Match = NULL;
+    sigmatch_table[DETECT_MODBUS].Setup = DetectModbusSetup;
+    sigmatch_table[DETECT_MODBUS].Free = DetectModbusFree;
+    sigmatch_table[DETECT_MODBUS].AppLayerTxMatch = DetectModbusMatch;
 
     DetectAppLayerInspectEngineRegister(
             "modbus", ALPROTO_MODBUS, SIG_FLAG_TOSERVER, 0, DetectEngineInspectGenericList, NULL);

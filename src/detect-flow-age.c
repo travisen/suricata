@@ -29,15 +29,18 @@ static int DetectFlowAgeMatch(
     if (p->flow == NULL) {
         return 0;
     }
-    uint32_t age = SCTIME_SECS(p->flow->lastts) - SCTIME_SECS(p->flow->startts);
+    uint64_t age = SCTIME_SECS(p->flow->lastts) - SCTIME_SECS(p->flow->startts);
+    if (age > UINT32_MAX) {
+        age = UINT32_MAX;
+    }
 
     const DetectU32Data *du32 = (const DetectU32Data *)ctx;
-    return DetectU32Match(age, du32);
+    return DetectU32Match((uint32_t)age, du32);
 }
 
 static void DetectFlowAgeFree(DetectEngineCtx *de_ctx, void *ptr)
 {
-    rs_detect_u32_free(ptr);
+    SCDetectU32Free(ptr);
 }
 
 static int DetectFlowAgeSetup(DetectEngineCtx *de_ctx, Signature *s, const char *rawstr)
@@ -46,7 +49,7 @@ static int DetectFlowAgeSetup(DetectEngineCtx *de_ctx, Signature *s, const char 
     if (du32 == NULL)
         return -1;
 
-    if (SigMatchAppendSMToList(
+    if (SCSigMatchAppendSMToList(
                 de_ctx, s, DETECT_FLOW_AGE, (SigMatchCtx *)du32, DETECT_SM_LIST_MATCH) == NULL) {
         DetectFlowAgeFree(de_ctx, du32);
         return -1;
@@ -74,8 +77,8 @@ static void PrefilterPacketFlowAgeMatch(
 
 static int PrefilterSetupFlowAge(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
 {
-    return PrefilterSetupPacketHeader(de_ctx, sgh, DETECT_FLOW_AGE, PrefilterPacketU32Set,
-            PrefilterPacketU32Compare, PrefilterPacketFlowAgeMatch);
+    return PrefilterSetupPacketHeader(de_ctx, sgh, DETECT_FLOW_AGE, SIG_MASK_REQUIRE_FLOW,
+            PrefilterPacketU32Set, PrefilterPacketU32Compare, PrefilterPacketFlowAgeMatch);
 }
 
 static bool PrefilterFlowAgeIsPrefilterable(const Signature *s)
@@ -91,6 +94,7 @@ void DetectFlowAgeRegister(void)
     sigmatch_table[DETECT_FLOW_AGE].Match = DetectFlowAgeMatch;
     sigmatch_table[DETECT_FLOW_AGE].Setup = DetectFlowAgeSetup;
     sigmatch_table[DETECT_FLOW_AGE].Free = DetectFlowAgeFree;
+    sigmatch_table[DETECT_FLOW_AGE].flags = SIGMATCH_INFO_UINT32;
     sigmatch_table[DETECT_FLOW_AGE].SupportsPrefilter = PrefilterFlowAgeIsPrefilterable;
     sigmatch_table[DETECT_FLOW_AGE].SetupPrefilter = PrefilterSetupFlowAge;
 }

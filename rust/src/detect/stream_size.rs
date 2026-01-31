@@ -16,10 +16,10 @@
  */
 
 use super::uint::*;
-use nom7::bytes::complete::{is_a, take_while};
-use nom7::character::complete::{alpha0, char, digit1};
-use nom7::combinator::{all_consuming, map_opt, map_res, opt};
-use nom7::IResult;
+use nom8::bytes::complete::{is_a, take_while};
+use nom8::character::complete::{alpha0, char, digit1};
+use nom8::combinator::{all_consuming, map_opt, map_res, opt};
+use nom8::{IResult, Parser};
 
 use std::ffi::CStr;
 use std::str::FromStr;
@@ -58,17 +58,17 @@ pub struct DetectStreamSizeData {
 }
 
 pub fn detect_parse_stream_size(i: &str) -> IResult<&str, DetectStreamSizeData> {
-    let (i, _) = opt(is_a(" "))(i)?;
-    let (i, flags) = map_res(alpha0, DetectStreamSizeDataFlags::from_str)(i)?;
-    let (i, _) = opt(is_a(" "))(i)?;
-    let (i, _) = char(',')(i)?;
-    let (i, _) = opt(is_a(" "))(i)?;
+    let (i, _) = opt(is_a(" ")).parse(i)?;
+    let (i, flags) = map_res(alpha0, DetectStreamSizeDataFlags::from_str).parse(i)?;
+    let (i, _) = opt(is_a(" ")).parse(i)?;
+    let (i, _) = char(',').parse(i)?;
+    let (i, _) = opt(is_a(" ")).parse(i)?;
     let (i, mode) = detect_parse_uint_mode(i)?;
-    let (i, _) = opt(is_a(" "))(i)?;
-    let (i, _) = char(',')(i)?;
-    let (i, _) = opt(is_a(" "))(i)?;
-    let (i, arg1) = map_opt(digit1, |s: &str| s.parse::<u32>().ok())(i)?;
-    let (i, _) = all_consuming(take_while(|c| c == ' '))(i)?;
+    let (i, _) = opt(is_a(" ")).parse(i)?;
+    let (i, _) = char(',').parse(i)?;
+    let (i, _) = opt(is_a(" ")).parse(i)?;
+    let (i, arg1) = map_opt(digit1, |s: &str| s.parse::<u32>().ok()).parse(i)?;
+    let (i, _) = all_consuming(take_while(|c| c == ' ')).parse(i)?;
     let du32 = DetectUintData::<u32> {
         arg1,
         arg2: 0,
@@ -78,7 +78,7 @@ pub fn detect_parse_stream_size(i: &str) -> IResult<&str, DetectStreamSizeData> 
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn rs_detect_stream_size_parse(
+pub unsafe extern "C" fn SCDetectStreamSizeParse(
     ustr: *const std::os::raw::c_char,
 ) -> *mut DetectStreamSizeData {
     let ft_name: &CStr = CStr::from_ptr(ustr); //unsafe
@@ -92,7 +92,7 @@ pub unsafe extern "C" fn rs_detect_stream_size_parse(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn rs_detect_stream_size_free(ctx: &mut DetectStreamSizeData) {
+pub unsafe extern "C" fn SCDetectStreamSizeFree(ctx: &mut DetectStreamSizeData) {
     // Just unbox...
     std::mem::drop(Box::from_raw(ctx));
 }

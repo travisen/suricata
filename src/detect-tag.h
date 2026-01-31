@@ -22,8 +22,8 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __DETECT_TAG_H__
-#define __DETECT_TAG_H__
+#ifndef SURICATA_DETECT_TAG_H
+#define SURICATA_DETECT_TAG_H
 
 #include "suricata-common.h"
 
@@ -79,11 +79,8 @@ typedef struct DetectTagDataEntry_ {
         uint32_t packets;               /**< number of packets (metric packets) */
         uint32_t bytes;                 /**< number of bytes (metric bytes) */
     };
-    uint32_t first_ts;                  /**< First time seen (for metric = seconds) */
-    uint32_t last_ts;                   /**< Last time seen (to prune old sessions) */
-#if __WORDSIZE == 64
-    uint32_t pad1;
-#endif
+    SCTime_t first_ts;                  /**< First time seen (for metric = seconds) */
+    SCTime_t last_ts;                   /**< Last time seen (to prune old sessions) */
     struct DetectTagDataEntry_ *next;   /**< Pointer to the next tag of this
                                          *   session/src_host/dst_host (if any from other rule) */
 } DetectTagDataEntry;
@@ -98,5 +95,4 @@ void DetectTagRegister(void);
 void DetectTagDataFree(struct DetectEngineCtx_ *, void *ptr);
 void DetectTagDataListFree(void *ptr);
 
-#endif /* __DETECT_TAG_H__ */
-
+#endif /* SURICATA_DETECT_TAG_H */

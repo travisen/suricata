@@ -17,12 +17,11 @@
 
 //! Plugin utility module.
 
+use suricata_sys::sys::SCLogGetLogLevel;
+
 pub fn init() {
     unsafe {
-        let context = super::core::SCGetContext();
-        super::core::init_ffi(context);
-
-        let level = super::core::SCLogGetLogLevel();
-        super::log::log_set_level(level);
+        // maybe we can get rid of this...
+        crate::debug::LEVEL = SCLogGetLogLevel();
     }
 }

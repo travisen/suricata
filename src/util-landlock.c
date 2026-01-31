@@ -22,18 +22,19 @@
  */
 
 #include "suricata.h"
+#include "detect-engine.h"
 #include "feature.h"
 #include "util-conf.h"
 #include "util-file.h"
 #include "util-landlock.h"
 #include "util-mem.h"
 #include "util-path.h"
+#include "util-validate.h"
 
 #ifndef HAVE_LINUX_LANDLOCK_H
 
 void LandlockSandboxing(SCInstance *suri)
 {
-    return;
 }
 
 #else /* HAVE_LINUX_LANDLOCK_H */
@@ -44,7 +45,9 @@ void LandlockSandboxing(SCInstance *suri)
 static inline int landlock_create_ruleset(
         const struct landlock_ruleset_attr *const attr, const size_t size, const __u32 flags)
 {
-    return syscall(__NR_landlock_create_ruleset, attr, size, flags);
+    long r = syscall(__NR_landlock_create_ruleset, attr, size, flags);
+    DEBUG_VALIDATE_BUG_ON(r > INT_MAX);
+    return (int)r;
 }
 #endif
 
@@ -52,14 +55,18 @@ static inline int landlock_create_ruleset(
 static inline int landlock_add_rule(const int ruleset_fd, const enum landlock_rule_type rule_type,
         const void *const rule_attr, const __u32 flags)
 {
-    return syscall(__NR_landlock_add_rule, ruleset_fd, rule_type, rule_attr, flags);
+    long r = syscall(__NR_landlock_add_rule, ruleset_fd, rule_type, rule_attr, flags);
+    DEBUG_VALIDATE_BUG_ON(r > INT_MAX);
+    return (int)r;
 }
 #endif
 
 #ifndef landlock_restrict_self
 static inline int landlock_restrict_self(const int ruleset_fd, const __u32 flags)
 {
-    return syscall(__NR_landlock_restrict_self, ruleset_fd, flags);
+    long r = syscall(__NR_landlock_restrict_self, ruleset_fd, flags);
+    DEBUG_VALIDATE_BUG_ON(r > INT_MAX);
+    return (int)r;
 }
 #endif
 
@@ -103,7 +110,7 @@ static inline struct landlock_ruleset *LandlockCreateRuleset(void)
         return NULL;
     }
     if (abi < 2) {
-        if (RequiresFeature(FEATURE_OUTPUT_FILESTORE)) {
+        if (SCRequiresFeature(FEATURE_OUTPUT_FILESTORE)) {
             SCLogError("Landlock disabled: need Linux 5.19+ for file store support");
             SCFree(ruleset);
             return NULL;
@@ -176,7 +183,7 @@ void LandlockSandboxing(SCInstance *suri)
 {
     /* Read configuration variable and exit if no enforcement */
     int conf_status;
-    if (ConfGetBool("security.landlock.enabled", &conf_status) == 0) {
+    if (SCConfGetBool("security.landlock.enabled", &conf_status) == 0) {
         conf_status = 0;
     }
     if (!conf_status) {
@@ -189,15 +196,19 @@ void LandlockSandboxing(SCInstance *suri)
         return;
     }
 
-    LandlockSandboxingWritePath(ruleset, ConfigGetLogDirectory());
+    LandlockSandboxingWritePath(ruleset, SCConfigGetLogDirectory());
     struct stat sb;
     if (stat(ConfigGetDataDirectory(), &sb) == 0) {
         LandlockSandboxingAddRule(ruleset, ConfigGetDataDirectory(),
                 _LANDLOCK_SURI_ACCESS_FS_WRITE | _LANDLOCK_ACCESS_FS_READ);
     }
+    if (DetectEngineMpmCachingEnabled() && stat(DetectEngineMpmCachingGetPath(), &sb) == 0) {
+        LandlockSandboxingAddRule(ruleset, DetectEngineMpmCachingGetPath(),
+                _LANDLOCK_SURI_ACCESS_FS_WRITE | _LANDLOCK_ACCESS_FS_READ);
+    }
     if (suri->run_mode == RUNMODE_PCAP_FILE) {
         const char *pcap_file;
-        if (ConfGet("pcap-file.file", &pcap_file) == 1) {
+        if (SCConfGet("pcap-file.file", &pcap_file) == 1) {
             char *file_name = SCStrdup(pcap_file);
             if (file_name != NULL) {
                 struct stat statbuf;
@@ -230,7 +241,7 @@ void LandlockSandboxing(SCInstance *suri)
     }
     if (ConfUnixSocketIsEnable()) {
         const char *socketname;
-        if (ConfGet("unix-command.filename", &socketname) == 1) {
+        if (SCConfGet("unix-command.filename", &socketname) == 1) {
             if (PathIsAbsolute(socketname)) {
                 char *file_name = SCStrdup(socketname);
                 if (file_name != NULL) {
@@ -246,30 +257,30 @@ void LandlockSandboxing(SCInstance *suri)
     }
     if (!suri->sig_file_exclusive) {
         const char *rule_path;
-        if (ConfGet("default-rule-path", &rule_path) == 1 && rule_path) {
+        if (SCConfGet("default-rule-path", &rule_path) == 1 && rule_path) {
             LandlockSandboxingReadPath(ruleset, rule_path);
         }
     }
 
-    ConfNode *read_dirs = ConfGetNode("security.landlock.directories.read");
+    SCConfNode *read_dirs = SCConfGetNode("security.landlock.directories.read");
     if (read_dirs) {
-        if (!ConfNodeIsSequence(read_dirs)) {
+        if (!SCConfNodeIsSequence(read_dirs)) {
             SCLogWarning("Invalid security.landlock.directories.read configuration section: "
                          "expected a list of directory names.");
         } else {
-            ConfNode *directory;
+            SCConfNode *directory;
             TAILQ_FOREACH (directory, &read_dirs->head, next) {
                 LandlockSandboxingReadPath(ruleset, directory->val);
             }
         }
     }
-    ConfNode *write_dirs = ConfGetNode("security.landlock.directories.write");
+    SCConfNode *write_dirs = SCConfGetNode("security.landlock.directories.write");
     if (write_dirs) {
-        if (!ConfNodeIsSequence(write_dirs)) {
+        if (!SCConfNodeIsSequence(write_dirs)) {
             SCLogWarning("Invalid security.landlock.directories.write configuration section: "
                          "expected a list of directory names.");
         } else {
-            ConfNode *directory;
+            SCConfNode *directory;
             TAILQ_FOREACH (directory, &write_dirs->head, next) {
                 LandlockSandboxingWritePath(ruleset, directory->val);
             }

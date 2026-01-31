@@ -60,14 +60,14 @@ static int g_http_raw_uri_buffer_id = 0;
 
 void DetectUrilenRegister(void)
 {
-    sigmatch_table[DETECT_AL_URILEN].name = "urilen";
-    sigmatch_table[DETECT_AL_URILEN].desc = "match on the length of the HTTP uri";
-    sigmatch_table[DETECT_AL_URILEN].url = "/rules/http-keywords.html#urilen";
-    sigmatch_table[DETECT_AL_URILEN].Match = NULL;
-    sigmatch_table[DETECT_AL_URILEN].Setup = DetectUrilenSetup;
-    sigmatch_table[DETECT_AL_URILEN].Free = DetectUrilenFree;
+    sigmatch_table[DETECT_URILEN].name = "urilen";
+    sigmatch_table[DETECT_URILEN].desc = "match on the length of the HTTP uri";
+    sigmatch_table[DETECT_URILEN].url = "/rules/http-keywords.html#urilen";
+    sigmatch_table[DETECT_URILEN].Match = NULL;
+    sigmatch_table[DETECT_URILEN].Setup = DetectUrilenSetup;
+    sigmatch_table[DETECT_URILEN].Free = DetectUrilenFree;
 #ifdef UNITTESTS
-    sigmatch_table[DETECT_AL_URILEN].RegisterTests = DetectUrilenRegisterTests;
+    sigmatch_table[DETECT_URILEN].RegisterTests = DetectUrilenRegisterTests;
 #endif
 
     g_http_uri_buffer_id = DetectBufferTypeRegister("http_uri");
@@ -85,7 +85,7 @@ void DetectUrilenRegister(void)
 
 static DetectUrilenData *DetectUrilenParse (const char *urilenstr)
 {
-    return rs_detect_urilen_parse(urilenstr);
+    return SCDetectUrilenParse(urilenstr);
 }
 
 /**
@@ -103,7 +103,7 @@ static int DetectUrilenSetup (DetectEngineCtx *de_ctx, Signature *s, const char 
     SCEnter();
     DetectUrilenData *urilend = NULL;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_HTTP) != 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_HTTP) != 0)
         return -1;
 
     urilend = DetectUrilenParse(urilenstr);
@@ -111,12 +111,12 @@ static int DetectUrilenSetup (DetectEngineCtx *de_ctx, Signature *s, const char 
         goto error;
 
     if (urilend->raw_buffer) {
-        if (SigMatchAppendSMToList(de_ctx, s, DETECT_AL_URILEN, (SigMatchCtx *)urilend,
+        if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_URILEN, (SigMatchCtx *)urilend,
                     g_http_raw_uri_buffer_id) == NULL) {
             goto error;
         }
     } else {
-        if (SigMatchAppendSMToList(de_ctx, s, DETECT_AL_URILEN, (SigMatchCtx *)urilend,
+        if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_URILEN, (SigMatchCtx *)urilend,
                     g_http_uri_buffer_id) == NULL) {
             goto error;
         }
@@ -140,7 +140,7 @@ static void DetectUrilenFree(DetectEngineCtx *de_ctx, void *ptr)
         return;
 
     DetectUrilenData *urilend = (DetectUrilenData *)ptr;
-    rs_detect_urilen_free(urilend);
+    SCDetectUrilenFree(urilend);
 }
 
 /** \brief set prefilter dsize pair
@@ -156,7 +156,7 @@ void DetectUrilenApplyToContent(Signature *s, int list)
         bool found = false;
 
         for (SigMatch *sm = s->init_data->buffers[x].head; sm != NULL; sm = sm->next) {
-            if (sm->type != DETECT_AL_URILEN)
+            if (sm->type != DETECT_URILEN)
                 continue;
 
             DetectUrilenData *dd = (DetectUrilenData *)sm->ctx;
@@ -214,10 +214,11 @@ void DetectUrilenApplyToContent(Signature *s, int list)
     }
 }
 
-bool DetectUrilenValidateContent(const Signature *s, int list, const char **sigerror)
+bool DetectUrilenValidateContent(
+        const Signature *s, const char **sigerror, const DetectBufferType *dbt)
 {
     for (uint32_t x = 0; x < s->init_data->buffer_index; x++) {
-        if (s->init_data->buffers[x].id != (uint32_t)list)
+        if (s->init_data->buffers[x].id != (uint32_t)dbt->id)
             continue;
         for (const SigMatch *sm = s->init_data->buffers[x].head; sm != NULL; sm = sm->next) {
             if (sm->type != DETECT_CONTENT) {
@@ -252,169 +253,134 @@ bool DetectUrilenValidateContent(const Signature *s, int list, const char **sige
 /** \test   Test the Urilen keyword setup */
 static int DetectUrilenParseTest01(void)
 {
-    int ret = 0;
-    DetectUrilenData *urilend = NULL;
+    DetectUrilenData *urilend = DetectUrilenParse("10");
+    FAIL_IF_NULL(urilend);
+    FAIL_IF(urilend->du16.arg1 != 10);
+    FAIL_IF(urilend->du16.mode != DETECT_UINT_EQ);
+    FAIL_IF(urilend->raw_buffer);
 
-    urilend = DetectUrilenParse("10");
-    if (urilend != NULL) {
-        if (urilend->du16.arg1 == 10 && urilend->du16.mode == DETECT_UINT_EQ &&
-                !urilend->raw_buffer)
-            ret = 1;
-
-        DetectUrilenFree(NULL, urilend);
-    }
-    return ret;
+    DetectUrilenFree(NULL, urilend);
+    PASS;
 }
 
 /** \test   Test the Urilen keyword setup */
 static int DetectUrilenParseTest02(void)
 {
-    int ret = 0;
-    DetectUrilenData *urilend = NULL;
+    DetectUrilenData *urilend = DetectUrilenParse(" < 10  ");
+    FAIL_IF_NULL(urilend);
+    FAIL_IF(urilend->du16.arg1 != 10);
+    FAIL_IF(urilend->du16.mode != DETECT_UINT_LT);
+    FAIL_IF(urilend->raw_buffer);
 
-    urilend = DetectUrilenParse(" < 10  ");
-    if (urilend != NULL) {
-        if (urilend->du16.arg1 == 10 && urilend->du16.mode == DETECT_UINT_LT &&
-                !urilend->raw_buffer)
-            ret = 1;
-
-        DetectUrilenFree(NULL, urilend);
-    }
-    return ret;
+    DetectUrilenFree(NULL, urilend);
+    PASS;
 }
 
 /** \test   Test the Urilen keyword setup */
 static int DetectUrilenParseTest03(void)
 {
-    int ret = 0;
-    DetectUrilenData *urilend = NULL;
+    DetectUrilenData *urilend = DetectUrilenParse(" > 10 ");
+    FAIL_IF_NULL(urilend);
+    FAIL_IF(urilend->du16.arg1 != 10);
+    FAIL_IF(urilend->du16.mode != DETECT_UINT_GT);
+    FAIL_IF(urilend->raw_buffer);
 
-    urilend = DetectUrilenParse(" > 10 ");
-    if (urilend != NULL) {
-        if (urilend->du16.arg1 == 10 && urilend->du16.mode == DETECT_UINT_GT &&
-                !urilend->raw_buffer)
-            ret = 1;
-
-        DetectUrilenFree(NULL, urilend);
-    }
-    return ret;
+    DetectUrilenFree(NULL, urilend);
+    PASS;
 }
 
 /** \test   Test the Urilen keyword setup */
 static int DetectUrilenParseTest04(void)
 {
-    int ret = 0;
-    DetectUrilenData *urilend = NULL;
+    DetectUrilenData *urilend = DetectUrilenParse(" 5 <> 10 ");
+    FAIL_IF_NULL(urilend);
+    FAIL_IF(urilend->du16.arg1 != 5);
+    FAIL_IF(urilend->du16.arg2 != 10);
+    FAIL_IF(urilend->du16.mode != DETECT_UINT_RA);
+    FAIL_IF(urilend->raw_buffer);
 
-    urilend = DetectUrilenParse(" 5 <> 10 ");
-    if (urilend != NULL) {
-        if (urilend->du16.arg1 == 5 && urilend->du16.arg2 == 10 &&
-                urilend->du16.mode == DETECT_UINT_RA && !urilend->raw_buffer)
-            ret = 1;
-
-        DetectUrilenFree(NULL, urilend);
-    }
-    return ret;
+    DetectUrilenFree(NULL, urilend);
+    PASS;
 }
 
 /** \test   Test the Urilen keyword setup */
 static int DetectUrilenParseTest05(void)
 {
-    int ret = 0;
-    DetectUrilenData *urilend = NULL;
+    DetectUrilenData *urilend = DetectUrilenParse("5<>10,norm");
+    FAIL_IF_NULL(urilend);
+    FAIL_IF(urilend->du16.arg1 != 5);
+    FAIL_IF(urilend->du16.arg2 != 10);
+    FAIL_IF(urilend->du16.mode != DETECT_UINT_RA);
+    FAIL_IF(urilend->raw_buffer);
 
-    urilend = DetectUrilenParse("5<>10,norm");
-    if (urilend != NULL) {
-        if (urilend->du16.arg1 == 5 && urilend->du16.arg2 == 10 &&
-                urilend->du16.mode == DETECT_UINT_RA && !urilend->raw_buffer)
-            ret = 1;
-
-        DetectUrilenFree(NULL, urilend);
-    }
-    return ret;
+    DetectUrilenFree(NULL, urilend);
+    PASS;
 }
 
 /** \test   Test the Urilen keyword setup */
 static int DetectUrilenParseTest06(void)
 {
-    int ret = 0;
-    DetectUrilenData *urilend = NULL;
+    DetectUrilenData *urilend = DetectUrilenParse("5<>10,raw");
+    FAIL_IF_NULL(urilend);
+    FAIL_IF(urilend->du16.arg1 != 5);
+    FAIL_IF(urilend->du16.arg2 != 10);
+    FAIL_IF(urilend->du16.mode != DETECT_UINT_RA);
+    FAIL_IF(!urilend->raw_buffer);
 
-    urilend = DetectUrilenParse("5<>10,raw");
-    if (urilend != NULL) {
-        if (urilend->du16.arg1 == 5 && urilend->du16.arg2 == 10 &&
-                urilend->du16.mode == DETECT_UINT_RA && urilend->raw_buffer)
-            ret = 1;
-
-        DetectUrilenFree(NULL, urilend);
-    }
-    return ret;
+    DetectUrilenFree(NULL, urilend);
+    PASS;
 }
 
 /** \test   Test the Urilen keyword setup */
 static int DetectUrilenParseTest07(void)
 {
-    int ret = 0;
-    DetectUrilenData *urilend = NULL;
+    DetectUrilenData *urilend = DetectUrilenParse(">10, norm ");
+    FAIL_IF_NULL(urilend);
+    FAIL_IF(urilend->du16.arg1 != 10);
+    FAIL_IF(urilend->du16.mode != DETECT_UINT_GT);
+    FAIL_IF(urilend->raw_buffer);
 
-    urilend = DetectUrilenParse(">10, norm ");
-    if (urilend != NULL) {
-        if (urilend->du16.arg1 == 10 && urilend->du16.mode == DETECT_UINT_GT &&
-                !urilend->raw_buffer)
-            ret = 1;
-
-        DetectUrilenFree(NULL, urilend);
-    }
-    return ret;
+    DetectUrilenFree(NULL, urilend);
+    PASS;
 }
 
 /** \test   Test the Urilen keyword setup */
 static int DetectUrilenParseTest08(void)
 {
-    int ret = 0;
-    DetectUrilenData *urilend = NULL;
+    DetectUrilenData *urilend = DetectUrilenParse("<10, norm ");
+    FAIL_IF_NULL(urilend);
+    FAIL_IF(urilend->du16.arg1 != 10);
+    FAIL_IF(urilend->du16.mode != DETECT_UINT_LT);
+    FAIL_IF(urilend->raw_buffer);
 
-    urilend = DetectUrilenParse("<10, norm ");
-    if (urilend != NULL) {
-        if (urilend->du16.arg1 == 10 && urilend->du16.mode == DETECT_UINT_LT &&
-                !urilend->raw_buffer)
-            ret = 1;
-
-        DetectUrilenFree(NULL, urilend);
-    }
-    return ret;
+    DetectUrilenFree(NULL, urilend);
+    PASS;
 }
 
 /** \test   Test the Urilen keyword setup */
 static int DetectUrilenParseTest09(void)
 {
-    int ret = 0;
-    DetectUrilenData *urilend = NULL;
+    DetectUrilenData *urilend = DetectUrilenParse(">10, raw ");
+    FAIL_IF_NULL(urilend);
+    FAIL_IF(urilend->du16.arg1 != 10);
+    FAIL_IF(urilend->du16.mode != DETECT_UINT_GT);
+    FAIL_IF(!urilend->raw_buffer);
 
-    urilend = DetectUrilenParse(">10, raw ");
-    if (urilend != NULL) {
-        if (urilend->du16.arg1 == 10 && urilend->du16.mode == DETECT_UINT_GT && urilend->raw_buffer)
-            ret = 1;
-
-        DetectUrilenFree(NULL, urilend);
-    }
-    return ret;
+    DetectUrilenFree(NULL, urilend);
+    PASS;
 }
 
 /** \test   Test the Urilen keyword setup */
 static int DetectUrilenParseTest10(void)
 {
-    int ret = 0;
-    DetectUrilenData *urilend = NULL;
+    DetectUrilenData *urilend = DetectUrilenParse("<10, raw ");
+    FAIL_IF_NULL(urilend);
+    FAIL_IF(urilend->du16.arg1 != 10);
+    FAIL_IF(urilend->du16.mode != DETECT_UINT_LT);
+    FAIL_IF(!urilend->raw_buffer);
 
-    urilend = DetectUrilenParse("<10, raw ");
-    if (urilend != NULL) {
-        if (urilend->du16.arg1 == 10 && urilend->du16.mode == DETECT_UINT_LT && urilend->raw_buffer)
-            ret = 1;
-
-        DetectUrilenFree(NULL, urilend);
-    }
-    return ret;
+    DetectUrilenFree(NULL, urilend);
+    PASS;
 }
 
 /**
@@ -468,57 +434,41 @@ end:
 
 static int DetectUrilenSetpTest01(void)
 {
-
     DetectUrilenData *urilend = NULL;
-    uint8_t res = 0;
     Signature *sig = NULL;
     DetectEngineCtx *de_ctx = NULL;
 
-    res = DetectUrilenInitTest(&de_ctx, &sig, &urilend, "1 <> 2 ");
-    if (res == 0) {
-        goto end;
-    }
+    uint8_t res = DetectUrilenInitTest(&de_ctx, &sig, &urilend, "1 <> 3");
+    FAIL_IF(res == 0);
+    FAIL_IF_NULL(urilend);
+    FAIL_IF_NOT(urilend->du16.arg1 == 1);
+    FAIL_IF_NOT(urilend->du16.arg2 == 3);
+    FAIL_IF_NOT(urilend->du16.mode == DETECT_UINT_RA);
 
-    if(urilend == NULL)
-        goto cleanup;
-
-    if (urilend != NULL) {
-        if (urilend->du16.arg1 == 1 && urilend->du16.arg2 == 2 &&
-                urilend->du16.mode == DETECT_UINT_RA)
-            res = 1;
-    }
-
-cleanup:
-    if (urilend)
-        DetectUrilenFree(NULL, urilend);
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
+    DetectUrilenFree(NULL, urilend);
     DetectEngineCtxFree(de_ctx);
-end:
-    return res;
+    PASS;
 }
 
 /** \test Check a signature with given urilen */
 static int DetectUrilenSigTest01(void)
 {
-    int result = 0;
     Flow f;
     uint8_t httpbuf1[] = "POST /suricata HTTP/1.0\r\n"
                          "Host: foo.bar.tld\r\n"
                          "\r\n";
     uint32_t httplen1 = sizeof(httpbuf1) - 1; /* minus the \0 */
     TcpSession ssn;
-    Packet *p = NULL;
-    Signature *s = NULL;
     ThreadVars th_v;
-    DetectEngineThreadCtx *det_ctx;
+    DetectEngineThreadCtx *det_ctx = NULL;
     AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
 
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
     memset(&f, 0, sizeof(f));
     memset(&ssn, 0, sizeof(ssn));
 
-    p = UTHBuildPacket(NULL, 0, IPPROTO_TCP);
+    Packet *p = UTHBuildPacket(NULL, 0, IPPROTO_TCP);
 
     FLOW_INITIALIZE(&f);
     f.protoctx = (void *)&ssn;
@@ -534,68 +484,42 @@ static int DetectUrilenSigTest01(void)
     StreamTcpInitConfig(true);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL) {
-        goto end;
-    }
-
+    FAIL_IF_NULL(de_ctx);
     de_ctx->flags |= DE_QUIET;
 
-    s = de_ctx->sig_list = SigInit(de_ctx,
-                                   "alert tcp any any -> any any "
-                                   "(msg:\"Testing urilen\"; "
-                                   "urilen: <5; sid:1;)");
-    if (s == NULL) {
-        goto end;
-    }
-
-    s = s->next = SigInit(de_ctx,
-                          "alert tcp any any -> any any "
-                          "(msg:\"Testing http_method\"; "
-                           "urilen: >5; sid:2;)");
-    if (s == NULL) {
-        goto end;
-    }
+    Signature *s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                                 "(msg:\"Testing urilen\"; "
+                                                 "urilen: <5; sid:1;)");
+    FAIL_IF_NULL(s);
+    s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                      "(msg:\"Testing http_method\"; "
+                                      "urilen: >5; sid:2;)");
+    FAIL_IF_NULL(s);
 
     SigGroupBuild(de_ctx);
     DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
 
     int r = AppLayerParserParse(
             NULL, alp_tctx, &f, ALPROTO_HTTP1, STREAM_TOSERVER, httpbuf1, httplen1);
-    if (r != 0) {
-        SCLogDebug("toserver chunk 1 returned %" PRId32 ", expected 0: ", r);
-        goto end;
-    }
+    FAIL_IF(r != 0);
 
     HtpState *htp_state = f.alstate;
-    if (htp_state == NULL) {
-        SCLogDebug("no http state: ");
-        goto end;
-    }
+    FAIL_IF_NULL(htp_state);
 
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
 
-    if ((PacketAlertCheck(p, 1))) {
-        printf("sid 1 alerted, but should not have: \n");
-        goto end;
-    }
-    if (!PacketAlertCheck(p, 2)) {
-        printf("sid 2 did not alerted, but should have: \n");
-        goto end;
-    }
+    FAIL_IF(PacketAlertCheck(p, 1));
+    FAIL_IF(!PacketAlertCheck(p, 2));
 
-    result = 1;
-
-end:
-    if (alp_tctx != NULL)
-        AppLayerParserThreadCtxFree(alp_tctx);
-    if (de_ctx != NULL) SigGroupCleanup(de_ctx);
-    if (de_ctx != NULL) SigCleanSignatures(de_ctx);
-    if (de_ctx != NULL) DetectEngineCtxFree(de_ctx);
-
-    StreamTcpFreeConfig(true);
-    FLOW_DESTROY(&f);
     UTHFreePackets(&p, 1);
-    return result;
+    FLOW_DESTROY(&f);
+
+    AppLayerParserThreadCtxFree(alp_tctx);
+    DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
+    DetectEngineCtxFree(de_ctx);
+    StreamTcpFreeConfig(true);
+    StatsThreadCleanup(&th_v.stats);
+    PASS;
 }
 
 /**

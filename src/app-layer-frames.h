@@ -21,15 +21,13 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __APP_LAYER_FRAMES_H__
-#define __APP_LAYER_FRAMES_H__
+#ifndef SURICATA_APP_LAYER_FRAMES_H
+#define SURICATA_APP_LAYER_FRAMES_H
 
-#include "rust.h"
-
+/** special value for matching any type */
+#define FRAME_ANY_TYPE 62
 /** max 63 to fit the 64 bit per protocol space */
 #define FRAME_STREAM_TYPE 63
-/** always the first frame to be created. TODO but what about protocol upgrades? */
-#define FRAME_STREAM_ID 1
 
 typedef int64_t FrameId;
 
@@ -76,11 +74,14 @@ typedef struct FramesContainer {
 } FramesContainer;
 
 void FramesFree(Frames *frames);
+#ifndef SURICATA_BINDGEN_H
+// do not let bindgen see Packet
 void FramesPrune(Flow *f, Packet *p);
+#endif
 
 Frame *AppLayerFrameNewByPointer(Flow *f, const StreamSlice *stream_slice,
         const uint8_t *frame_start, const int64_t len, int dir, uint8_t frame_type);
-Frame *AppLayerFrameNewByRelativeOffset(Flow *f, const StreamSlice *stream_slice,
+Frame *SCAppLayerFrameNewByRelativeOffset(Flow *f, const void *stream_slice,
         const uint32_t frame_start_rel, const int64_t len, int dir, uint8_t frame_type);
 Frame *AppLayerFrameNewByAbsoluteOffset(Flow *f, const StreamSlice *stream_slice,
         const uint64_t frame_start, const int64_t len, int dir, uint8_t frame_type);
@@ -88,22 +89,25 @@ void AppLayerFrameDump(Flow *f);
 
 Frame *FrameGetByIndex(Frames *frames, const uint32_t idx);
 Frame *FrameGetById(Frames *frames, const int64_t id);
+Frame *FrameGetLastOpenByType(Frames *frames, const uint8_t frame_type);
 
-Frame *AppLayerFrameGetById(Flow *f, const int direction, const FrameId frame_id);
-FrameId AppLayerFrameGetId(Frame *r);
+Frame *AppLayerFrameGetById(const Flow *f, const int direction, const FrameId frame_id);
+Frame *AppLayerFrameGetLastOpenByType(Flow *f, const int direction, const uint8_t frame_type);
+
 void AppLayerFrameAddEvent(Frame *frame, uint8_t e);
-void AppLayerFrameAddEventById(Flow *f, const int dir, const FrameId id, uint8_t e);
+void SCAppLayerFrameAddEventById(const Flow *f, const int dir, const FrameId id, uint8_t e);
 void AppLayerFrameSetLength(Frame *frame, int64_t len);
-void AppLayerFrameSetLengthById(Flow *f, const int dir, const FrameId id, int64_t len);
+void SCAppLayerFrameSetLengthById(const Flow *f, const int dir, const FrameId id, int64_t len);
 void AppLayerFrameSetTxId(Frame *r, uint64_t tx_id);
-void AppLayerFrameSetTxIdById(Flow *f, const int dir, const FrameId id, uint64_t tx_id);
+void SCAppLayerFrameSetTxIdById(const Flow *f, const int dir, const FrameId id, uint64_t tx_id);
 
 void AppLayerFramesSlide(Flow *f, const uint32_t slide, const uint8_t direction);
 
-FramesContainer *AppLayerFramesGetContainer(Flow *f);
+FramesContainer *AppLayerFramesGetContainer(const Flow *f);
 FramesContainer *AppLayerFramesSetupContainer(Flow *f);
 
 void FrameConfigInit(void);
+void FrameConfigDeInit(void);
 void FrameConfigEnableAll(void);
 void FrameConfigEnable(const AppProto p, const uint8_t type);
 

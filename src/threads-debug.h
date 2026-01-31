@@ -24,8 +24,8 @@
  * Threading functions defined as macros: debug variants
  */
 
-#ifndef __THREADS_DEBUG_H__
-#define __THREADS_DEBUG_H__
+#ifndef SURICATA_THREADS_DEBUG_H
+#define SURICATA_THREADS_DEBUG_H
 
 /* mutex */
 
@@ -116,6 +116,7 @@
 #define SCMutexInit(mut, mutattrs) SCMutexInit_dbg(mut, mutattrs)
 #define SCMutexLock(mut) SCMutexLock_dbg(mut)
 #define SCMutexTrylock(mut) SCMutexTrylock_dbg(mut)
+#define SCMutexIsLocked(mut)       (SCMutexTrylock(mut) == EBUSY)
 #define SCMutexUnlock(mut) SCMutexUnlock_dbg(mut)
 #define SCMutexDestroy pthread_mutex_destroy
 #define SCMUTEX_INITIALIZER PTHREAD_MUTEX_INITIALIZER

@@ -48,7 +48,10 @@
 #include "util-profiling.h"
 
 /*                         name             modifiers          value      */
-#define PARSE_REGEX "^\\s*([a-zA-Z][\\w\\d_./]+)\\s*,\\s*([+=-]{1}|==|!=|<|<=|>|>=|isset|notset)\\s*,?\\s*([a-zA-Z][\\w\\d]+|[\\d]{1,10})?\\s*$"
+#define PARSE_REGEX                                                                                \
+    "^\\s*([a-zA-Z][\\w\\d_./"                                                                     \
+    "]+)\\s*,\\s*([+=-]{1}|==|!=|<|<=|>|>=|isset|notset|isnotset)\\s*,?\\s*([a-zA-Z][\\w\\d]+|["   \
+    "\\d]{1,10})?\\s*$"
 /* Varnames must begin with a letter */
 
 static DetectParseRegex parse_regex;
@@ -140,7 +143,7 @@ int DetectFlowintMatch(DetectEngineThreadCtx *det_ctx,
         goto end;
     }
 
-    if (sfd->modifier == FLOWINT_MODIFIER_NOTSET) {
+    if (sfd->modifier == FLOWINT_MODIFIER_ISNOTSET) {
         SCLogDebug(" Not set %s? = %u", sfd->name,(fv) ? 0 : 1);
         if (fv == NULL)
             ret = 1;
@@ -280,20 +283,20 @@ static DetectFlowintData *DetectFlowintParse(DetectEngineCtx *de_ctx, const char
         modifier = FLOWINT_MODIFIER_GT;
     if (strcmp("isset", modstr) == 0)
         modifier = FLOWINT_MODIFIER_ISSET;
-    if (strcmp("notset", modstr) == 0)
-        modifier = FLOWINT_MODIFIER_NOTSET;
+    if (strcmp("notset", modstr) == 0 || strcmp("isnotset", modstr) == 0)
+        modifier = FLOWINT_MODIFIER_ISNOTSET;
 
     if (modifier == FLOWINT_MODIFIER_UNKNOWN) {
         SCLogError("Unknown modifier");
         goto error;
     }
 
-    sfd = SCMalloc(sizeof(DetectFlowintData));
+    sfd = SCCalloc(1, sizeof(DetectFlowintData));
     if (unlikely(sfd == NULL))
         goto error;
 
     /* If we need another arg, check it out(isset doesn't need another arg) */
-    if (modifier != FLOWINT_MODIFIER_ISSET && modifier != FLOWINT_MODIFIER_NOTSET) {
+    if (modifier != FLOWINT_MODIFIER_ISSET && modifier != FLOWINT_MODIFIER_ISNOTSET) {
         if (ret < 4)
             goto error;
 
@@ -331,7 +334,10 @@ static DetectFlowintData *DetectFlowintParse(DetectEngineCtx *de_ctx, const char
         SCLogError("malloc from strdup failed");
         goto error;
     }
-    sfd->idx = VarNameStoreRegister(varname, VAR_TYPE_FLOW_INT);
+    uint32_t varname_id = VarNameStoreRegister(varname, VAR_TYPE_FLOW_INT);
+    if (unlikely(varname_id == 0))
+        goto error;
+    sfd->idx = varname_id;
     SCLogDebug("sfd->name %s id %u", sfd->name, sfd->idx);
     sfd->modifier = modifier;
 
@@ -351,8 +357,7 @@ error:
         pcre2_substring_free((PCRE2_UCHAR *)varval);
     if (modstr)
         pcre2_substring_free((PCRE2_UCHAR *)modstr);
-    if (sfd != NULL)
-        SCFree(sfd);
+    DetectFlowintFree(de_ctx, sfd);
     return NULL;
 }
 
@@ -381,7 +386,7 @@ static int DetectFlowintSetup(DetectEngineCtx *de_ctx, Signature *s, const char 
         case FLOWINT_MODIFIER_SET:
         case FLOWINT_MODIFIER_ADD:
         case FLOWINT_MODIFIER_SUB:
-            if (SigMatchAppendSMToList(de_ctx, s, DETECT_FLOWINT, (SigMatchCtx *)sfd,
+            if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_FLOWINT, (SigMatchCtx *)sfd,
                         DETECT_SM_LIST_POSTMATCH) == NULL) {
                 goto error;
             }
@@ -394,8 +399,8 @@ static int DetectFlowintSetup(DetectEngineCtx *de_ctx, Signature *s, const char 
         case FLOWINT_MODIFIER_GE:
         case FLOWINT_MODIFIER_GT:
         case FLOWINT_MODIFIER_ISSET:
-        case FLOWINT_MODIFIER_NOTSET:
-            if (SigMatchAppendSMToList(de_ctx, s, DETECT_FLOWINT, (SigMatchCtx *)sfd,
+        case FLOWINT_MODIFIER_ISNOTSET:
+            if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_FLOWINT, (SigMatchCtx *)sfd,
                         DETECT_SM_LIST_MATCH) == NULL) {
                 goto error;
             }
@@ -407,8 +412,7 @@ static int DetectFlowintSetup(DetectEngineCtx *de_ctx, Signature *s, const char 
     return 0;
 
 error:
-    if (sfd)
-        DetectFlowintFree(de_ctx, sfd);
+    DetectFlowintFree(de_ctx, sfd);
     return -1;
 }
 
@@ -417,16 +421,19 @@ error:
  */
 void DetectFlowintFree(DetectEngineCtx *de_ctx, void *tmp)
 {
-    DetectFlowintData *sfd =(DetectFlowintData*) tmp;
-    if (sfd != NULL) {
-        VarNameStoreUnregister(sfd->idx, VAR_TYPE_FLOW_INT);
-        if (sfd->name != NULL)
-            SCFree(sfd->name);
-        if (sfd->targettype == FLOWINT_TARGET_VAR)
-            if (sfd->target.tvar.name != NULL)
-                SCFree(sfd->target.tvar.name);
-        SCFree(sfd);
+    if (tmp == NULL)
+        return;
+
+    DetectFlowintData *sfd = (DetectFlowintData *)tmp;
+    VarNameStoreUnregister(sfd->idx, VAR_TYPE_FLOW_INT);
+    if (sfd->name != NULL)
+        SCFree(sfd->name);
+    if (sfd->targettype == FLOWINT_TARGET_VAR) {
+        if (sfd->target.tvar.name != NULL) {
+            SCFree(sfd->target.tvar.name);
+        }
     }
+    SCFree(sfd);
 }
 
 #ifdef UNITTESTS
@@ -998,9 +1005,8 @@ static int DetectFlowintTestParseIsset10(void)
     if (sfd) DetectFlowintFree(NULL, sfd);
     sfd = DetectFlowintParse(de_ctx, "myvar, notset");
     DetectFlowintPrintData(sfd);
-    if (sfd != NULL && !strcmp(sfd->name, "myvar")
-            && sfd->targettype == FLOWINT_TARGET_SELF
-            && sfd->modifier == FLOWINT_MODIFIER_NOTSET) {
+    if (sfd != NULL && !strcmp(sfd->name, "myvar") && sfd->targettype == FLOWINT_TARGET_SELF &&
+            sfd->modifier == FLOWINT_MODIFIER_ISNOTSET) {
 
         result &= 1;
     } else {
@@ -1109,6 +1115,7 @@ static int DetectFlowintTestPacket01Real(void)
     ThreadVars th_v;
     DetectEngineThreadCtx *det_ctx = NULL;
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     FAIL_IF(de_ctx == NULL);
@@ -1168,7 +1175,7 @@ static int DetectFlowintTestPacket01Real(void)
     UTHFreeFlow(f);
     DetectEngineThreadCtxDeinit(&th_v,(void *) det_ctx);
     DetectEngineCtxFree(de_ctx);
-
+    StatsThreadCleanup(&th_v.stats);
     PASS;
 }
 
@@ -1182,6 +1189,7 @@ static int DetectFlowintTestPacket02Real(void)
     ThreadVars th_v;
     DetectEngineThreadCtx *det_ctx = NULL;
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     FAIL_IF(de_ctx == NULL);
@@ -1189,7 +1197,9 @@ static int DetectFlowintTestPacket02Real(void)
     de_ctx->flags |= DE_QUIET;
 
     const char *sigs[5];
-    sigs[0] = "alert tcp any any -> any any (msg:\"Setting a flowint counter\"; content:\"GET\"; flowint: myvar, notset; flowint:maxvar,notset; flowint: myvar,=,1; flowint: maxvar,=,6; sid:101;)";
+    sigs[0] = "alert tcp any any -> any any (msg:\"Setting a flowint counter\"; content:\"GET\"; "
+              "flowint:myvar,notset; flowint:maxvar,isnotset; flowint: myvar,=,1; flowint: "
+              "maxvar,=,6; sid:101;)";
     sigs[1] = "alert tcp any any -> any any (msg:\"Adding to flowint counter\"; content:\"Unauthorized\"; flowint:myvar,isset; flowint: myvar,+,2; sid:102;)";
     sigs[2] = "alert tcp any any -> any any (msg:\"if the flowint counter is 3 create a new counter\"; content:\"Unauthorized\"; flowint: myvar, isset; flowint: myvar,==,3; flowint:cntpackets,notset; flowint: cntpackets, =, 0; sid:103;)";
     sigs[3] = "alert tcp any any -> any any (msg:\"and count the rest of the packets received without generating alerts!!!\"; flowint: cntpackets,isset; flowint: cntpackets, +, 1; noalert;sid:104;)";
@@ -1241,6 +1251,7 @@ static int DetectFlowintTestPacket02Real(void)
     UTHFreeFlow(f);
     DetectEngineThreadCtxDeinit(&th_v,(void *) det_ctx);
     DetectEngineCtxFree(de_ctx);
+    StatsThreadCleanup(&th_v.stats);
 
     PASS;
 }
@@ -1255,6 +1266,7 @@ static int DetectFlowintTestPacket03Real(void)
     ThreadVars th_v;
     DetectEngineThreadCtx *det_ctx = NULL;
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     FAIL_IF(de_ctx == NULL);
@@ -1304,6 +1316,7 @@ static int DetectFlowintTestPacket03Real(void)
     UTHFreeFlow(f);
     DetectEngineThreadCtxDeinit(&th_v,(void *) det_ctx);
     DetectEngineCtxFree(de_ctx);
+    StatsThreadCleanup(&th_v.stats);
 
     PASS;
 }

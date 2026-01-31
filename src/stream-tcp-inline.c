@@ -63,7 +63,8 @@ int StreamTcpInlineSegmentCompare(const TcpStream *stream,
     if (seg_data == NULL || seg_datalen == 0)
         SCReturnInt(0);
 
-    const uint32_t pkt_seq = TCP_GET_SEQ(p);
+    const TCPHdr *tcph = PacketGetTCP(p);
+    const uint32_t pkt_seq = TCP_GET_RAW_SEQ(tcph);
 
     if (SEQ_EQ(pkt_seq, seg->seq) && p->payload_len == seg_datalen) {
         int r = SCMemcmp(p->payload, seg_data, seg_datalen);
@@ -97,7 +98,7 @@ int StreamTcpInlineSegmentCompare(const TcpStream *stream,
 
         uint32_t range = end - seq;
         SCLogDebug("range %u", range);
-        BUG_ON(range > 65536);
+        DEBUG_VALIDATE_BUG_ON(range > 65536);
 
         if (range) {
             int r = SCMemcmp(p->payload + pkt_off, seg_data + seg_off, range);
@@ -122,7 +123,8 @@ void StreamTcpInlineSegmentReplacePacket(const TcpStream *stream,
 {
     SCEnter();
 
-    uint32_t pseq = TCP_GET_SEQ(p);
+    const TCPHdr *tcph = PacketGetTCP(p);
+    const uint32_t pseq = TCP_GET_RAW_SEQ(tcph);
     uint32_t tseq = seg->seq;
 
     /* check if segment is within the packet */
@@ -152,7 +154,7 @@ void StreamTcpInlineSegmentReplacePacket(const TcpStream *stream,
 
     uint32_t range = end - seq;
     SCLogDebug("range %u", range);
-    BUG_ON(range > 65536);
+    DEBUG_VALIDATE_BUG_ON(range > 65536);
 
     if (range) {
         /* update the packets payload. As payload is a ptr to either

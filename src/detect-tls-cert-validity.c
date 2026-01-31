@@ -51,7 +51,8 @@
 /**
  *   [tls_notbefore|tls_notafter]:[<|>]<date string>[<><date string>];
  */
-#define PARSE_REGEX "^\\s*(<|>)?\\s*([ -:TW0-9]+)\\s*(?:(<>)\\s*([ -:TW0-9]+))?\\s*$"
+#define PARSE_REGEX                                                                                \
+    "^\\s*(<|>)?\\s*([ -:TW0-9]+[-:TW0-9]+)\\s*(?:(<>)\\s*([ -:TW0-9]+[-:TW0-9]+))?\\s*$"
 static DetectParseRegex parse_regex;
 
 static int DetectTlsValidityMatch (DetectEngineThreadCtx *, Flow *,
@@ -79,54 +80,51 @@ static int g_tls_validity_buffer_id = 0;
  */
 void DetectTlsValidityRegister (void)
 {
-    sigmatch_table[DETECT_AL_TLS_NOTBEFORE].name = "tls_cert_notbefore";
-    sigmatch_table[DETECT_AL_TLS_NOTBEFORE].desc = "match TLS certificate notBefore field";
-    sigmatch_table[DETECT_AL_TLS_NOTBEFORE].url = "/rules/tls-keywords.html#tls-cert-notbefore";
-    sigmatch_table[DETECT_AL_TLS_NOTBEFORE].AppLayerTxMatch = DetectTlsValidityMatch;
-    sigmatch_table[DETECT_AL_TLS_NOTBEFORE].Setup = DetectTlsNotBeforeSetup;
-    sigmatch_table[DETECT_AL_TLS_NOTBEFORE].Free = DetectTlsValidityFree;
+    sigmatch_table[DETECT_TLS_NOTBEFORE].name = "tls_cert_notbefore";
+    sigmatch_table[DETECT_TLS_NOTBEFORE].desc = "match TLS certificate notBefore field";
+    sigmatch_table[DETECT_TLS_NOTBEFORE].url = "/rules/tls-keywords.html#tls-cert-notbefore";
+    sigmatch_table[DETECT_TLS_NOTBEFORE].AppLayerTxMatch = DetectTlsValidityMatch;
+    sigmatch_table[DETECT_TLS_NOTBEFORE].Setup = DetectTlsNotBeforeSetup;
+    sigmatch_table[DETECT_TLS_NOTBEFORE].Free = DetectTlsValidityFree;
 #ifdef UNITTESTS
-    sigmatch_table[DETECT_AL_TLS_NOTBEFORE].RegisterTests = TlsNotBeforeRegisterTests;
+    sigmatch_table[DETECT_TLS_NOTBEFORE].RegisterTests = TlsNotBeforeRegisterTests;
 #endif
 
-    sigmatch_table[DETECT_AL_TLS_NOTAFTER].name = "tls_cert_notafter";
-    sigmatch_table[DETECT_AL_TLS_NOTAFTER].desc = "match TLS certificate notAfter field";
-    sigmatch_table[DETECT_AL_TLS_NOTAFTER].url = "/rules/tls-keywords.html#tls-cert-notafter";
-    sigmatch_table[DETECT_AL_TLS_NOTAFTER].AppLayerTxMatch = DetectTlsValidityMatch;
-    sigmatch_table[DETECT_AL_TLS_NOTAFTER].Setup = DetectTlsNotAfterSetup;
-    sigmatch_table[DETECT_AL_TLS_NOTAFTER].Free = DetectTlsValidityFree;
+    sigmatch_table[DETECT_TLS_NOTAFTER].name = "tls_cert_notafter";
+    sigmatch_table[DETECT_TLS_NOTAFTER].desc = "match TLS certificate notAfter field";
+    sigmatch_table[DETECT_TLS_NOTAFTER].url = "/rules/tls-keywords.html#tls-cert-notafter";
+    sigmatch_table[DETECT_TLS_NOTAFTER].AppLayerTxMatch = DetectTlsValidityMatch;
+    sigmatch_table[DETECT_TLS_NOTAFTER].Setup = DetectTlsNotAfterSetup;
+    sigmatch_table[DETECT_TLS_NOTAFTER].Free = DetectTlsValidityFree;
 #ifdef UNITTESTS
-    sigmatch_table[DETECT_AL_TLS_NOTAFTER].RegisterTests = TlsNotAfterRegisterTests;
+    sigmatch_table[DETECT_TLS_NOTAFTER].RegisterTests = TlsNotAfterRegisterTests;
 #endif
 
-    sigmatch_table[DETECT_AL_TLS_EXPIRED].name = "tls_cert_expired";
-    sigmatch_table[DETECT_AL_TLS_EXPIRED].desc = "match expired TLS certificates";
-    sigmatch_table[DETECT_AL_TLS_EXPIRED].url = "/rules/tls-keywords.html#tls-cert-expired";
-    sigmatch_table[DETECT_AL_TLS_EXPIRED].AppLayerTxMatch = DetectTlsValidityMatch;
-    sigmatch_table[DETECT_AL_TLS_EXPIRED].Setup = DetectTlsExpiredSetup;
-    sigmatch_table[DETECT_AL_TLS_EXPIRED].Free = DetectTlsValidityFree;
-    sigmatch_table[DETECT_AL_TLS_EXPIRED].flags = SIGMATCH_NOOPT;
+    sigmatch_table[DETECT_TLS_EXPIRED].name = "tls_cert_expired";
+    sigmatch_table[DETECT_TLS_EXPIRED].desc = "match expired TLS certificates";
+    sigmatch_table[DETECT_TLS_EXPIRED].url = "/rules/tls-keywords.html#tls-cert-expired";
+    sigmatch_table[DETECT_TLS_EXPIRED].AppLayerTxMatch = DetectTlsValidityMatch;
+    sigmatch_table[DETECT_TLS_EXPIRED].Setup = DetectTlsExpiredSetup;
+    sigmatch_table[DETECT_TLS_EXPIRED].Free = DetectTlsValidityFree;
+    sigmatch_table[DETECT_TLS_EXPIRED].flags = SIGMATCH_NOOPT;
 #ifdef UNITTESTS
-    sigmatch_table[DETECT_AL_TLS_EXPIRED].RegisterTests = TlsExpiredRegisterTests;
+    sigmatch_table[DETECT_TLS_EXPIRED].RegisterTests = TlsExpiredRegisterTests;
 #endif
 
-    sigmatch_table[DETECT_AL_TLS_VALID].name = "tls_cert_valid";
-    sigmatch_table[DETECT_AL_TLS_VALID].desc = "match valid TLS certificates";
-    sigmatch_table[DETECT_AL_TLS_VALID].url = "/rules/tls-keywords.html#tls-cert-valid";
-    sigmatch_table[DETECT_AL_TLS_VALID].AppLayerTxMatch = DetectTlsValidityMatch;
-    sigmatch_table[DETECT_AL_TLS_VALID].Setup = DetectTlsValidSetup;
-    sigmatch_table[DETECT_AL_TLS_VALID].Free = DetectTlsValidityFree;
-    sigmatch_table[DETECT_AL_TLS_VALID].flags = SIGMATCH_NOOPT;
+    sigmatch_table[DETECT_TLS_VALID].name = "tls_cert_valid";
+    sigmatch_table[DETECT_TLS_VALID].desc = "match valid TLS certificates";
+    sigmatch_table[DETECT_TLS_VALID].url = "/rules/tls-keywords.html#tls-cert-valid";
+    sigmatch_table[DETECT_TLS_VALID].AppLayerTxMatch = DetectTlsValidityMatch;
+    sigmatch_table[DETECT_TLS_VALID].Setup = DetectTlsValidSetup;
+    sigmatch_table[DETECT_TLS_VALID].Free = DetectTlsValidityFree;
+    sigmatch_table[DETECT_TLS_VALID].flags = SIGMATCH_NOOPT;
 #ifdef UNITTESTS
-    sigmatch_table[DETECT_AL_TLS_VALID].RegisterTests = TlsValidRegisterTests;
+    sigmatch_table[DETECT_TLS_VALID].RegisterTests = TlsValidRegisterTests;
 #endif
 
     DetectSetupParseRegexes(PARSE_REGEX, &parse_regex);
 
-    DetectAppLayerInspectEngineRegister("tls_validity", ALPROTO_TLS, SIG_FLAG_TOCLIENT,
-            TLS_STATE_CERT_READY, DetectEngineInspectGenericList, NULL);
-
-    g_tls_validity_buffer_id = DetectBufferTypeGetByName("tls_validity");
+    g_tls_validity_buffer_id = DetectBufferTypeGetByName("tls:server_cert_done:generic");
 }
 
 /**
@@ -219,6 +217,8 @@ static time_t StringIsEpoch (char *string)
     return strtol(string, NULL, 10);
 }
 
+#define MAX_DATE_LEN 20
+
 /**
  * \internal
  * \brief Function to convert date string to epoch.
@@ -250,21 +250,6 @@ static time_t DateStringToEpoch (char *string)
     while (isspace(*string))
         string++;
 
-    size_t inlen, oldlen;
-
-    oldlen = inlen = strlen(string);
-
-    /* Skip trailing whitespace */
-    while (inlen > 0 && isspace(string[inlen - 1]))
-        inlen--;
-
-    char tmp[inlen + 1];
-
-    if (inlen < oldlen) {
-        strlcpy(tmp, string, inlen + 1);
-        string = tmp;
-    }
-
     time_t epoch = StringIsEpoch(string);
     if (epoch != LONG_MIN) {
         return epoch;
@@ -291,8 +276,8 @@ static DetectTlsValidityData *DetectTlsValidityParse (const char *rawstr)
 {
     DetectTlsValidityData *dd = NULL;
     char mode[2] = "";
-    char value1[20] = "";
-    char value2[20] = "";
+    char value1[MAX_DATE_LEN] = "";
+    char value2[MAX_DATE_LEN] = "";
     char range[3] = "";
 
     pcre2_match_data *match = NULL;
@@ -417,7 +402,7 @@ static int DetectTlsExpiredSetup (DetectEngineCtx *de_ctx, Signature *s,
 
     SCLogDebug("\'%s\'", rawstr);
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_TLS) != 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_TLS) != 0)
         return -1;
 
     dd = SCCalloc(1, sizeof(DetectTlsValidityData));
@@ -434,7 +419,7 @@ static int DetectTlsExpiredSetup (DetectEngineCtx *de_ctx, Signature *s,
     dd->epoch = 0;
     dd->epoch2 = 0;
 
-    if (SigMatchAppendSMToList(de_ctx, s, DETECT_AL_TLS_EXPIRED, (SigMatchCtx *)dd,
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_TLS_EXPIRED, (SigMatchCtx *)dd,
                 g_tls_validity_buffer_id) == NULL) {
         goto error;
     }
@@ -462,7 +447,7 @@ static int DetectTlsValidSetup (DetectEngineCtx *de_ctx, Signature *s,
 
     SCLogDebug("\'%s\'", rawstr);
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_TLS) != 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_TLS) != 0)
         return -1;
 
     dd = SCCalloc(1, sizeof(DetectTlsValidityData));
@@ -479,8 +464,8 @@ static int DetectTlsValidSetup (DetectEngineCtx *de_ctx, Signature *s,
     dd->epoch = 0;
     dd->epoch2 = 0;
 
-    if (SigMatchAppendSMToList(de_ctx, s, DETECT_AL_TLS_VALID, (SigMatchCtx *)dd,
-                g_tls_validity_buffer_id) == NULL) {
+    if (SCSigMatchAppendSMToList(
+                de_ctx, s, DETECT_TLS_VALID, (SigMatchCtx *)dd, g_tls_validity_buffer_id) == NULL) {
         goto error;
     }
     return 0;
@@ -546,7 +531,7 @@ static int DetectTlsValiditySetup (DetectEngineCtx *de_ctx, Signature *s,
 
     SCLogDebug("\'%s\'", rawstr);
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_TLS) != 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_TLS) != 0)
         return -1;
 
     dd = DetectTlsValidityParse(rawstr);
@@ -568,7 +553,7 @@ static int DetectTlsValiditySetup (DetectEngineCtx *de_ctx, Signature *s,
         goto error;
     }
 
-    if (SigMatchAppendSMToList(de_ctx, s, DETECT_AL_TLS_NOTAFTER, (SigMatchCtx *)dd,
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_TLS_NOTAFTER, (SigMatchCtx *)dd,
                 g_tls_validity_buffer_id) == NULL) {
         goto error;
     }

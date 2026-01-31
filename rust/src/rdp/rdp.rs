@@ -20,11 +20,19 @@
 //! RDP application layer
 
 use crate::applayer::{self, *};
-use crate::core::{AppProto, Flow, ALPROTO_UNKNOWN, IPPROTO_TCP};
+use crate::core::{
+    sc_app_layer_parser_trigger_raw_stream_inspection, ALPROTO_UNKNOWN, IPPROTO_TCP,
+};
+use crate::direction::Direction;
+use crate::flow::Flow;
 use crate::rdp::parser::*;
-use nom7::Err;
+use nom8::Err;
 use std;
 use std::collections::VecDeque;
+use suricata_sys::sys::{
+    AppLayerParserState, AppProto, SCAppLayerParserConfParserEnabled,
+    SCAppLayerParserRegisterLogger, SCAppLayerProtoDetectConfProtoDetectionEnabled,
+};
 use tls_parser::{parse_tls_plaintext, TlsMessage, TlsMessageHandshake, TlsRecordType};
 
 static mut ALPROTO_RDP: AppProto = ALPROTO_UNKNOWN;
@@ -71,8 +79,7 @@ impl RdpTransaction {
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_rdp_state_get_tx(
+unsafe extern "C" fn rdp_state_get_tx(
     state: *mut std::os::raw::c_void, tx_id: u64,
 ) -> *mut std::os::raw::c_void {
     let state = cast_pointer!(state, RdpState);
@@ -86,14 +93,12 @@ pub unsafe extern "C" fn rs_rdp_state_get_tx(
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_rdp_state_get_tx_count(state: *mut std::os::raw::c_void) -> u64 {
+unsafe extern "C" fn rdp_state_get_tx_count(state: *mut std::os::raw::c_void) -> u64 {
     let state = cast_pointer!(state, RdpState);
     return state.next_id;
 }
 
-#[no_mangle]
-pub extern "C" fn rs_rdp_tx_get_progress(
+extern "C" fn rdp_tx_get_progress(
     _tx: *mut std::os::raw::c_void, _direction: u8,
 ) -> std::os::raw::c_int {
     // tx complete when `rs_rdp_tx_get_progress(...) == rs_rdp_tx_get_progress_complete(...)`
@@ -163,7 +168,7 @@ impl RdpState {
     }
 
     /// parse buffer captures from client to server
-    fn parse_ts(&mut self, input: &[u8]) -> AppLayerResult {
+    fn parse_ts(&mut self, flow: *mut Flow, input: &[u8]) -> AppLayerResult {
         // no need to process input buffer
         if self.bypass_parsing {
             return AppLayerResult::ok();
@@ -181,7 +186,7 @@ impl RdpState {
                         available = remainder;
                     }
 
-                    Err(Err::Incomplete(_)) => {
+                    Err(nom7::Err::Incomplete(_)) => {
                         // nom need not compatible with applayer need, request one more byte
                         return AppLayerResult::incomplete(
                             (input.len() - available.len()) as u32,
@@ -189,7 +194,7 @@ impl RdpState {
                         );
                     }
 
-                    Err(Err::Failure(_)) | Err(Err::Error(_)) => {
+                    Err(nom7::Err::Failure(_)) | Err(nom7::Err::Error(_)) => {
                         return AppLayerResult::err();
                     }
                 }
@@ -207,6 +212,12 @@ impl RdpState {
                                 let tx =
                                     self.new_tx(RdpTransactionItem::X224ConnectionRequest(x224));
                                 self.transactions.push_back(tx);
+                                if !flow.is_null() {
+                                    sc_app_layer_parser_trigger_raw_stream_inspection(
+                                        flow,
+                                        Direction::ToServer as i32,
+                                    );
+                                }
                             }
 
                             // X.223 data packet, evaluate what it encapsulates
@@ -217,6 +228,12 @@ impl RdpState {
                                         let tx =
                                             self.new_tx(RdpTransactionItem::McsConnectRequest(mcs));
                                         self.transactions.push_back(tx);
+                                        if !flow.is_null() {
+                                            sc_app_layer_parser_trigger_raw_stream_inspection(
+                                                flow,
+                                                Direction::ToServer as i32,
+                                            );
+                                        }
                                     }
                                     // unknown message in X.223, skip
                                     _ => (),
@@ -239,7 +256,7 @@ impl RdpState {
                     Err(Err::Failure(_)) | Err(Err::Error(_)) => {
                         if probe_tls_handshake(available) {
                             self.tls_parsing = true;
-                            let r = self.parse_ts(available);
+                            let r = self.parse_ts(flow, available);
                             if r.status == 1 {
                                 //adds bytes already consumed to incomplete result
                                 let consumed = (input.len() - available.len()) as u32;
@@ -257,7 +274,7 @@ impl RdpState {
     }
 
     /// parse buffer captures from server to client
-    fn parse_tc(&mut self, input: &[u8]) -> AppLayerResult {
+    fn parse_tc(&mut self, flow: *mut Flow, input: &[u8]) -> AppLayerResult {
         // no need to process input buffer
         if self.bypass_parsing {
             return AppLayerResult::ok();
@@ -288,6 +305,12 @@ impl RdpState {
                                     let tx =
                                         self.new_tx(RdpTransactionItem::TlsCertificateChain(chain));
                                     self.transactions.push_back(tx);
+                                    if !flow.is_null() {
+                                        sc_app_layer_parser_trigger_raw_stream_inspection(
+                                            flow,
+                                            Direction::ToClient as i32,
+                                        );
+                                    }
                                     self.bypass_parsing = true;
                                 }
                                 _ => {}
@@ -295,7 +318,7 @@ impl RdpState {
                         }
                     }
 
-                    Err(Err::Incomplete(_)) => {
+                    Err(nom7::Err::Incomplete(_)) => {
                         // nom need not compatible with applayer need, request one more byte
                         return AppLayerResult::incomplete(
                             (input.len() - available.len()) as u32,
@@ -303,7 +326,7 @@ impl RdpState {
                         );
                     }
 
-                    Err(Err::Failure(_)) | Err(Err::Error(_)) => {
+                    Err(nom7::Err::Failure(_)) | Err(nom7::Err::Error(_)) => {
                         return AppLayerResult::err();
                     }
                 }
@@ -321,6 +344,12 @@ impl RdpState {
                                 let tx =
                                     self.new_tx(RdpTransactionItem::X224ConnectionConfirm(x224));
                                 self.transactions.push_back(tx);
+                                if !flow.is_null() {
+                                    sc_app_layer_parser_trigger_raw_stream_inspection(
+                                        flow,
+                                        Direction::ToClient as i32,
+                                    );
+                                }
                             }
 
                             // X.223 data packet, evaluate what it encapsulates
@@ -331,6 +360,12 @@ impl RdpState {
                                         let tx = self
                                             .new_tx(RdpTransactionItem::McsConnectResponse(mcs));
                                         self.transactions.push_back(tx);
+                                        if !flow.is_null() {
+                                            sc_app_layer_parser_trigger_raw_stream_inspection(
+                                                flow,
+                                                Direction::ToClient as i32,
+                                            );
+                                        }
                                         self.bypass_parsing = true;
                                         return AppLayerResult::ok();
                                     }
@@ -356,7 +391,7 @@ impl RdpState {
                     Err(Err::Failure(_)) | Err(Err::Error(_)) => {
                         if probe_tls_handshake(available) {
                             self.tls_parsing = true;
-                            let r = self.parse_tc(available);
+                            let r = self.parse_tc(flow, available);
                             if r.status == 1 {
                                 //adds bytes already consumed to incomplete result
                                 let consumed = (input.len() - available.len()) as u32;
@@ -374,20 +409,19 @@ impl RdpState {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn rs_rdp_state_new(_orig_state: *mut std::os::raw::c_void, _orig_proto: AppProto) -> *mut std::os::raw::c_void {
+extern "C" fn rdp_state_new(
+    _orig_state: *mut std::os::raw::c_void, _orig_proto: AppProto,
+) -> *mut std::os::raw::c_void {
     let state = RdpState::new();
     let boxed = Box::new(state);
     return Box::into_raw(boxed) as *mut _;
 }
 
-#[no_mangle]
-pub extern "C" fn rs_rdp_state_free(state: *mut std::os::raw::c_void) {
+extern "C" fn rdp_state_free(state: *mut std::os::raw::c_void) {
     std::mem::drop(unsafe { Box::from_raw(state as *mut RdpState) });
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_rdp_state_tx_free(state: *mut std::os::raw::c_void, tx_id: u64) {
+unsafe extern "C" fn rdp_state_tx_free(state: *mut std::os::raw::c_void, tx_id: u64) {
     let state = cast_pointer!(state, RdpState);
     state.free_tx(tx_id);
 }
@@ -402,8 +436,7 @@ fn probe_rdp(input: &[u8]) -> bool {
 }
 
 /// probe for T.123 message, whether to client or to server
-#[no_mangle]
-pub unsafe extern "C" fn rs_rdp_probe_ts_tc(
+unsafe extern "C" fn rdp_probe_ts_tc(
     _flow: *const Flow, _direction: u8, input: *const u8, input_len: u32, _rdir: *mut u8,
 ) -> AppProto {
     if !input.is_null() {
@@ -429,32 +462,28 @@ fn probe_tls_handshake(input: &[u8]) -> bool {
 // parse
 //
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_rdp_parse_ts(
-    _flow: *const Flow, state: *mut std::os::raw::c_void, _pstate: *mut std::os::raw::c_void,
-    stream_slice: StreamSlice,
-    _data: *const std::os::raw::c_void
+unsafe extern "C" fn rdp_parse_ts(
+    flow: *mut Flow, state: *mut std::os::raw::c_void, _pstate: *mut AppLayerParserState,
+    stream_slice: StreamSlice, _data: *mut std::os::raw::c_void,
 ) -> AppLayerResult {
     let state = cast_pointer!(state, RdpState);
     let buf = stream_slice.as_slice();
     // attempt to parse bytes as `rdp` protocol
-    return state.parse_ts(buf);
+    return state.parse_ts(flow, buf);
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_rdp_parse_tc(
-    _flow: *const Flow, state: *mut std::os::raw::c_void, _pstate: *mut std::os::raw::c_void,
-    stream_slice: StreamSlice,
-    _data: *const std::os::raw::c_void
+unsafe extern "C" fn rdp_parse_tc(
+    flow: *mut Flow, state: *mut std::os::raw::c_void, _pstate: *mut AppLayerParserState,
+    stream_slice: StreamSlice, _data: *mut std::os::raw::c_void,
 ) -> AppLayerResult {
     let state = cast_pointer!(state, RdpState);
     let buf = stream_slice.as_slice();
     // attempt to parse bytes as `rdp` protocol
-    return state.parse_tc(buf);
+    return state.parse_tc(flow, buf);
 }
 
-export_tx_data_get!(rs_rdp_get_tx_data, RdpTransaction);
-export_state_data_get!(rs_rdp_get_state_data, RdpState);
+export_tx_data_get!(rdp_get_tx_data, RdpTransaction);
+export_state_data_get!(rdp_get_state_data, RdpState);
 
 //
 // registration
@@ -463,49 +492,51 @@ export_state_data_get!(rs_rdp_get_state_data, RdpState);
 const PARSER_NAME: &[u8] = b"rdp\0";
 
 #[no_mangle]
-pub unsafe extern "C" fn rs_rdp_register_parser() {
+pub unsafe extern "C" fn SCRegisterRdpParser() {
     let default_port = std::ffi::CString::new("[3389]").unwrap();
     let parser = RustParser {
         name: PARSER_NAME.as_ptr() as *const std::os::raw::c_char,
         default_port: default_port.as_ptr(),
         ipproto: IPPROTO_TCP,
-        probe_ts: Some(rs_rdp_probe_ts_tc),
-        probe_tc: Some(rs_rdp_probe_ts_tc),
+        probe_ts: Some(rdp_probe_ts_tc),
+        probe_tc: Some(rdp_probe_ts_tc),
         min_depth: 0,
         max_depth: 16,
-        state_new: rs_rdp_state_new,
-        state_free: rs_rdp_state_free,
-        tx_free: rs_rdp_state_tx_free,
-        parse_ts: rs_rdp_parse_ts,
-        parse_tc: rs_rdp_parse_tc,
-        get_tx_count: rs_rdp_state_get_tx_count,
-        get_tx: rs_rdp_state_get_tx,
+        state_new: rdp_state_new,
+        state_free: rdp_state_free,
+        tx_free: rdp_state_tx_free,
+        parse_ts: rdp_parse_ts,
+        parse_tc: rdp_parse_tc,
+        get_tx_count: rdp_state_get_tx_count,
+        get_tx: rdp_state_get_tx,
         tx_comp_st_ts: 1,
         tx_comp_st_tc: 1,
-        tx_get_progress: rs_rdp_tx_get_progress,
+        tx_get_progress: rdp_tx_get_progress,
         get_eventinfo: None,
         get_eventinfo_byid: None,
         localstorage_new: None,
         localstorage_free: None,
         get_tx_files: None,
         get_tx_iterator: Some(applayer::state_get_tx_iterator::<RdpState, RdpTransaction>),
-        get_tx_data: rs_rdp_get_tx_data,
-        get_state_data: rs_rdp_get_state_data,
+        get_tx_data: rdp_get_tx_data,
+        get_state_data: rdp_get_state_data,
         apply_tx_config: None,
         flags: 0,
-        truncate: None,
         get_frame_id_by_name: None,
         get_frame_name_by_id: None,
+        get_state_id_by_name: None,
+        get_state_name_by_id: None,
     };
 
     let ip_proto_str = std::ffi::CString::new("tcp").unwrap();
 
-    if AppLayerProtoDetectConfProtoDetectionEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
-        let alproto = AppLayerRegisterProtocolDetection(&parser, 1);
+    if SCAppLayerProtoDetectConfProtoDetectionEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
+        let alproto = applayer_register_protocol_detection(&parser, 1);
         ALPROTO_RDP = alproto;
-        if AppLayerParserConfParserEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
+        if SCAppLayerParserConfParserEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
             let _ = AppLayerRegisterParser(&parser, alproto);
         }
+        SCAppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_RDP);
     }
 }
 
@@ -548,10 +579,16 @@ mod tests {
         ];
         let mut state = RdpState::new();
         // will consume 0, request length + 1
-        assert_eq!(AppLayerResult::incomplete(0, 9), state.parse_ts(buf_1));
+        assert_eq!(
+            AppLayerResult::incomplete(0, 9),
+            state.parse_ts(std::ptr::null_mut(), buf_1)
+        );
         assert_eq!(0, state.transactions.len());
         // exactly aligns with transaction
-        assert_eq!(AppLayerResult::ok(), state.parse_ts(buf_2));
+        assert_eq!(
+            AppLayerResult::ok(),
+            state.parse_ts(std::ptr::null_mut(), buf_2)
+        );
         assert_eq!(1, state.transactions.len());
         let item = RdpTransactionItem::X224ConnectionRequest(X224ConnectionRequest {
             cdt: 0,
@@ -572,7 +609,7 @@ mod tests {
     fn test_parse_ts_other() {
         let buf: &[u8] = &[0x03, 0x00, 0x00, 0x01, 0x00];
         let mut state = RdpState::new();
-        assert_eq!(AppLayerResult::err(), state.parse_ts(buf));
+        assert_eq!(AppLayerResult::err(), state.parse_ts(std::ptr::null_mut(), buf));
     }
 
     #[test]
@@ -581,10 +618,16 @@ mod tests {
         let buf_2: &[u8] = &[0x03, 0x00, 0x00, 0x09, 0x02, 0xf0, 0x80, 0x7f, 0x66];
         let mut state = RdpState::new();
         // will consume 0, request length + 1
-        assert_eq!(AppLayerResult::incomplete(0, 6), state.parse_tc(buf_1));
+        assert_eq!(
+            AppLayerResult::incomplete(0, 6),
+            state.parse_tc(std::ptr::null_mut(), buf_1)
+        );
         assert_eq!(0, state.transactions.len());
         // exactly aligns with transaction
-        assert_eq!(AppLayerResult::ok(), state.parse_tc(buf_2));
+        assert_eq!(
+            AppLayerResult::ok(),
+            state.parse_tc(std::ptr::null_mut(), buf_2)
+        );
         assert_eq!(1, state.transactions.len());
         let item = RdpTransactionItem::McsConnectResponse(McsConnectResponse {});
         assert_eq!(item, state.transactions[0].item);
@@ -594,7 +637,7 @@ mod tests {
     fn test_parse_tc_other() {
         let buf: &[u8] = &[0x03, 0x00, 0x00, 0x01, 0x00];
         let mut state = RdpState::new();
-        assert_eq!(AppLayerResult::err(), state.parse_tc(buf));
+        assert_eq!(AppLayerResult::err(), state.parse_tc(std::ptr::null_mut(), buf));
     }
 
     #[test]

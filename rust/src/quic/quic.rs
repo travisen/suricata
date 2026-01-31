@@ -21,22 +21,43 @@ use super::{
     frames::{Frame, QuicTlsExtension, StreamTag},
     parser::{quic_pkt_num, QuicData, QuicHeader, QuicType},
 };
-use crate::applayer::{self, *};
-use crate::core::{AppProto, Flow, ALPROTO_FAILED, ALPROTO_UNKNOWN, IPPROTO_UDP, Direction};
+use crate::conf::conf_get;
+use crate::encryption::EncryptionHandling;
+use crate::{
+    applayer::{self, *},
+    direction::Direction,
+    flow::Flow,
+    ja4::JA4,
+};
+use crate::{
+    core::{ALPROTO_FAILED, ALPROTO_UNKNOWN, IPPROTO_UDP},
+    ja4::JA4Impl,
+};
 use std::collections::VecDeque;
 use std::ffi::CString;
+use std::str::FromStr;
+use suricata_sys::sys::{
+    AppLayerParserState, AppProto, SCAppLayerParserConfParserEnabled,
+    SCAppLayerParserRegisterLogger, SCAppLayerParserStateSetFlag,
+    SCAppLayerProtoDetectConfProtoDetectionEnabled,
+};
 use tls_parser::TlsExtensionType;
 
 static mut ALPROTO_QUIC: AppProto = ALPROTO_UNKNOWN;
 
+static mut ENCRYPTION_BYPASS_ENABLED: EncryptionHandling =
+    EncryptionHandling::ENCRYPTION_HANDLING_TRACK_ONLY;
+
 const DEFAULT_DCID_LEN: usize = 16;
 const PKT_NUM_BUF_MAX_LEN: usize = 4;
+pub(super) const QUIC_MAX_CRYPTO_FRAG_LEN: u64 = 65535;
 
 #[derive(FromPrimitive, Debug, AppLayerEvent)]
 pub enum QuicEvent {
     FailedDecrypt,
     ErrorOnData,
     ErrorOnHeader,
+    CryptoFragTooLong,
 }
 
 #[derive(Debug)]
@@ -48,6 +69,7 @@ pub struct QuicTransaction {
     pub ua: Option<Vec<u8>>,
     pub extv: Vec<QuicTlsExtension>,
     pub ja3: Option<String>,
+    pub ja4: Option<JA4>,
     pub client: bool,
     tx_data: AppLayerTxData,
 }
@@ -55,9 +77,13 @@ pub struct QuicTransaction {
 impl QuicTransaction {
     fn new(
         header: QuicHeader, data: QuicData, sni: Option<Vec<u8>>, ua: Option<Vec<u8>>,
-        extv: Vec<QuicTlsExtension>, ja3: Option<String>, client: bool,
+        extv: Vec<QuicTlsExtension>, ja3: Option<String>, ja4: Option<JA4>, client: bool,
     ) -> Self {
-	let direction = if client { Direction::ToServer } else { Direction::ToClient };
+        let direction = if client {
+            Direction::ToServer
+        } else {
+            Direction::ToClient
+        };
         let cyu = Cyu::generate(&header, &data.frames);
         QuicTransaction {
             tx_id: 0,
@@ -67,13 +93,18 @@ impl QuicTransaction {
             ua,
             extv,
             ja3,
+            ja4,
             client,
             tx_data: AppLayerTxData::for_direction(direction),
         }
     }
 
     fn new_empty(client: bool, header: QuicHeader) -> Self {
-	let direction = if client { Direction::ToServer } else { Direction::ToClient };
+        let direction = if client {
+            Direction::ToServer
+        } else {
+            Direction::ToClient
+        };
         QuicTransaction {
             tx_id: 0,
             header,
@@ -82,6 +113,7 @@ impl QuicTransaction {
             ua: None,
             extv: Vec::new(),
             ja3: None,
+            ja4: None,
             client,
             tx_data: AppLayerTxData::for_direction(direction),
         }
@@ -92,8 +124,17 @@ pub struct QuicState {
     state_data: AppLayerStateData,
     max_tx_id: u64,
     keys: Option<QuicKeys>,
+    /// crypto fragment data already seen and reassembled to client
+    crypto_frag_tc: Vec<u8>,
+    /// number of bytes set in crypto fragment data to client
+    crypto_fraglen_tc: u32,
+    /// crypto fragment data already seen and reassembled to server
+    crypto_frag_ts: Vec<u8>,
+    /// number of bytes set in crypto fragment data to server
+    crypto_fraglen_ts: u32,
     hello_tc: bool,
     hello_ts: bool,
+    has_retried: bool,
     transactions: VecDeque<QuicTransaction>,
 }
 
@@ -103,8 +144,13 @@ impl Default for QuicState {
             state_data: AppLayerStateData::new(),
             max_tx_id: 0,
             keys: None,
+            crypto_frag_tc: Vec::new(),
+            crypto_frag_ts: Vec::new(),
+            crypto_fraglen_tc: 0,
+            crypto_fraglen_ts: 0,
             hello_tc: false,
             hello_ts: false,
+            has_retried: false,
             transactions: VecDeque::new(),
         }
     }
@@ -132,31 +178,16 @@ impl QuicState {
 
     fn new_tx(
         &mut self, header: QuicHeader, data: QuicData, sni: Option<Vec<u8>>, ua: Option<Vec<u8>>,
-        extb: Vec<QuicTlsExtension>, ja3: Option<String>, client: bool,
+        extb: Vec<QuicTlsExtension>, ja3: Option<String>, ja4: Option<JA4>, client: bool,
+        frag_long: bool,
     ) {
-        let mut tx = QuicTransaction::new(header, data, sni, ua, extb, ja3, client);
+        let mut tx = QuicTransaction::new(header, data, sni, ua, extb, ja3, ja4, client);
         self.max_tx_id += 1;
         tx.tx_id = self.max_tx_id;
-        self.transactions.push_back(tx);
-    }
-
-    fn tx_iterator(
-        &mut self, min_tx_id: u64, state: &mut u64,
-    ) -> Option<(&QuicTransaction, u64, bool)> {
-        let mut index = *state as usize;
-        let len = self.transactions.len();
-
-        while index < len {
-            let tx = &self.transactions[index];
-            if tx.tx_id < min_tx_id + 1 {
-                index += 1;
-                continue;
-            }
-            *state = index as u64;
-            return Some((tx, tx.tx_id - 1, (len - index) > 1));
+        if frag_long {
+            tx.tx_data.set_event(QuicEvent::CryptoFragTooLong as u8);
         }
-
-        return None;
+        self.transactions.push_back(tx);
     }
 
     fn decrypt<'a>(
@@ -208,11 +239,16 @@ impl QuicState {
         return Err(());
     }
 
-    fn handle_frames(&mut self, data: QuicData, header: QuicHeader, to_server: bool) {
+    fn handle_frames(
+        &mut self, data: QuicData, header: QuicHeader, to_server: bool,
+        pstate: *mut AppLayerParserState,
+    ) {
         let mut sni: Option<Vec<u8>> = None;
         let mut ua: Option<Vec<u8>> = None;
         let mut ja3: Option<String> = None;
+        let mut ja4: Option<JA4> = None;
         let mut extv: Vec<QuicTlsExtension> = Vec::new();
+        let mut frag_long = false;
         for frame in &data.frames {
             match frame {
                 Frame::Stream(s) => {
@@ -229,8 +265,36 @@ impl QuicState {
                         }
                     }
                 }
+                Frame::CryptoFrag(frag) => {
+                    // means we had some fragments but not full TLS hello
+                    // save it for a later packet
+                    if to_server {
+                        // use a hardcoded limit to not grow indefinitely
+                        if frag.length < QUIC_MAX_CRYPTO_FRAG_LEN {
+                            self.crypto_frag_ts.clone_from(&frag.data);
+                            self.crypto_fraglen_ts = frag.offset as u32;
+                        } else {
+                            frag_long = true;
+                        }
+                    } else if frag.length < QUIC_MAX_CRYPTO_FRAG_LEN {
+                        self.crypto_frag_tc.clone_from(&frag.data);
+                        self.crypto_fraglen_tc = frag.offset as u32;
+                    } else {
+                        frag_long = true;
+                    }
+                }
                 Frame::Crypto(c) => {
-                    ja3 = Some(c.ja3.clone());
+                    if let Some(ja3str) = &c.ja3 {
+                        ja3 = Some(ja3str.clone());
+                    }
+                    // we only do client fingerprints for now
+                    if to_server {
+                        // our hash is complete, let's only use strings from
+                        // now on
+                        if let Some(ref rja4) = c.hs {
+                            ja4 = JA4::try_new(rja4);
+                        }
+                    }
                     for e in &c.extv {
                         if e.etype == TlsExtensionType::ServerName && !e.values.is_empty() {
                             sni = Some(e.values[0].to_vec());
@@ -238,15 +302,32 @@ impl QuicState {
                     }
                     extv.extend_from_slice(&c.extv);
                     if to_server {
-                        self.hello_ts = true
+                        self.hello_ts = true;
                     } else {
-                        self.hello_tc = true
+                        self.hello_tc = true;
+                    }
+                    if self.hello_tc && self.hello_ts {
+                        let flags = match unsafe { ENCRYPTION_BYPASS_ENABLED } {
+                            EncryptionHandling::ENCRYPTION_HANDLING_BYPASS => {
+                                APP_LAYER_PARSER_NO_INSPECTION
+                                    | APP_LAYER_PARSER_BYPASS_READY
+                            }
+                            EncryptionHandling::ENCRYPTION_HANDLING_TRACK_ONLY => {
+                                APP_LAYER_PARSER_NO_INSPECTION
+                            }
+                            _ => 0,
+                        };
+                        if flags != 0 {
+                            unsafe {
+                                SCAppLayerParserStateSetFlag(pstate, flags);
+                            }
+                        }
                     }
                 }
                 _ => {}
             }
         }
-        self.new_tx(header, data, sni, ua, extv, ja3, to_server);
+        self.new_tx(header, data, sni, ua, extv, ja3, ja4, to_server, frag_long);
     }
 
     fn set_event_notx(&mut self, event: QuicEvent, header: QuicHeader, client: bool) {
@@ -257,7 +338,7 @@ impl QuicState {
         self.transactions.push_back(tx);
     }
 
-    fn parse(&mut self, input: &[u8], to_server: bool) -> bool {
+    fn parse(&mut self, input: &[u8], to_server: bool, pstate: *mut AppLayerParserState) -> bool {
         // so as to loop over multiple quic headers in one packet
         let mut buf = input;
         while !buf.is_empty() {
@@ -275,12 +356,39 @@ impl QuicState {
                     // unprotect/decrypt packet
                     if self.keys.is_none() && header.ty == QuicType::Initial {
                         self.keys = quic_keys_initial(u32::from(header.version), &header.dcid);
+                    } else if !to_server
+                        && self.keys.is_some()
+                        && header.ty == QuicType::Retry
+                        && !self.has_retried
+                    {
+                        // a retry packet discards the current keys, client will resend an initial packet with new keys
+                        self.hello_ts = false;
+                        self.keys = None;
+                        // RFC 9000 17.2.5.2 After the client has received and processed an Initial or Retry packet
+                        // from the server, it MUST discard any subsequent Retry packets that it receives.
+                        self.has_retried = true;
                     }
                     // header.length was checked against rest.len() during parsing
                     let (mut framebuf, next_buf) = rest.split_at(header.length.into());
+                    if header.ty != QuicType::Initial {
+                        // only version is interesting, no frames
+                        self.new_tx(
+                            header,
+                            QuicData { frames: Vec::new() },
+                            None,
+                            None,
+                            Vec::new(),
+                            None,
+                            None,
+                            to_server,
+                            false,
+                        );
+                        buf = next_buf;
+                        continue;
+                    }
                     let hlen = buf.len() - rest.len();
                     let mut output;
-                    if self.keys.is_some() {
+                    if self.keys.is_some() && !framebuf.is_empty() {
                         output = Vec::with_capacity(framebuf.len() + 4);
                         if let Ok(dlen) =
                             self.decrypt(to_server, &header, framebuf, buf, hlen, &mut output)
@@ -294,23 +402,28 @@ impl QuicState {
                     }
                     buf = next_buf;
 
-                    if header.ty != QuicType::Initial {
-                        // only version is interesting, no frames
-                        self.new_tx(
-                            header,
-                            QuicData { frames: Vec::new() },
-                            None,
-                            None,
-                            Vec::new(),
-                            None,
-                            to_server,
-                        );
-                        continue;
+                    let mut frag = Vec::new();
+                    // take the current fragment and reset it in the state
+                    let past_frag = if to_server {
+                        std::mem::swap(&mut self.crypto_frag_ts, &mut frag);
+                        &frag
+                    } else {
+                        std::mem::swap(&mut self.crypto_frag_tc, &mut frag);
+                        &frag
+                    };
+                    let past_fraglen = if to_server {
+                        self.crypto_fraglen_ts
+                    } else {
+                        self.crypto_fraglen_tc
+                    };
+                    if to_server {
+                        self.crypto_fraglen_ts = 0
+                    } else {
+                        self.crypto_fraglen_tc = 0
                     }
-
-                    match QuicData::from_bytes(framebuf) {
+                    match QuicData::from_bytes(framebuf, past_frag, past_fraglen) {
                         Ok(data) => {
-                            self.handle_frames(data, header, to_server);
+                            self.handle_frames(data, header, to_server, pstate);
                         }
                         Err(_e) => {
                             self.set_event_notx(QuicEvent::ErrorOnData, header, to_server);
@@ -328,8 +441,7 @@ impl QuicState {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn rs_quic_state_new(
+extern "C" fn quic_state_new(
     _orig_state: *mut std::os::raw::c_void, _orig_proto: AppProto,
 ) -> *mut std::os::raw::c_void {
     let state = QuicState::new();
@@ -337,22 +449,22 @@ pub extern "C" fn rs_quic_state_new(
     return Box::into_raw(boxed) as *mut _;
 }
 
-#[no_mangle]
-pub extern "C" fn rs_quic_state_free(state: *mut std::os::raw::c_void) {
+extern "C" fn quic_state_free(state: *mut std::os::raw::c_void) {
     // Just unbox...
     std::mem::drop(unsafe { Box::from_raw(state as *mut QuicState) });
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_quic_state_tx_free(state: *mut std::os::raw::c_void, tx_id: u64) {
+unsafe extern "C" fn quic_state_tx_free(state: *mut std::os::raw::c_void, tx_id: u64) {
     let state = cast_pointer!(state, QuicState);
     state.free_tx(tx_id);
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_quic_probing_parser(
+unsafe extern "C" fn quic_probing_parser(
     _flow: *const Flow, _direction: u8, input: *const u8, input_len: u32, _rdir: *mut u8,
 ) -> AppProto {
+    if input.is_null() {
+        return ALPROTO_UNKNOWN;
+    }
     let slice = build_slice!(input, input_len as usize);
 
     if QuicHeader::from_bytes(slice, DEFAULT_DCID_LEN).is_ok() {
@@ -362,38 +474,35 @@ pub unsafe extern "C" fn rs_quic_probing_parser(
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_quic_parse_tc(
-    _flow: *const Flow, state: *mut std::os::raw::c_void, _pstate: *mut std::os::raw::c_void,
-    stream_slice: StreamSlice, _data: *const std::os::raw::c_void,
+unsafe extern "C" fn quic_parse_tc(
+    _flow: *mut Flow, state: *mut std::os::raw::c_void, pstate: *mut AppLayerParserState,
+    stream_slice: StreamSlice, _data: *mut std::os::raw::c_void,
 ) -> AppLayerResult {
     let state = cast_pointer!(state, QuicState);
     let buf = stream_slice.as_slice();
 
-    if state.parse(buf, false) {
+    if state.parse(buf, false, pstate) {
         return AppLayerResult::ok();
     } else {
         return AppLayerResult::err();
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_quic_parse_ts(
-    _flow: *const Flow, state: *mut std::os::raw::c_void, _pstate: *mut std::os::raw::c_void,
-    stream_slice: StreamSlice, _data: *const std::os::raw::c_void,
+unsafe extern "C" fn quic_parse_ts(
+    _flow: *mut Flow, state: *mut std::os::raw::c_void, pstate: *mut AppLayerParserState,
+    stream_slice: StreamSlice, _data: *mut std::os::raw::c_void,
 ) -> AppLayerResult {
     let state = cast_pointer!(state, QuicState);
     let buf = stream_slice.as_slice();
 
-    if state.parse(buf, true) {
+    if state.parse(buf, true, pstate) {
         return AppLayerResult::ok();
     } else {
         return AppLayerResult::err();
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_quic_state_get_tx(
+unsafe extern "C" fn quic_state_get_tx(
     state: *mut std::os::raw::c_void, tx_id: u64,
 ) -> *mut std::os::raw::c_void {
     let state = cast_pointer!(state, QuicState);
@@ -407,95 +516,96 @@ pub unsafe extern "C" fn rs_quic_state_get_tx(
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_quic_state_get_tx_count(state: *mut std::os::raw::c_void) -> u64 {
+unsafe extern "C" fn quic_state_get_tx_count(state: *mut std::os::raw::c_void) -> u64 {
     let state = cast_pointer!(state, QuicState);
     return state.max_tx_id;
 }
 
-#[no_mangle]
-pub extern "C" fn rs_quic_state_progress_completion_status(_direction: u8) -> std::os::raw::c_int {
-    // This parser uses 1 to signal transaction completion status.
-    return 1;
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn rs_quic_tx_get_alstate_progress(
+unsafe extern "C" fn quic_tx_get_alstate_progress(
     tx: *mut std::os::raw::c_void, _direction: u8,
 ) -> std::os::raw::c_int {
     let _tx = cast_pointer!(tx, QuicTransaction);
     return 1;
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_quic_state_get_tx_iterator(
-    _ipproto: u8, _alproto: AppProto, state: *mut std::os::raw::c_void, min_tx_id: u64,
-    _max_tx_id: u64, istate: &mut u64,
-) -> applayer::AppLayerGetTxIterTuple {
-    let state = cast_pointer!(state, QuicState);
-    match state.tx_iterator(min_tx_id, istate) {
-        Some((tx, out_tx_id, has_next)) => {
-            let c_tx = tx as *const _ as *mut _;
-            let ires = applayer::AppLayerGetTxIterTuple::with_values(c_tx, out_tx_id, has_next);
-            return ires;
-        }
-        None => {
-            return applayer::AppLayerGetTxIterTuple::not_found();
-        }
-    }
-}
-
-export_tx_data_get!(rs_quic_get_tx_data, QuicTransaction);
-export_state_data_get!(rs_quic_get_state_data, QuicState);
+export_tx_data_get!(quic_get_tx_data, QuicTransaction);
+export_state_data_get!(quic_get_state_data, QuicState);
 
 // Parser name as a C style string.
 const PARSER_NAME: &[u8] = b"quic\0";
 
+impl State<QuicTransaction> for QuicState {
+    fn get_transaction_count(&self) -> usize {
+        self.transactions.len()
+    }
+
+    fn get_transaction_by_index(&self, index: usize) -> Option<&QuicTransaction> {
+        self.transactions.get(index)
+    }
+}
+
+impl Transaction for QuicTransaction {
+    fn id(&self) -> u64 {
+        self.tx_id
+    }
+}
+
 #[no_mangle]
-pub unsafe extern "C" fn rs_quic_register_parser() {
+pub unsafe extern "C" fn SCRegisterQuicParser() {
     let default_port = CString::new("[443,80]").unwrap();
     let parser = RustParser {
         name: PARSER_NAME.as_ptr() as *const std::os::raw::c_char,
         default_port: default_port.as_ptr(),
         ipproto: IPPROTO_UDP,
-        probe_ts: Some(rs_quic_probing_parser),
-        probe_tc: Some(rs_quic_probing_parser),
+        probe_ts: Some(quic_probing_parser),
+        probe_tc: Some(quic_probing_parser),
         min_depth: 0,
         max_depth: 16,
-        state_new: rs_quic_state_new,
-        state_free: rs_quic_state_free,
-        tx_free: rs_quic_state_tx_free,
-        parse_ts: rs_quic_parse_ts,
-        parse_tc: rs_quic_parse_tc,
-        get_tx_count: rs_quic_state_get_tx_count,
-        get_tx: rs_quic_state_get_tx,
+        state_new: quic_state_new,
+        state_free: quic_state_free,
+        tx_free: quic_state_tx_free,
+        parse_ts: quic_parse_ts,
+        parse_tc: quic_parse_tc,
+        get_tx_count: quic_state_get_tx_count,
+        get_tx: quic_state_get_tx,
         tx_comp_st_ts: 1,
         tx_comp_st_tc: 1,
-        tx_get_progress: rs_quic_tx_get_alstate_progress,
+        tx_get_progress: quic_tx_get_alstate_progress,
         get_eventinfo: Some(QuicEvent::get_event_info),
         get_eventinfo_byid: Some(QuicEvent::get_event_info_by_id),
         localstorage_new: None,
         localstorage_free: None,
         get_tx_files: None,
-        get_tx_iterator: Some(rs_quic_state_get_tx_iterator),
-        get_tx_data: rs_quic_get_tx_data,
-        get_state_data: rs_quic_get_state_data,
+        get_tx_iterator: Some(
+            applayer::state_get_tx_iterator::<QuicState, QuicTransaction>,
+        ),
+        get_tx_data: quic_get_tx_data,
+        get_state_data: quic_get_state_data,
         apply_tx_config: None,
         flags: 0,
-        truncate: None,
         get_frame_id_by_name: None,
         get_frame_name_by_id: None,
+        get_state_id_by_name: None,
+        get_state_name_by_id: None,
     };
 
     let ip_proto_str = CString::new("udp").unwrap();
 
-    if AppLayerProtoDetectConfProtoDetectionEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
-        let alproto = AppLayerRegisterProtocolDetection(&parser, 1);
+    if SCAppLayerProtoDetectConfProtoDetectionEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
+        let alproto = applayer_register_protocol_detection(&parser, 1);
         ALPROTO_QUIC = alproto;
-        if AppLayerParserConfParserEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
+        if SCAppLayerParserConfParserEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
             let _ = AppLayerRegisterParser(&parser, alproto);
+            if let Some(val) = conf_get("app-layer.protocols.quic.encryption-handling") {
+                if let Ok(eh) = EncryptionHandling::from_str(val) {
+                    unsafe { ENCRYPTION_BYPASS_ENABLED = eh };
+                } else {
+                    SCFatalErrorOnInit!("Unknown value {} for quic.encryption-handling.", val);
+                }
+            }
         }
         SCLogDebug!("Rust quic parser registered.");
+        SCAppLayerParserRegisterLogger(IPPROTO_UDP, ALPROTO_QUIC);
     } else {
         SCLogDebug!("Protocol detector and parser disabled for quic.");
     }

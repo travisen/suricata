@@ -549,7 +549,7 @@ int SCTimeToStringPattern (time_t epoch, const char *pattern, char *str, size_t 
         return 1;
     }
 
-    int r = strftime(buffer, sizeof(buffer), pattern, tp);
+    size_t r = strftime(buffer, sizeof(buffer), pattern, tp);
     if (r == 0) {
         return 1;
     }
@@ -643,5 +643,5 @@ uint64_t SCTimespecAsEpochMillis(const struct timespec* ts)
 
 uint64_t TimeDifferenceMicros(struct timeval t0, struct timeval t1)
 {
-    return (uint64_t)(t1.tv_sec - t0.tv_sec) * 1000000L + (t1.tv_usec - t1.tv_usec);
+    return (uint64_t)(t1.tv_sec - t0.tv_sec) * 1000000L + (t1.tv_usec - t0.tv_usec);
 }

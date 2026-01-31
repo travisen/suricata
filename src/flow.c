@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2013 Open Information Security Foundation
+/* Copyright (C) 2007-2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -31,42 +31,34 @@
 #include "decode.h"
 #include "conf.h"
 #include "threadvars.h"
-#include "tm-threads.h"
-#include "runmodes.h"
 
 #include "util-random.h"
 #include "util-time.h"
 
 #include "flow.h"
+#include "flow-bindgen.h"
 #include "flow-queue.h"
 #include "flow-hash.h"
 #include "flow-util.h"
-#include "flow-var.h"
 #include "flow-private.h"
-#include "flow-timeout.h"
 #include "flow-manager.h"
 #include "flow-storage.h"
 #include "flow-bypass.h"
 #include "flow-spare-pool.h"
+#include "flow-callbacks.h"
 
 #include "stream-tcp-private.h"
-#include "stream-tcp-reassemble.h"
-#include "stream-tcp.h"
 
 #include "util-unittest.h"
 #include "util-unittest-helper.h"
 #include "util-byte.h"
 #include "util-misc.h"
 #include "util-macset.h"
+#include "util-flow-rate.h"
 
 #include "util-debug.h"
-#include "util-privs.h"
-#include "util-validate.h"
 
-#include "detect.h"
-#include "detect-engine-state.h"
-#include "stream.h"
-
+#include "rust.h"
 #include "app-layer-parser.h"
 #include "app-layer-expectation.h"
 
@@ -108,9 +100,6 @@ void FlowRegisterTests(void);
 void FlowInitFlowProto(void);
 int FlowSetProtoFreeFunc(uint8_t, void (*Free)(void *));
 
-/* Run mode selected at suricata.c */
-extern int run_mode;
-
 /**
  *  \brief Update memcap value
  *
@@ -143,6 +132,11 @@ uint64_t FlowGetMemuse(void)
     return memusecopy;
 }
 
+enum ExceptionPolicy FlowGetMemcapExceptionPolicy(void)
+{
+    return flow_config.memcap_policy;
+}
+
 void FlowCleanupAppLayer(Flow *f)
 {
     if (f == NULL || f->proto == 0)
@@ -151,19 +145,6 @@ void FlowCleanupAppLayer(Flow *f)
     AppLayerParserStateCleanup(f, f->alstate, f->alparser);
     f->alstate = NULL;
     f->alparser = NULL;
-    return;
-}
-
-/** \brief Set the IPOnly scanned flag for 'direction'.
-  *
-  * \param f Flow to set the flag in
-  * \param direction direction to set the flag in
-  */
-void FlowSetIPOnlyFlag(Flow *f, int direction)
-{
-    direction ? (f->flags |= FLOW_TOSERVER_IPONLY_SET) :
-        (f->flags |= FLOW_TOCLIENT_IPONLY_SET);
-    return;
 }
 
 /** \brief Set flag to indicate that flow has alerts
@@ -187,23 +168,6 @@ int FlowHasAlerts(const Flow *f)
         return 1;
     }
 
-    return 0;
-}
-
-bool FlowHasGaps(const Flow *f, uint8_t way)
-{
-    if (f->proto == IPPROTO_TCP) {
-        TcpSession *ssn = (TcpSession *)f->protoctx;
-        if (ssn != NULL) {
-            if (way == STREAM_TOCLIENT) {
-                if (ssn->server.flags & STREAMTCP_STREAM_FLAG_HAS_GAP)
-                    return 1;
-            } else {
-                if (ssn->client.flags & STREAMTCP_STREAM_FLAG_HAS_GAP)
-                    return 1;
-            }
-        }
-    }
     return 0;
 }
 
@@ -242,7 +206,6 @@ int FlowChangeProto(Flow *f)
 static inline void FlowSwapFlags(Flow *f)
 {
     SWAP_FLAGS(f->flags, FLOW_TO_SRC_SEEN, FLOW_TO_DST_SEEN);
-    SWAP_FLAGS(f->flags, FLOW_TOSERVER_IPONLY_SET, FLOW_TOCLIENT_IPONLY_SET);
     SWAP_FLAGS(f->flags, FLOW_SGH_TOSERVER, FLOW_SGH_TOCLIENT);
 
     SWAP_FLAGS(f->flags, FLOW_TOSERVER_DROP_LOGGED, FLOW_TOCLIENT_DROP_LOGGED);
@@ -260,7 +223,6 @@ static inline void FlowSwapFileFlags(Flow *f)
     SWAP_FLAGS(f->file_flags, FLOWFILE_NO_MD5_TS, FLOWFILE_NO_MD5_TC);
     SWAP_FLAGS(f->file_flags, FLOWFILE_NO_SHA1_TS, FLOWFILE_NO_SHA1_TC);
     SWAP_FLAGS(f->file_flags, FLOWFILE_NO_SHA256_TS, FLOWFILE_NO_SHA256_TC);
-    SWAP_FLAGS(f->file_flags, FLOWFILE_NO_SIZE_TS, FLOWFILE_NO_SIZE_TC);
 }
 
 static inline void TcpStreamFlowSwap(Flow *f)
@@ -291,6 +253,8 @@ void FlowSwap(Flow *f)
     FlowSwapFlags(f);
     FlowSwapFileFlags(f);
 
+    SWAP_VARS(FlowThreadId, f->thread_id[0], f->thread_id[1]);
+
     if (f->proto == IPPROTO_TCP) {
         TcpStreamFlowSwap(f);
     }
@@ -305,6 +269,13 @@ void FlowSwap(Flow *f)
 
     SWAP_VARS(uint32_t, f->todstpktcnt, f->tosrcpktcnt);
     SWAP_VARS(uint64_t, f->todstbytecnt, f->tosrcbytecnt);
+
+    if (MacSetFlowStorageEnabled()) {
+        MacSet *ms = FlowGetStorageById(f, MacSetGetFlowStorageID());
+        if (ms != NULL) {
+            MacSetSwap(ms);
+        }
+    }
 }
 
 /**
@@ -353,8 +324,8 @@ int FlowGetPacketDirection(const Flow *f, const Packet *p)
  */
 static inline int FlowUpdateSeenFlag(const Packet *p)
 {
-    if (PKT_IS_ICMPV4(p)) {
-        if (ICMPV4_IS_ERROR_MSG(p)) {
+    if (PacketIsICMPv4(p)) {
+        if (ICMPV4_IS_ERROR_MSG(p->icmp_s.type)) {
             return 0;
         }
     }
@@ -362,7 +333,7 @@ static inline int FlowUpdateSeenFlag(const Packet *p)
     return 1;
 }
 
-static inline void FlowUpdateTtlTS(Flow *f, Packet *p, uint8_t ttl)
+static inline void FlowUpdateTtlTS(Flow *f, uint8_t ttl)
 {
     if (f->min_ttl_toserver == 0) {
         f->min_ttl_toserver = ttl;
@@ -372,7 +343,7 @@ static inline void FlowUpdateTtlTS(Flow *f, Packet *p, uint8_t ttl)
     f->max_ttl_toserver = MAX(f->max_ttl_toserver, ttl);
 }
 
-static inline void FlowUpdateTtlTC(Flow *f, Packet *p, uint8_t ttl)
+static inline void FlowUpdateTtlTC(Flow *f, uint8_t ttl)
 {
     if (f->min_ttl_toclient == 0) {
         f->min_ttl_toclient = ttl;
@@ -382,10 +353,50 @@ static inline void FlowUpdateTtlTC(Flow *f, Packet *p, uint8_t ttl)
     f->max_ttl_toclient = MAX(f->max_ttl_toclient, ttl);
 }
 
-static inline void FlowUpdateEthernet(ThreadVars *tv, DecodeThreadVars *dtv,
-                                      Flow *f, EthernetHdr *ethh, bool toserver)
+static inline void FlowUpdateFlowRate(
+        ThreadVars *tv, DecodeThreadVars *dtv, Flow *f, const Packet *p, int dir)
 {
-    if (ethh && MacSetFlowStorageEnabled()) {
+    if (FlowRateStorageEnabled()) {
+        /* No need to update the struct if flow is already marked as elephant flow */
+        if ((dir == TOSERVER) && (f->flags & FLOW_IS_ELEPHANT_TOSERVER))
+            return;
+        if ((dir == TOCLIENT) && (f->flags & FLOW_IS_ELEPHANT_TOCLIENT))
+            return;
+        FlowRateStore *frs = FlowGetStorageById(f, FlowRateGetStorageID());
+        if (frs != NULL) {
+            FlowRateStoreUpdate(frs, p->ts, GET_PKT_LEN(p), dir);
+            bool fr_exceeds = FlowRateIsExceeding(frs, dir);
+            if (fr_exceeds) {
+                SCLogDebug("Flow rate for flow %p exceeds the configured values, marking it as an "
+                           "elephant flow",
+                        f);
+                if (dir == TOSERVER) {
+                    f->flags |= FLOW_IS_ELEPHANT_TOSERVER;
+                    if (tv != NULL) {
+                        if ((f->flags & FLOW_IS_ELEPHANT_TOCLIENT) == 0) {
+                            StatsCounterIncr(&tv->stats, dtv->counter_flow_elephant);
+                        }
+                        StatsCounterIncr(&tv->stats, dtv->counter_flow_elephant_toserver);
+                    }
+                } else {
+                    f->flags |= FLOW_IS_ELEPHANT_TOCLIENT;
+                    if (tv != NULL) {
+                        if ((f->flags & FLOW_IS_ELEPHANT_TOSERVER) == 0) {
+                            StatsCounterIncr(&tv->stats, dtv->counter_flow_elephant);
+                        }
+                        StatsCounterIncr(&tv->stats, dtv->counter_flow_elephant_toclient);
+                    }
+                }
+            }
+        }
+    }
+}
+
+static inline void FlowUpdateEthernet(
+        ThreadVars *tv, DecodeThreadVars *dtv, Flow *f, const Packet *p, bool toserver)
+{
+    if (PacketIsEthernet(p) && MacSetFlowStorageEnabled()) {
+        const EthernetHdr *ethh = PacketGetEthernet(p);
         MacSet *ms = FlowGetStorageById(f, MacSetGetFlowStorageID());
         if (ms != NULL) {
             if (toserver) {
@@ -412,7 +423,7 @@ static inline void FlowUpdateEthernet(ThreadVars *tv, DecodeThreadVars *dtv,
  */
 void FlowHandlePacketUpdate(Flow *f, Packet *p, ThreadVars *tv, DecodeThreadVars *dtv)
 {
-    SCLogDebug("packet %"PRIu64" -- flow %p", p->pcap_cnt, f);
+    SCLogDebug("packet %" PRIu64 " -- flow %p", PcapPacketCntGet(p), f);
 
     const int pkt_dir = FlowGetPacketDirection(f, p);
 #ifdef CAPTURE_OFFLOAD
@@ -423,15 +434,13 @@ void FlowHandlePacketUpdate(Flow *f, Packet *p, ThreadVars *tv, DecodeThreadVars
         /* update the last seen timestamp of this flow */
         if (SCTIME_CMP_GT(p->ts, f->lastts)) {
             f->lastts = p->ts;
-            const uint32_t timeout_at = (uint32_t)SCTIME_SECS(f->lastts) + f->timeout_policy;
-            if (timeout_at != f->timeout_at) {
-                f->timeout_at = timeout_at;
-            }
         }
 #ifdef CAPTURE_OFFLOAD
     } else {
+        FlowProtoTimeoutPtr flow_timeouts = SC_ATOMIC_GET(flow_timeouts);
         /* still seeing packet, we downgrade to local bypass */
-        if (SCTIME_SECS(p->ts) - SCTIME_SECS(f->lastts) > FLOW_BYPASSED_TIMEOUT / 2) {
+        if (SCTIME_SECS(p->ts) - SCTIME_SECS(f->lastts) >
+                flow_timeouts[f->protomap].bypassed_timeout / 2) {
             SCLogDebug("Downgrading flow to local bypass");
             f->lastts = p->ts;
             FlowUpdateState(f, FLOW_STATE_LOCAL_BYPASSED);
@@ -448,11 +457,13 @@ void FlowHandlePacketUpdate(Flow *f, Packet *p, ThreadVars *tv, DecodeThreadVars
     if (pkt_dir == TOSERVER) {
         f->todstpktcnt++;
         f->todstbytecnt += GET_PKT_LEN(p);
+        FlowUpdateFlowRate(tv, dtv, f, p, TOSERVER);
         p->flowflags = FLOW_PKT_TOSERVER;
         if (!(f->flags & FLOW_TO_DST_SEEN)) {
             if (FlowUpdateSeenFlag(p)) {
                 f->flags |= FLOW_TO_DST_SEEN;
                 p->flowflags |= FLOW_PKT_TOSERVER_FIRST;
+                p->pkt_hooks |= BIT_U16(SIGNATURE_HOOK_PKT_FLOW_START);
             }
         }
         /* xfer proto detect ts flag to first packet in ts dir */
@@ -460,21 +471,25 @@ void FlowHandlePacketUpdate(Flow *f, Packet *p, ThreadVars *tv, DecodeThreadVars
             f->flags &= ~FLOW_PROTO_DETECT_TS_DONE;
             p->flags |= PKT_PROTO_DETECT_TS_DONE;
         }
-        FlowUpdateEthernet(tv, dtv, f, p->ethh, true);
+        FlowUpdateEthernet(tv, dtv, f, p, true);
         /* update flow's ttl fields if needed */
-        if (PKT_IS_IPV4(p)) {
-            FlowUpdateTtlTS(f, p, IPV4_GET_IPTTL(p));
-        } else if (PKT_IS_IPV6(p)) {
-            FlowUpdateTtlTS(f, p, IPV6_GET_HLIM(p));
+        if (PacketIsIPv4(p)) {
+            const IPV4Hdr *ip4h = PacketGetIPv4(p);
+            FlowUpdateTtlTS(f, IPV4_GET_RAW_IPTTL(ip4h));
+        } else if (PacketIsIPv6(p)) {
+            const IPV6Hdr *ip6h = PacketGetIPv6(p);
+            FlowUpdateTtlTS(f, IPV6_GET_RAW_HLIM(ip6h));
         }
     } else {
         f->tosrcpktcnt++;
         f->tosrcbytecnt += GET_PKT_LEN(p);
+        FlowUpdateFlowRate(tv, dtv, f, p, TOCLIENT);
         p->flowflags = FLOW_PKT_TOCLIENT;
         if (!(f->flags & FLOW_TO_SRC_SEEN)) {
             if (FlowUpdateSeenFlag(p)) {
                 f->flags |= FLOW_TO_SRC_SEEN;
                 p->flowflags |= FLOW_PKT_TOCLIENT_FIRST;
+                p->pkt_hooks |= BIT_U16(SIGNATURE_HOOK_PKT_FLOW_START);
             }
         }
         /* xfer proto detect tc flag to first packet in tc dir */
@@ -482,13 +497,18 @@ void FlowHandlePacketUpdate(Flow *f, Packet *p, ThreadVars *tv, DecodeThreadVars
             f->flags &= ~FLOW_PROTO_DETECT_TC_DONE;
             p->flags |= PKT_PROTO_DETECT_TC_DONE;
         }
-        FlowUpdateEthernet(tv, dtv, f, p->ethh, false);
+        FlowUpdateEthernet(tv, dtv, f, p, false);
         /* update flow's ttl fields if needed */
-        if (PKT_IS_IPV4(p)) {
-            FlowUpdateTtlTC(f, p, IPV4_GET_IPTTL(p));
-        } else if (PKT_IS_IPV6(p)) {
-            FlowUpdateTtlTC(f, p, IPV6_GET_HLIM(p));
+        if (PacketIsIPv4(p)) {
+            const IPV4Hdr *ip4h = PacketGetIPv4(p);
+            FlowUpdateTtlTC(f, IPV4_GET_RAW_IPTTL(ip4h));
+        } else if (PacketIsIPv6(p)) {
+            const IPV6Hdr *ip6h = PacketGetIPv6(p);
+            FlowUpdateTtlTC(f, IPV6_GET_RAW_HLIM(ip6h));
         }
+    }
+    if (f->thread_id[pkt_dir] == 0) {
+        f->thread_id[pkt_dir] = (FlowThreadId)tv->id;
     }
 
     if (f->flow_state == FLOW_STATE_ESTABLISHED) {
@@ -505,21 +525,25 @@ void FlowHandlePacketUpdate(Flow *f, Packet *p, ThreadVars *tv, DecodeThreadVars
         SCLogDebug("pkt %p FLOW_PKT_ESTABLISHED", p);
         p->flowflags |= FLOW_PKT_ESTABLISHED;
 
-        FlowUpdateState(f, FLOW_STATE_ESTABLISHED);
+        if (
+#ifdef CAPTURE_OFFLOAD
+                (f->flow_state != FLOW_STATE_CAPTURE_BYPASSED) &&
+#endif
+                (f->flow_state != FLOW_STATE_LOCAL_BYPASSED)) {
+            FlowUpdateState(f, FLOW_STATE_ESTABLISHED);
+        }
     }
 
     if (f->flags & FLOW_ACTION_DROP) {
         PacketDrop(p, ACTION_DROP, PKT_DROP_REASON_FLOW_DROP);
     }
-    /*set the detection bypass flags*/
-    if (f->flags & FLOW_NOPACKET_INSPECTION) {
-        SCLogDebug("setting FLOW_NOPACKET_INSPECTION flag on flow %p", f);
-        DecodeSetNoPacketInspectionFlag(p);
-    }
+
     if (f->flags & FLOW_NOPAYLOAD_INSPECTION) {
         SCLogDebug("setting FLOW_NOPAYLOAD_INSPECTION flag on flow %p", f);
         DecodeSetNoPayloadInspectionFlag(p);
     }
+
+    SCFlowRunUpdateCallbacks(tv, f, p);
 }
 
 /** \brief Entry point for packet flow handling
@@ -564,7 +588,7 @@ void FlowInitConfig(bool quiet)
     /* If we have specific config, overwrite the defaults with them,
      * otherwise, leave the default values */
     intmax_t val = 0;
-    if (ConfGetInt("flow.emergency-recovery", &val) == 1) {
+    if (SCConfGetInt("flow.emergency-recovery", &val) == 1) {
         if (val <= 100 && val >= 1) {
             flow_config.emergency_recovery = (uint8_t)val;
         } else {
@@ -583,8 +607,7 @@ void FlowInitConfig(bool quiet)
 
     /** set config values for memcap, prealloc and hash_size */
     uint64_t flow_memcap_copy = 0;
-    if ((ConfGet("flow.memcap", &conf_val)) == 1)
-    {
+    if ((SCConfGet("flow.memcap", &conf_val)) == 1) {
         if (conf_val == NULL) {
             FatalError("Invalid value for flow.memcap: NULL");
         }
@@ -598,8 +621,7 @@ void FlowInitConfig(bool quiet)
             SC_ATOMIC_SET(flow_config.memcap, flow_memcap_copy);
         }
     }
-    if ((ConfGet("flow.hash-size", &conf_val)) == 1)
-    {
+    if ((SCConfGet("flow.hash-size", &conf_val)) == 1) {
         if (conf_val == NULL) {
             FatalError("Invalid value for flow.hash-size: NULL");
         }
@@ -611,8 +633,7 @@ void FlowInitConfig(bool quiet)
                        "1-4294967295");
         }
     }
-    if ((ConfGet("flow.prealloc", &conf_val)) == 1)
-    {
+    if ((SCConfGet("flow.prealloc", &conf_val)) == 1) {
         if (conf_val == NULL) {
             FatalError("Invalid value for flow.prealloc: NULL");
         }
@@ -671,7 +692,6 @@ void FlowInitConfig(bool quiet)
     SCLogConfig("flow size %u, memcap allows for %" PRIu64 " flows. Per hash row in perfect "
                 "conditions %" PRIu64,
             sz, flow_memcap_copy / sz, (flow_memcap_copy / sz) / flow_config.hash_size);
-    return;
 }
 
 void FlowReset(void)
@@ -728,7 +748,7 @@ void FlowShutdown(void)
     (void) SC_ATOMIC_SUB(flow_memuse, flow_config.hash_size * sizeof(FlowBucket));
     FlowQueueDestroy(&flow_recycle_q);
     FlowSparePoolDestroy();
-    return;
+    DEBUG_VALIDATE_BUG_ON(SC_ATOMIC_GET(flow_memuse) != 0);
 }
 
 /**
@@ -786,25 +806,22 @@ void FlowInitFlowProto(void)
     const char *emergency_closed = NULL;
     const char *emergency_bypassed = NULL;
 
-    ConfNode *flow_timeouts = ConfGetNode("flow-timeouts");
+    SCConfNode *flow_timeouts = SCConfGetNode("flow-timeouts");
     if (flow_timeouts != NULL) {
-        ConfNode *proto = NULL;
+        SCConfNode *proto = NULL;
         uint32_t configval = 0;
 
         /* Defaults. */
-        proto = ConfNodeLookupChild(flow_timeouts, "default");
+        proto = SCConfNodeLookupChild(flow_timeouts, "default");
         if (proto != NULL) {
-            new = ConfNodeLookupChildValue(proto, "new");
-            established = ConfNodeLookupChildValue(proto, "established");
-            closed = ConfNodeLookupChildValue(proto, "closed");
-            bypassed = ConfNodeLookupChildValue(proto, "bypassed");
-            emergency_new = ConfNodeLookupChildValue(proto, "emergency-new");
-            emergency_established = ConfNodeLookupChildValue(proto,
-                "emergency-established");
-            emergency_closed = ConfNodeLookupChildValue(proto,
-                "emergency-closed");
-            emergency_bypassed = ConfNodeLookupChildValue(proto,
-                "emergency-bypassed");
+            new = SCConfNodeLookupChildValue(proto, "new");
+            established = SCConfNodeLookupChildValue(proto, "established");
+            closed = SCConfNodeLookupChildValue(proto, "closed");
+            bypassed = SCConfNodeLookupChildValue(proto, "bypassed");
+            emergency_new = SCConfNodeLookupChildValue(proto, "emergency-new");
+            emergency_established = SCConfNodeLookupChildValue(proto, "emergency-established");
+            emergency_closed = SCConfNodeLookupChildValue(proto, "emergency-closed");
+            emergency_bypassed = SCConfNodeLookupChildValue(proto, "emergency-bypassed");
 
             if (new != NULL &&
                 StringParseUint32(&configval, 10, strlen(new), new) > 0) {
@@ -860,19 +877,16 @@ void FlowInitFlowProto(void)
         }
 
         /* TCP. */
-        proto = ConfNodeLookupChild(flow_timeouts, "tcp");
+        proto = SCConfNodeLookupChild(flow_timeouts, "tcp");
         if (proto != NULL) {
-            new = ConfNodeLookupChildValue(proto, "new");
-            established = ConfNodeLookupChildValue(proto, "established");
-            closed = ConfNodeLookupChildValue(proto, "closed");
-            bypassed = ConfNodeLookupChildValue(proto, "bypassed");
-            emergency_new = ConfNodeLookupChildValue(proto, "emergency-new");
-            emergency_established = ConfNodeLookupChildValue(proto,
-                "emergency-established");
-            emergency_closed = ConfNodeLookupChildValue(proto,
-                "emergency-closed");
-            emergency_bypassed = ConfNodeLookupChildValue(proto,
-                "emergency-bypassed");
+            new = SCConfNodeLookupChildValue(proto, "new");
+            established = SCConfNodeLookupChildValue(proto, "established");
+            closed = SCConfNodeLookupChildValue(proto, "closed");
+            bypassed = SCConfNodeLookupChildValue(proto, "bypassed");
+            emergency_new = SCConfNodeLookupChildValue(proto, "emergency-new");
+            emergency_established = SCConfNodeLookupChildValue(proto, "emergency-established");
+            emergency_closed = SCConfNodeLookupChildValue(proto, "emergency-closed");
+            emergency_bypassed = SCConfNodeLookupChildValue(proto, "emergency-bypassed");
 
             if (new != NULL &&
                 StringParseUint32(&configval, 10, strlen(new), new) > 0) {
@@ -928,16 +942,14 @@ void FlowInitFlowProto(void)
         }
 
         /* UDP. */
-        proto = ConfNodeLookupChild(flow_timeouts, "udp");
+        proto = SCConfNodeLookupChild(flow_timeouts, "udp");
         if (proto != NULL) {
-            new = ConfNodeLookupChildValue(proto, "new");
-            established = ConfNodeLookupChildValue(proto, "established");
-            bypassed = ConfNodeLookupChildValue(proto, "bypassed");
-            emergency_new = ConfNodeLookupChildValue(proto, "emergency-new");
-            emergency_established = ConfNodeLookupChildValue(proto,
-                "emergency-established");
-            emergency_bypassed = ConfNodeLookupChildValue(proto,
-                "emergency-bypassed");
+            new = SCConfNodeLookupChildValue(proto, "new");
+            established = SCConfNodeLookupChildValue(proto, "established");
+            bypassed = SCConfNodeLookupChildValue(proto, "bypassed");
+            emergency_new = SCConfNodeLookupChildValue(proto, "emergency-new");
+            emergency_established = SCConfNodeLookupChildValue(proto, "emergency-established");
+            emergency_bypassed = SCConfNodeLookupChildValue(proto, "emergency-bypassed");
 
             if (new != NULL &&
                 StringParseUint32(&configval, 10, strlen(new), new) > 0) {
@@ -980,16 +992,14 @@ void FlowInitFlowProto(void)
         }
 
         /* ICMP. */
-        proto = ConfNodeLookupChild(flow_timeouts, "icmp");
+        proto = SCConfNodeLookupChild(flow_timeouts, "icmp");
         if (proto != NULL) {
-            new = ConfNodeLookupChildValue(proto, "new");
-            established = ConfNodeLookupChildValue(proto, "established");
-            bypassed = ConfNodeLookupChildValue(proto, "bypassed");
-            emergency_new = ConfNodeLookupChildValue(proto, "emergency-new");
-            emergency_established = ConfNodeLookupChildValue(proto,
-                "emergency-established");
-            emergency_bypassed = ConfNodeLookupChildValue(proto,
-                "emergency-bypassed");
+            new = SCConfNodeLookupChildValue(proto, "new");
+            established = SCConfNodeLookupChildValue(proto, "established");
+            bypassed = SCConfNodeLookupChildValue(proto, "bypassed");
+            emergency_new = SCConfNodeLookupChildValue(proto, "emergency-new");
+            emergency_established = SCConfNodeLookupChildValue(proto, "emergency-established");
+            emergency_bypassed = SCConfNodeLookupChildValue(proto, "emergency-bypassed");
 
             if (new != NULL &&
                 StringParseUint32(&configval, 10, strlen(new), new) > 0) {
@@ -1033,7 +1043,7 @@ void FlowInitFlowProto(void)
     }
 
     /* validate and if needed update emergency timeout values */
-    for (int i = 0; i < FLOW_PROTO_MAX; i++) {
+    for (uint8_t i = 0; i < FLOW_PROTO_MAX; i++) {
         const FlowProtoTimeout *n = &flow_timeouts_normal[i];
         FlowProtoTimeout *e = &flow_timeouts_emerg[i];
 
@@ -1066,7 +1076,7 @@ void FlowInitFlowProto(void)
         }
     }
 
-    for (int i = 0; i < FLOW_PROTO_MAX; i++) {
+    for (uint8_t i = 0; i < FLOW_PROTO_MAX; i++) {
         FlowProtoTimeout *n = &flow_timeouts_normal[i];
         FlowProtoTimeout *e = &flow_timeouts_emerg[i];
         FlowProtoTimeout *d = &flow_timeouts_delta[i];
@@ -1098,8 +1108,6 @@ void FlowInitFlowProto(void)
         SCLogDebug("deltas: new: -%u est: -%u closed: -%u bypassed: -%u",
                 d->new_timeout, d->est_timeout, d->closed_timeout, d->bypassed_timeout);
     }
-
-    return;
 }
 
 /**
@@ -1186,9 +1194,6 @@ void FlowUpdateState(Flow *f, const enum FlowState s)
         const uint32_t timeout_policy = FlowGetTimeoutPolicy(f);
         if (timeout_policy != f->timeout_policy) {
             f->timeout_policy = timeout_policy;
-            const uint32_t timeout_at = (uint32_t)SCTIME_SECS(f->lastts) + timeout_policy;
-            if (timeout_at != f->timeout_at)
-                f->timeout_at = timeout_at;
         }
     }
 #ifdef UNITTESTS
@@ -1209,7 +1214,7 @@ void FlowUpdateState(Flow *f, const enum FlowState s)
  * parts into output pointers to make it simpler to call from Rust
  * over FFI using only basic data types.
  */
-void FlowGetLastTimeAsParts(Flow *flow, uint64_t *secs, uint64_t *usecs)
+void SCFlowGetLastTimeAsParts(const Flow *flow, uint64_t *secs, uint64_t *usecs)
 {
     *secs = (uint64_t)SCTIME_SECS(flow->lastts);
     *usecs = (uint64_t)SCTIME_USECS(flow->lastts);
@@ -1221,7 +1226,7 @@ void FlowGetLastTimeAsParts(Flow *flow, uint64_t *secs, uint64_t *usecs)
  * A function to get the flow sport useful when the caller only has an
  * opaque pointer to the flow structure.
  */
-uint16_t FlowGetSourcePort(Flow *flow)
+uint16_t SCFlowGetSourcePort(const Flow *flow)
 {
     return flow->sp;
 }
@@ -1233,7 +1238,7 @@ uint16_t FlowGetSourcePort(Flow *flow)
  * opaque pointer to the flow structure.
  */
 
-uint16_t FlowGetDestinationPort(Flow *flow)
+uint16_t SCFlowGetDestinationPort(const Flow *flow)
 {
     return flow->dp;
 }
@@ -1244,7 +1249,7 @@ uint16_t FlowGetDestinationPort(Flow *flow)
  * opaque pointer to the flow structure.
  */
 
-uint32_t FlowGetFlags(Flow *flow)
+uint32_t SCFlowGetFlags(const Flow *flow)
 {
     return flow->flags;
 }

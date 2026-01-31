@@ -38,7 +38,7 @@ OutputJsonThreadCtx *CreateEveThreadCtx(ThreadVars *t, OutputJsonCtx *ctx)
         goto error;
     }
 
-    thread->file_ctx = LogFileEnsureExists(ctx->file_ctx);
+    thread->file_ctx = LogFileEnsureExists(t->id, ctx->file_ctx);
     if (!thread->file_ctx) {
         goto error;
     }
@@ -70,7 +70,16 @@ static void OutputJsonLogDeInitCtxSub(OutputCtx *output_ctx)
     SCFree(output_ctx);
 }
 
-OutputInitResult OutputJsonLogInitSub(ConfNode *conf, OutputCtx *parent_ctx)
+int OutputJsonLogFlush(ThreadVars *tv, void *thread_data, const Packet *p)
+{
+    OutputJsonThreadCtx *aft = thread_data;
+    LogFileCtx *file_ctx = aft->ctx->file_ctx;
+    SCLogDebug("%s flushing %s", tv->name, file_ctx->filename);
+    LogFileFlush(file_ctx);
+    return 0;
+}
+
+OutputInitResult OutputJsonLogInitSub(SCConfNode *conf, OutputCtx *parent_ctx)
 {
     OutputInitResult result = { NULL, false };
 
@@ -104,7 +113,7 @@ TmEcode JsonLogThreadInit(ThreadVars *t, const void *initdata, void **data)
     }
 
     thread->ctx = ((OutputCtx *)initdata)->data;
-    thread->file_ctx = LogFileEnsureExists(thread->ctx->file_ctx);
+    thread->file_ctx = LogFileEnsureExists(t->id, thread->ctx->file_ctx);
     if (!thread->file_ctx) {
         goto error_exit;
     }

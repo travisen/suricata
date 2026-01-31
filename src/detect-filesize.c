@@ -66,6 +66,8 @@ void DetectFilesizeRegister(void)
     sigmatch_table[DETECT_FILESIZE].FileMatch = DetectFilesizeMatch;
     sigmatch_table[DETECT_FILESIZE].Setup = DetectFilesizeSetup;
     sigmatch_table[DETECT_FILESIZE].Free = DetectFilesizeFree;
+    sigmatch_table[DETECT_FILESIZE].flags =
+            SIGMATCH_SUPPORT_DIR | SIGMATCH_INFO_UINT64 | SIGMATCH_INFO_MULTI_UINT;
 #ifdef UNITTESTS
     sigmatch_table[DETECT_FILESIZE].RegisterTests = DetectFilesizeRegisterTests;
 #endif
@@ -122,24 +124,18 @@ static int DetectFilesizeMatch (DetectEngineThreadCtx *det_ctx, Flow *f,
 static int DetectFilesizeSetup (DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
     SCEnter();
-    DetectU64Data *fsd = NULL;
-
-    fsd = DetectU64Parse(str);
+    DetectU64Data *fsd = DetectU64Parse(str);
     if (fsd == NULL)
-        goto error;
+        SCReturnInt(-1);
 
-    if (SigMatchAppendSMToList(
+    if (SCSigMatchAppendSMToList(
                 de_ctx, s, DETECT_FILESIZE, (SigMatchCtx *)fsd, g_file_match_list_id) == NULL) {
-        goto error;
+        DetectFilesizeFree(de_ctx, fsd);
+        SCReturnInt(-1);
     }
 
     s->file_flags |= (FILE_SIG_NEED_FILE|FILE_SIG_NEED_SIZE);
     SCReturnInt(0);
-
-error:
-    if (fsd != NULL)
-        DetectFilesizeFree(de_ctx, fsd);
-    SCReturnInt(-1);
 }
 
 /**
@@ -149,7 +145,7 @@ error:
  */
 static void DetectFilesizeFree(DetectEngineCtx *de_ctx, void *ptr)
 {
-    rs_detect_u64_free(ptr);
+    SCDetectU64Free(ptr);
 }
 
 #ifdef UNITTESTS

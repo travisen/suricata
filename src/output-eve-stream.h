@@ -19,13 +19,13 @@
  * \file
  */
 
-#ifndef __OUTPUT_EVE_STREAM_H__
-#define __OUTPUT_EVE_STREAM_H__
+#ifndef SURICATA_OUTPUT_EVE_STREAM_H
+#define SURICATA_OUTPUT_EVE_STREAM_H
 
 #include "stream-tcp.h"
 
 void EveStreamLogRegister(void);
-void EveAddFlowTcpStreamFlags(const TcpStream *stream, const char *name, JsonBuilder *jb);
-void EveAddFlowTcpFlags(const TcpSession *ssn, const char *name, JsonBuilder *jb);
+void EveAddFlowTcpStreamFlags(const TcpStream *stream, const char *name, SCJsonBuilder *jb);
+void EveAddFlowTcpFlags(const TcpSession *ssn, const char *name, SCJsonBuilder *jb);
 
-#endif /* __OUTPUT_EVE_STREAM_H__ */
+#endif /* SURICATA_OUTPUT_EVE_STREAM_H */

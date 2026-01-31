@@ -20,9 +20,9 @@ use crate::common::nom7::bits;
 use crate::detect::uint::{detect_parse_uint, DetectUintData};
 use crate::http2::http2::{HTTP2DynTable, HTTP2_MAX_TABLESIZE};
 use nom7::bits::streaming::take as take_bits;
-use nom7::branch::alt;
-use nom7::bytes::streaming::{is_a, is_not, take, take_while};
-use nom7::combinator::{complete, cond, map_opt, opt, rest, verify};
+use nom7::bytes::complete::tag;
+use nom7::bytes::streaming::{take, take_while};
+use nom7::combinator::{complete, cond, map_opt, verify};
 use nom7::error::{make_error, ErrorKind};
 use nom7::multi::many0;
 use nom7::number::streaming::{be_u16, be_u24, be_u32, be_u8};
@@ -30,9 +30,14 @@ use nom7::sequence::tuple;
 use nom7::{Err, IResult};
 use std::fmt;
 use std::str::FromStr;
+use std::rc::Rc;
+use base64::{Engine, engine::general_purpose::STANDARD_NO_PAD};
 
 #[repr(u8)]
+#[derive(EnumStringU8)]
 #[derive(Clone, Copy, PartialEq, Eq, FromPrimitive, Debug)]
+// parse GOAWAY, not GO_AWAY
+#[suricata(enum_string_style = "UPPERCASE")]
 pub enum HTTP2FrameType {
     Data = 0,
     Headers = 1,
@@ -44,34 +49,6 @@ pub enum HTTP2FrameType {
     GoAway = 7,
     WindowUpdate = 8,
     Continuation = 9,
-}
-
-impl fmt::Display for HTTP2FrameType {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl std::str::FromStr for HTTP2FrameType {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let su = s.to_uppercase();
-        let su_slice: &str = &su;
-        match su_slice {
-            "DATA" => Ok(HTTP2FrameType::Data),
-            "HEADERS" => Ok(HTTP2FrameType::Headers),
-            "PRIORITY" => Ok(HTTP2FrameType::Priority),
-            "RSTSTREAM" => Ok(HTTP2FrameType::RstStream),
-            "SETTINGS" => Ok(HTTP2FrameType::Settings),
-            "PUSHPROMISE" => Ok(HTTP2FrameType::PushPromise),
-            "PING" => Ok(HTTP2FrameType::Ping),
-            "GOAWAY" => Ok(HTTP2FrameType::GoAway),
-            "WINDOWUPDATE" => Ok(HTTP2FrameType::WindowUpdate),
-            "CONTINUATION" => Ok(HTTP2FrameType::Continuation),
-            _ => Err(format!("'{}' is not a valid value for HTTP2FrameType", s)),
-        }
-    }
 }
 
 #[derive(PartialEq, Eq, Debug)]
@@ -103,7 +80,9 @@ pub fn http2_parse_frame_header(i: &[u8]) -> IResult<&[u8], HTTP2FrameHeader> {
 }
 
 #[repr(u32)]
+#[derive(EnumStringU32)]
 #[derive(Clone, Copy, PartialEq, Eq, FromPrimitive, Debug)]
+#[suricata(enum_string_style = "LOG_UPPERCASE")]
 pub enum HTTP2ErrorCode {
     NoError = 0,
     ProtocolError = 1,
@@ -121,43 +100,13 @@ pub enum HTTP2ErrorCode {
     Http11Required = 13,
 }
 
-impl fmt::Display for HTTP2ErrorCode {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl std::str::FromStr for HTTP2ErrorCode {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let su = s.to_uppercase();
-        let su_slice: &str = &su;
-        match su_slice {
-            "NO_ERROR" => Ok(HTTP2ErrorCode::NoError),
-            "PROTOCOL_ERROR" => Ok(HTTP2ErrorCode::ProtocolError),
-            "FLOW_CONTROL_ERROR" => Ok(HTTP2ErrorCode::FlowControlError),
-            "SETTINGS_TIMEOUT" => Ok(HTTP2ErrorCode::SettingsTimeout),
-            "STREAM_CLOSED" => Ok(HTTP2ErrorCode::StreamClosed),
-            "FRAME_SIZE_ERROR" => Ok(HTTP2ErrorCode::FrameSizeError),
-            "REFUSED_STREAM" => Ok(HTTP2ErrorCode::RefusedStream),
-            "CANCEL" => Ok(HTTP2ErrorCode::Cancel),
-            "COMPRESSION_ERROR" => Ok(HTTP2ErrorCode::CompressionError),
-            "CONNECT_ERROR" => Ok(HTTP2ErrorCode::ConnectError),
-            "ENHANCE_YOUR_CALM" => Ok(HTTP2ErrorCode::EnhanceYourCalm),
-            "INADEQUATE_SECURITY" => Ok(HTTP2ErrorCode::InadequateSecurity),
-            "HTTP_1_1_REQUIRED" => Ok(HTTP2ErrorCode::Http11Required),
-            _ => Err(format!("'{}' is not a valid value for HTTP2ErrorCode", s)),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 pub struct HTTP2FrameGoAway {
     pub errorcode: u32, //HTTP2ErrorCode
 }
 
 pub fn http2_parse_frame_goaway(i: &[u8]) -> IResult<&[u8], HTTP2FrameGoAway> {
+    let (i, _last_stream_id) = be_u32(i)?;
     let (i, errorcode) = be_u32(i)?;
     Ok((i, HTTP2FrameGoAway { errorcode }))
 }
@@ -295,8 +244,8 @@ fn http2_frame_header_static(n: u64, dyn_headers: &HTTP2DynTable) -> Option<HTTP
     };
     if !name.is_empty() {
         return Some(HTTP2FrameHeaderBlock {
-            name: name.as_bytes().to_vec(),
-            value: value.as_bytes().to_vec(),
+            name: Rc::new(name.as_bytes().to_vec()),
+            value: Rc::new(value.as_bytes().to_vec()),
             error: HTTP2HeaderDecodeStatus::HTTP2HeaderDecodeSuccess,
             sizeupdate: 0,
         });
@@ -304,23 +253,23 @@ fn http2_frame_header_static(n: u64, dyn_headers: &HTTP2DynTable) -> Option<HTTP
         //use dynamic table
         if n == 0 {
             return Some(HTTP2FrameHeaderBlock {
-                name: Vec::new(),
-                value: Vec::new(),
+                name: Rc::new(Vec::new()),
+                value: Rc::new(Vec::new()),
                 error: HTTP2HeaderDecodeStatus::HTTP2HeaderDecodeIndex0,
                 sizeupdate: 0,
             });
         } else if dyn_headers.table.len() + HTTP2_STATIC_HEADERS_NUMBER < n as usize {
             return Some(HTTP2FrameHeaderBlock {
-                name: Vec::new(),
-                value: Vec::new(),
+                name: Rc::new(Vec::new()),
+                value: Rc::new(Vec::new()),
                 error: HTTP2HeaderDecodeStatus::HTTP2HeaderDecodeNotIndexed,
                 sizeupdate: 0,
             });
         } else {
             let indyn = dyn_headers.table.len() - (n as usize - HTTP2_STATIC_HEADERS_NUMBER);
             let headcopy = HTTP2FrameHeaderBlock {
-                name: dyn_headers.table[indyn].name.to_vec(),
-                value: dyn_headers.table[indyn].value.to_vec(),
+                name: dyn_headers.table[indyn].name.clone(),
+                value: dyn_headers.table[indyn].value.clone(),
                 error: HTTP2HeaderDecodeStatus::HTTP2HeaderDecodeSuccess,
                 sizeupdate: 0,
             };
@@ -348,8 +297,10 @@ impl fmt::Display for HTTP2HeaderDecodeStatus {
 
 #[derive(Clone, Debug)]
 pub struct HTTP2FrameHeaderBlock {
-    pub name: Vec<u8>,
-    pub value: Vec<u8>,
+    // Use Rc reference counted so that indexed headers do not get copied.
+    // Otherwise, this leads to quadratic complexity in memory occupation.
+    pub name: Rc<Vec<u8>>,
+    pub value: Rc<Vec<u8>>,
     pub error: HTTP2HeaderDecodeStatus,
     pub sizeupdate: u64,
 }
@@ -391,7 +342,7 @@ fn http2_parse_headers_block_literal_common<'a>(
 ) -> IResult<&'a [u8], HTTP2FrameHeaderBlock> {
     let (i3, name, error) = if index == 0 {
         match http2_parse_headers_block_string(input) {
-            Ok((r, n)) => Ok((r, n, HTTP2HeaderDecodeStatus::HTTP2HeaderDecodeSuccess)),
+            Ok((r, n)) => Ok((r, Rc::new(n), HTTP2HeaderDecodeStatus::HTTP2HeaderDecodeSuccess)),
             Err(e) => Err(e),
         }
     } else {
@@ -403,7 +354,7 @@ fn http2_parse_headers_block_literal_common<'a>(
             )),
             None => Ok((
                 input,
-                Vec::new(),
+                Rc::new(Vec::new()),
                 HTTP2HeaderDecodeStatus::HTTP2HeaderDecodeNotIndexed,
             )),
         }
@@ -413,7 +364,7 @@ fn http2_parse_headers_block_literal_common<'a>(
         i4,
         HTTP2FrameHeaderBlock {
             name,
-            value,
+            value: Rc::new(value),
             error,
             sizeupdate: 0,
         },
@@ -435,8 +386,8 @@ fn http2_parse_headers_block_literal_incindex<'a>(
     match r {
         Ok((r, head)) => {
             let headcopy = HTTP2FrameHeaderBlock {
-                name: head.name.to_vec(),
-                value: head.value.to_vec(),
+                name: head.name.clone(),
+                value: head.value.clone(),
                 error: head.error,
                 sizeupdate: 0,
             };
@@ -460,8 +411,9 @@ fn http2_parse_headers_block_literal_incindex<'a>(
                 while dyn_headers.current_size > dyn_headers.max_size
                     && toremove < dyn_headers.table.len()
                 {
-                    dyn_headers.current_size -=
-                        32 + dyn_headers.table[toremove].name.len() + dyn_headers.table[toremove].value.len();
+                    dyn_headers.current_size -= 32
+                        + dyn_headers.table[toremove].name.len()
+                        + dyn_headers.table[toremove].value.len();
                     toremove += 1;
                 }
                 dyn_headers.table.drain(0..toremove);
@@ -556,8 +508,8 @@ fn http2_parse_headers_block_dynamic_size<'a>(
     return Ok((
         i3,
         HTTP2FrameHeaderBlock {
-            name: Vec::new(),
-            value: Vec::new(),
+            name: Rc::new(Vec::new()),
+            value: Rc::new(Vec::new()),
             error: HTTP2HeaderDecodeStatus::HTTP2HeaderDecodeSizeUpdate,
             sizeupdate: maxsize2,
         },
@@ -614,8 +566,8 @@ fn http2_parse_headers_blocks<'a>(
                 // if we error from http2_parse_var_uint, we keep the first parsed headers
                 if err.code == ErrorKind::LengthValue {
                     blocks.push(HTTP2FrameHeaderBlock {
-                        name: Vec::new(),
-                        value: Vec::new(),
+                        name: Rc::new(Vec::new()),
+                        value: Rc::new(Vec::new()),
                         error: HTTP2HeaderDecodeStatus::HTTP2HeaderDecodeIntegerOverflow,
                         sizeupdate: 0,
                     });
@@ -695,6 +647,8 @@ pub enum HTTP2SettingsId {
     InitialWindowSize = 4,
     MaxFrameSize = 5,
     MaxHeaderListSize = 6,
+    EnableConnectProtocol = 8, // rfc8441
+    NoRfc7540Priorities = 9, // rfc9218
 }
 
 impl fmt::Display for HTTP2SettingsId {
@@ -716,6 +670,8 @@ impl std::str::FromStr for HTTP2SettingsId {
             "SETTINGS_INITIAL_WINDOW_SIZE" => Ok(HTTP2SettingsId::InitialWindowSize),
             "SETTINGS_MAX_FRAME_SIZE" => Ok(HTTP2SettingsId::MaxFrameSize),
             "SETTINGS_MAX_HEADER_LIST_SIZE" => Ok(HTTP2SettingsId::MaxHeaderListSize),
+            "SETTINGS_ENABLE_CONNECT_PROTOCOL" => Ok(HTTP2SettingsId::EnableConnectProtocol),
+            "SETTINGS_NO_RFC7540_PRIORITIES" => Ok(HTTP2SettingsId::NoRfc7540Priorities),
             _ => Err(format!("'{}' is not a valid value for HTTP2SettingsId", s)),
         }
     }
@@ -726,12 +682,17 @@ pub struct DetectHTTP2settingsSigCtx {
     pub value: Option<DetectUintData<u32>>, //optional value
 }
 
-pub fn http2_parse_settingsctx(i: &str) -> IResult<&str, DetectHTTP2settingsSigCtx> {
-    let (i, _) = opt(is_a(" "))(i)?;
-    let (i, id) = map_opt(alt((complete(is_not(" <>=")), rest)), |s: &str| {
+pub fn http2_parse_settingsctx(i: &str) -> nom8::IResult<&str, DetectHTTP2settingsSigCtx> {
+    use nom8::Parser;
+    use nom8::bytes::complete::{is_a as is_a8, is_not as is_not8};
+    use nom8::combinator::{complete as complete8, map_opt as map_opt8, opt as opt8, rest as rest8};
+    use nom8::branch::alt as alt8;
+
+    let (i, _) = opt8(is_a8(" ")).parse(i)?;
+    let (i, id) = map_opt8(alt8((complete8(is_not8(" <>=")), rest8)), |s: &str| {
         HTTP2SettingsId::from_str(s).ok()
-    })(i)?;
-    let (i, value) = opt(complete(detect_parse_uint))(i)?;
+    }).parse(i)?;
+    let (i, value) = opt8(complete8(detect_parse_uint)).parse(i)?;
     Ok((i, DetectHTTP2settingsSigCtx { id, value }))
 }
 
@@ -751,6 +712,19 @@ pub fn http2_parse_frame_settings(i: &[u8]) -> IResult<&[u8], Vec<HTTP2FrameSett
     many0(complete(http2_parse_frame_setting))(i)
 }
 
+pub fn doh_extract_request(i: &[u8]) -> IResult<&[u8], Vec<u8>> {
+    let (i, _) = tag("/dns-query?dns=")(i)?;
+    match STANDARD_NO_PAD.decode(i) {
+        Ok(dec) => {
+            // i is unused
+            return Ok((i, dec));
+        }
+        _ => {
+            return Err(Err::Error(make_error(i, ErrorKind::MapOpt)));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -765,8 +739,8 @@ mod tests {
         match r0 {
             Ok((remainder, hd)) => {
                 // Check the first message.
-                assert_eq!(hd.name, ":method".as_bytes().to_vec());
-                assert_eq!(hd.value, "GET".as_bytes().to_vec());
+                assert_eq!(hd.name, ":method".as_bytes().to_vec().into());
+                assert_eq!(hd.value, "GET".as_bytes().to_vec().into());
                 // And we should have no bytes left.
                 assert_eq!(remainder.len(), 0);
             }
@@ -782,8 +756,8 @@ mod tests {
         match r1 {
             Ok((remainder, hd)) => {
                 // Check the first message.
-                assert_eq!(hd.name, "accept".as_bytes().to_vec());
-                assert_eq!(hd.value, "*/*".as_bytes().to_vec());
+                assert_eq!(hd.name, "accept".as_bytes().to_vec().into());
+                assert_eq!(hd.value, "*/*".as_bytes().to_vec().into());
                 // And we should have no bytes left.
                 assert_eq!(remainder.len(), 0);
                 assert_eq!(dynh.table.len(), 1);
@@ -802,8 +776,8 @@ mod tests {
         match result {
             Ok((remainder, hd)) => {
                 // Check the first message.
-                assert_eq!(hd.name, ":authority".as_bytes().to_vec());
-                assert_eq!(hd.value, "localhost:3000".as_bytes().to_vec());
+                assert_eq!(hd.name, ":authority".as_bytes().to_vec().into());
+                assert_eq!(hd.value, "localhost:3000".as_bytes().to_vec().into());
                 // And we should have no bytes left.
                 assert_eq!(remainder.len(), 0);
                 assert_eq!(dynh.table.len(), 2);
@@ -820,8 +794,8 @@ mod tests {
         match r3 {
             Ok((remainder, hd)) => {
                 // same as before
-                assert_eq!(hd.name, ":authority".as_bytes().to_vec());
-                assert_eq!(hd.value, "localhost:3000".as_bytes().to_vec());
+                assert_eq!(hd.name, ":authority".as_bytes().to_vec().into());
+                assert_eq!(hd.value, "localhost:3000".as_bytes().to_vec().into());
                 // And we should have no bytes left.
                 assert_eq!(remainder.len(), 0);
                 assert_eq!(dynh.table.len(), 2);
@@ -856,8 +830,8 @@ mod tests {
         match r2 {
             Ok((remainder, hd)) => {
                 // Check the first message.
-                assert_eq!(hd.name, ":path".as_bytes().to_vec());
-                assert_eq!(hd.value, "/doc/manual/html/index.html".as_bytes().to_vec());
+                assert_eq!(hd.name, ":path".as_bytes().to_vec().into());
+                assert_eq!(hd.value, "/doc/manual/html/index.html".as_bytes().to_vec().into());
                 // And we should have no bytes left.
                 assert_eq!(remainder.len(), 0);
                 assert_eq!(dynh.table.len(), 2);

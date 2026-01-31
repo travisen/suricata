@@ -333,8 +333,8 @@ uint8_t DetectEngineInspectStream(DetectEngineCtx *de_ctx, DetectEngineThreadCtx
             is_last = true;
     }
 
-    SCLogDebug("%s ran stream for sid %u on packet %"PRIu64" and we %s",
-            is_last? "LAST:" : "normal:", s->id, p->pcap_cnt,
+    SCLogDebug("%s ran stream for sid %u on packet %" PRIu64 " and we %s",
+            is_last ? "LAST:" : "normal:", s->id, PcapPacketCntGet(p),
             match ? "matched" : "didn't match");
 
     if (match) {
@@ -645,30 +645,27 @@ static int PayloadTestSig13(void)
 
     memset(&dtv, 0, sizeof(DecodeThreadVars));
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     FAIL_IF_NULL(de_ctx);
-
     de_ctx->inspection_recursion_limit = 3000;
-
     de_ctx->flags |= DE_QUIET;
     de_ctx->mpm_matcher = mpm_type;
 
-    de_ctx->sig_list = SigInit(de_ctx, sig);
-    FAIL_IF_NULL(de_ctx->sig_list);
+    Signature *s = DetectEngineAppendSig(de_ctx, sig);
+    FAIL_IF_NULL(s);
 
     SigGroupBuild(de_ctx);
     DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
 
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
-
     FAIL_IF_NOT(PacketAlertCheck(p, de_ctx->sig_list->id) != 1);
 
+    UTHFreePacket(p);
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
-
-    UTHFreePacket(p);
-
+    StatsThreadCleanup(&th_v.stats);
     PASS;
 }
 
@@ -1179,6 +1176,4 @@ void PayloadRegisterTests(void)
     UtRegisterTest("PayloadTestSig33", PayloadTestSig33);
     UtRegisterTest("PayloadTestSig34", PayloadTestSig34);
 #endif /* UNITTESTS */
-
-    return;
 }

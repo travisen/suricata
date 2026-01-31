@@ -30,6 +30,7 @@
 #include "detect-parse.h"
 
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-state.h"
 #include "detect-engine-prefilter.h"
@@ -57,13 +58,89 @@ static int DetectFiledataSetup (DetectEngineCtx *, Signature *, const char *);
 #ifdef UNITTESTS
 static void DetectFiledataRegisterTests(void);
 #endif
-static void DetectFiledataSetupCallback(const DetectEngineCtx *de_ctx,
-                                        Signature *s);
+static void DetectFiledataSetupCallback(
+        const DetectEngineCtx *de_ctx, Signature *s, const DetectBufferType *map);
 static int g_file_data_buffer_id = 0;
 
 /* file API */
 int PrefilterMpmFiledataRegister(DetectEngineCtx *de_ctx, SigGroupHead *sgh, MpmCtx *mpm_ctx,
         const DetectBufferMpmRegistry *mpm_reg, int list_id);
+
+// file protocols with common file handling
+typedef struct {
+    AppProto alproto;
+    int direction;
+    int to_client_progress;
+    int to_server_progress;
+} DetectFileHandlerProtocol_t;
+
+/* Table with all filehandler registrations */
+DetectFileHandlerTableElmt filehandler_table[DETECT_TBLSIZE_STATIC];
+
+#define ALPROTO_WITHFILES_MAX 16
+
+// file protocols with common file handling
+DetectFileHandlerProtocol_t al_protocols[ALPROTO_WITHFILES_MAX] = {
+    { .alproto = ALPROTO_NFS, .direction = SIG_FLAG_TOSERVER | SIG_FLAG_TOCLIENT },
+    { .alproto = ALPROTO_SMB, .direction = SIG_FLAG_TOSERVER | SIG_FLAG_TOCLIENT },
+    { .alproto = ALPROTO_FTP, .direction = SIG_FLAG_TOSERVER | SIG_FLAG_TOCLIENT },
+    { .alproto = ALPROTO_FTPDATA, .direction = SIG_FLAG_TOSERVER | SIG_FLAG_TOCLIENT },
+    { .alproto = ALPROTO_HTTP1,
+            .direction = SIG_FLAG_TOSERVER | SIG_FLAG_TOCLIENT,
+            .to_client_progress = HTP_RESPONSE_PROGRESS_BODY,
+            .to_server_progress = HTP_REQUEST_PROGRESS_BODY },
+    { .alproto = ALPROTO_HTTP2,
+            .direction = SIG_FLAG_TOSERVER | SIG_FLAG_TOCLIENT,
+            .to_client_progress = HTTP2StateDataServer,
+            .to_server_progress = HTTP2StateDataClient },
+    { .alproto = ALPROTO_SMTP, .direction = SIG_FLAG_TOSERVER }, { .alproto = ALPROTO_UNKNOWN }
+};
+
+void DetectFileRegisterProto(
+        AppProto alproto, int direction, int to_client_progress, int to_server_progress)
+{
+    size_t i = 0;
+    while (i < ALPROTO_WITHFILES_MAX && al_protocols[i].alproto != ALPROTO_UNKNOWN) {
+        i++;
+    }
+    if (i == ALPROTO_WITHFILES_MAX) {
+        return;
+    }
+    al_protocols[i].alproto = alproto;
+    al_protocols[i].direction = direction;
+    al_protocols[i].to_client_progress = to_client_progress;
+    al_protocols[i].to_server_progress = to_server_progress;
+    if (i + 1 < ALPROTO_WITHFILES_MAX) {
+        al_protocols[i + 1].alproto = ALPROTO_UNKNOWN;
+    }
+}
+
+void DetectFileRegisterFileProtocols(DetectFileHandlerTableElmt *reg)
+{
+    for (size_t i = 0; i < g_alproto_max; i++) {
+        if (al_protocols[i].alproto == ALPROTO_UNKNOWN) {
+            break;
+        }
+        int direction = al_protocols[i].direction == 0
+                                ? (int)(SIG_FLAG_TOSERVER | SIG_FLAG_TOCLIENT)
+                                : al_protocols[i].direction;
+
+        if (direction & SIG_FLAG_TOCLIENT) {
+            DetectAppLayerMpmRegister(reg->name, SIG_FLAG_TOCLIENT, reg->priority, reg->PrefilterFn,
+                    reg->GetData, al_protocols[i].alproto, al_protocols[i].to_client_progress);
+            DetectAppLayerInspectEngineRegister(reg->name, al_protocols[i].alproto,
+                    SIG_FLAG_TOCLIENT, al_protocols[i].to_client_progress, reg->Callback,
+                    reg->GetData);
+        }
+        if (direction & SIG_FLAG_TOSERVER) {
+            DetectAppLayerMpmRegister(reg->name, SIG_FLAG_TOSERVER, reg->priority, reg->PrefilterFn,
+                    reg->GetData, al_protocols[i].alproto, al_protocols[i].to_server_progress);
+            DetectAppLayerInspectEngineRegister(reg->name, al_protocols[i].alproto,
+                    SIG_FLAG_TOSERVER, al_protocols[i].to_server_progress, reg->Callback,
+                    reg->GetData);
+        }
+    }
+}
 
 /**
  * \brief Registration function for keyword: file_data
@@ -78,7 +155,8 @@ void DetectFiledataRegister(void)
 #ifdef UNITTESTS
     sigmatch_table[DETECT_FILE_DATA].RegisterTests = DetectFiledataRegisterTests;
 #endif
-    sigmatch_table[DETECT_FILE_DATA].flags = SIGMATCH_NOOPT;
+    sigmatch_table[DETECT_FILE_DATA].flags =
+            SIGMATCH_OPTIONAL_OPT | SIGMATCH_SUPPORT_DIR | SIGMATCH_INFO_MULTI_BUFFER;
 
     filehandler_table[DETECT_FILE_DATA].name = "file_data";
     filehandler_table[DETECT_FILE_DATA].priority = 2;
@@ -94,24 +172,24 @@ void DetectFiledataRegister(void)
 }
 
 static void SetupDetectEngineConfig(DetectEngineCtx *de_ctx) {
-    if (de_ctx->filedata_config_initialized)
+    if (de_ctx->filedata_config)
         return;
 
+    de_ctx->filedata_config = SCMalloc(g_alproto_max * sizeof(DetectFileDataCfg));
+    if (unlikely(de_ctx->filedata_config == NULL))
+        return;
     /* initialize default */
-    for (int i = 0; i < (int)ALPROTO_MAX; i++) {
+    for (AppProto i = 0; i < g_alproto_max; i++) {
         de_ctx->filedata_config[i].content_limit = FILEDATA_CONTENT_LIMIT;
         de_ctx->filedata_config[i].content_inspect_min_size = FILEDATA_CONTENT_INSPECT_MIN_SIZE;
-        de_ctx->filedata_config[i].content_inspect_window = FILEDATA_CONTENT_INSPECT_WINDOW;
     }
 
     /* add protocol specific settings here */
 
     /* SMTP */
     de_ctx->filedata_config[ALPROTO_SMTP].content_limit = smtp_config.content_limit;
-    de_ctx->filedata_config[ALPROTO_SMTP].content_inspect_min_size = smtp_config.content_inspect_min_size;
-    de_ctx->filedata_config[ALPROTO_SMTP].content_inspect_window = smtp_config.content_inspect_window;
-
-    de_ctx->filedata_config_initialized = true;
+    de_ctx->filedata_config[ALPROTO_SMTP].content_inspect_min_size =
+            smtp_config.content_inspect_min_size;
 }
 
 /**
@@ -129,13 +207,9 @@ static int DetectFiledataSetup (DetectEngineCtx *de_ctx, Signature *s, const cha
 {
     SCEnter();
 
-    if (!DetectProtoContainsProto(&s->proto, IPPROTO_TCP)) {
-        SCLogError("The 'file_data' keyword cannot be used with non-TCP protocols");
-        return -1;
-    }
-
-    if (s->alproto != ALPROTO_UNKNOWN && !AppLayerParserSupportsFiles(IPPROTO_TCP, s->alproto)) {
-        SCLogError("The 'file_data' keyword cannot be used with TCP protocol %s",
+    if (s->alproto != ALPROTO_UNKNOWN && !AppLayerParserSupportsFiles(IPPROTO_TCP, s->alproto) &&
+            !AppLayerParserSupportsFiles(IPPROTO_UDP, s->alproto)) {
+        SCLogError("The 'file_data' keyword cannot be used with protocol %s",
                 AppLayerGetProtoName(s->alproto));
         return -1;
     }
@@ -147,16 +221,27 @@ static int DetectFiledataSetup (DetectEngineCtx *de_ctx, Signature *s, const cha
         return -1;
     }
 
-    if (DetectBufferSetActiveList(de_ctx, s, DetectBufferTypeGetByName("file_data")) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, DetectBufferTypeGetByName("file_data")) < 0)
         return -1;
 
     s->init_data->init_flags |= SIG_FLAG_INIT_FILEDATA;
+    if ((s->init_data->init_flags & SIG_FLAG_INIT_FORCE_TOCLIENT) == 0) {
+        // we cannot use a transactional rule with a fast pattern to client and this
+        if (s->init_data->init_flags & SIG_FLAG_INIT_TXDIR_FAST_TOCLIENT) {
+            SCLogError("fast_pattern cannot be used on to_client keyword for "
+                       "transactional rule with a streaming buffer to server %u",
+                    s->id);
+            return -1;
+        }
+        s->init_data->init_flags |= SIG_FLAG_INIT_TXDIR_STREAMING_TOSERVER;
+    }
+
     SetupDetectEngineConfig(de_ctx);
     return 0;
 }
 
-static void DetectFiledataSetupCallback(const DetectEngineCtx *de_ctx,
-                                        Signature *s)
+static void DetectFiledataSetupCallback(
+        const DetectEngineCtx *de_ctx, Signature *s, const DetectBufferType *map)
 {
     if (s->alproto == ALPROTO_HTTP1 || s->alproto == ALPROTO_UNKNOWN ||
             s->alproto == ALPROTO_HTTP) {
@@ -192,7 +277,8 @@ static inline InspectionBuffer *FiledataWithXformsGetDataCallback(DetectEngineTh
         return buffer;
     }
 
-    InspectionBufferSetupMulti(buffer, transforms, base_buffer->inspect, base_buffer->inspect_len);
+    InspectionBufferSetupMulti(
+            det_ctx, buffer, transforms, base_buffer->inspect, base_buffer->inspect_len);
     buffer->inspect_offset = base_buffer->inspect_offset;
     SCLogDebug("xformed buffer %p size %u", buffer, buffer->inspect_len);
     SCReturnPtr(buffer, "InspectionBuffer");
@@ -221,9 +307,12 @@ static InspectionBuffer *FiledataGetDataCallback(DetectEngineThreadCtx *det_ctx,
 
     const uint64_t file_size = FileDataSize(cur_file);
     const DetectEngineCtx *de_ctx = det_ctx->de_ctx;
-    const uint32_t content_limit = de_ctx->filedata_config[f->alproto].content_limit;
-    const uint32_t content_inspect_min_size =
-            de_ctx->filedata_config[f->alproto].content_inspect_min_size;
+    uint32_t content_limit = FILEDATA_CONTENT_LIMIT;
+    uint32_t content_inspect_min_size = FILEDATA_CONTENT_INSPECT_MIN_SIZE;
+    if (de_ctx->filedata_config) {
+        content_limit = de_ctx->filedata_config[f->alproto].content_limit;
+        content_inspect_min_size = de_ctx->filedata_config[f->alproto].content_inspect_min_size;
+    }
 
     SCLogDebug("[list %d] content_limit %u, content_inspect_min_size %u", list_id, content_limit,
             content_inspect_min_size);
@@ -257,7 +346,7 @@ static InspectionBuffer *FiledataGetDataCallback(DetectEngineThreadCtx *det_ctx,
         ips = htp_state->cfg->http_body_inline;
 
         const bool body_done = AppLayerParserGetStateProgress(IPPROTO_TCP, ALPROTO_HTTP1, tx,
-                                       flow_flags) > HTP_RESPONSE_BODY;
+                                       flow_flags) > HTP_RESPONSE_PROGRESS_BODY;
 
         SCLogDebug("response.body_limit %u file_size %" PRIu64
                    ", cur_file->inspect_min_size %" PRIu32 ", EOF %s, progress > body? %s",
@@ -295,7 +384,7 @@ static InspectionBuffer *FiledataGetDataCallback(DetectEngineThreadCtx *det_ctx,
             }
         } else {
             uint64_t new_data = file_size - cur_file->content_inspected;
-            BUG_ON(new_data == 0);
+            DEBUG_VALIDATE_BUG_ON(new_data == 0);
             if (new_data < cur_file->inspect_window) {
                 uint64_t inspect_short = cur_file->inspect_window - new_data;
                 if (cur_file->content_inspected < inspect_short) {
@@ -348,7 +437,7 @@ static InspectionBuffer *FiledataGetDataCallback(DetectEngineThreadCtx *det_ctx,
         SCLogDebug("content inspected: %" PRIu64, cur_file->content_inspected);
     }
 
-    InspectionBufferSetupMulti(buffer, NULL, data, data_len);
+    InspectionBufferSetupMulti(det_ctx, buffer, NULL, data, data_len);
     SCLogDebug("[list %d] [before] buffer offset %" PRIu64 "; buffer len %" PRIu32
                "; data_len %" PRIu32 "; file_size %" PRIu64,
             list_id, buffer->inspect_offset, buffer->inspect_len, data_len, file_size);
@@ -395,10 +484,18 @@ uint8_t DetectEngineInspectFiledata(DetectEngineCtx *de_ctx, DetectEngineThreadC
         transforms = engine->v2.transforms;
     }
 
-    AppLayerGetFileState files = AppLayerParserGetTxFiles(f, alstate, txv, flags);
+    AppLayerGetFileState files = AppLayerParserGetTxFiles(f, txv, flags);
     FileContainer *ffc = files.fc;
     if (ffc == NULL) {
         return DETECT_ENGINE_INSPECT_SIG_CANT_MATCH_FILES;
+    }
+    if (ffc->head == NULL) {
+        const bool eof = (AppLayerParserGetStateProgress(f->proto, f->alproto, txv, flags) >
+                          engine->progress);
+        if (eof && engine->match_on_null) {
+            return DETECT_ENGINE_INSPECT_SIG_MATCH;
+        }
+        return DETECT_ENGINE_INSPECT_SIG_NO_MATCH;
     }
 
     int local_file_id = 0;
@@ -406,8 +503,10 @@ uint8_t DetectEngineInspectFiledata(DetectEngineCtx *de_ctx, DetectEngineThreadC
     for (; file != NULL; file = file->next) {
         InspectionBuffer *buffer = FiledataGetDataCallback(det_ctx, transforms, f, flags, file,
                 engine->sm_list, engine->sm_list_base, local_file_id, txv);
-        if (buffer == NULL)
+        if (buffer == NULL) {
+            local_file_id++;
             continue;
+        }
 
         bool eof = (file->state == FILE_STATE_CLOSED);
         uint8_t ciflags = eof ? DETECT_CI_FLAGS_END : 0;
@@ -448,16 +547,18 @@ static void PrefilterTxFiledata(DetectEngineThreadCtx *det_ctx, const void *pect
     const MpmCtx *mpm_ctx = ctx->mpm_ctx;
     const int list_id = ctx->list_id;
 
-    AppLayerGetFileState files = AppLayerParserGetTxFiles(f, f->alstate, txv, flags);
+    AppLayerGetFileState files = AppLayerParserGetTxFiles(f, txv, flags);
     FileContainer *ffc = files.fc;
     if (ffc != NULL) {
         int local_file_id = 0;
         for (File *file = ffc->head; file != NULL; file = file->next) {
             InspectionBuffer *buffer = FiledataGetDataCallback(det_ctx, ctx->transforms, f, flags,
                     file, list_id, ctx->base_list_id, local_file_id, txv);
-            if (buffer == NULL)
+            if (buffer == NULL) {
+                local_file_id++;
                 continue;
-            SCLogDebug("[%" PRIu64 "] buffer size %u", p->pcap_cnt, buffer->inspect_len);
+            }
+            SCLogDebug("[%" PRIu64 "] buffer size %u", PcapPacketCntGet(p), buffer->inspect_len);
 
             if (buffer->inspect_len >= mpm_ctx->minlen) {
                 uint32_t prev_rule_id_array_cnt = det_ctx->pmq.rule_id_array_cnt;

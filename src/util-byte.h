@@ -21,8 +21,8 @@
  * \author Brian Rectanus <brectanu@gmail.com>
  */
 
-#ifndef __UTIL_BYTE_H__
-#define __UTIL_BYTE_H__
+#ifndef SURICATA_UTIL_BYTE_H
+#define SURICATA_UTIL_BYTE_H
 
 #include <stdint.h>
 
@@ -81,7 +81,6 @@
  *  \return string nul-terminated string or NULL on error
  */
 char *BytesToString(const uint8_t *bytes, size_t nbytes);
-void BytesToStringBuffer(const uint8_t *bytes, size_t nbytes, char *outstr, size_t outlen);
 
 /**
  * Extract bytes from a byte string and convert to a unint64_t.
@@ -503,4 +502,6 @@ static inline int WARN_UNUSED ByteExtract(uint64_t *res, int e, uint16_t len, co
     return len;
 }
 
-#endif /* __UTIL_BYTE_H__ */
+int HexToRaw(const uint8_t *in, size_t ins, uint8_t *out, size_t outs);
+
+#endif /* SURICATA_UTIL_BYTE_H */

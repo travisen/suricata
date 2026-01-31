@@ -28,6 +28,7 @@
 #include "detect.h"
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "app-layer.h"
 
 #include "detect-byte.h"
@@ -253,7 +254,7 @@ bool DetectBytejumpDoMatch(DetectEngineThreadCtx *det_ctx, const Signature *s,
 
     /* Adjust the detection context to the jump location. */
     DEBUG_VALIDATE_BUG_ON(jumpptr < payload);
-    det_ctx->buffer_offset = jumpptr - payload;
+    det_ctx->buffer_offset = (uint32_t)(jumpptr - payload);
 
     SCReturnBool(true);
 }
@@ -506,7 +507,7 @@ static int DetectBytejumpSetup(DetectEngineCtx *de_ctx, Signature *s, const char
             sm_list = DETECT_SM_LIST_PMATCH;
         }
 
-        if (DetectSignatureSetAppProto(s, ALPROTO_DCERPC) != 0)
+        if (SCDetectSignatureSetAppProto(s, ALPROTO_DCERPC) != 0)
             goto error;
 
     } else if (data->flags & DETECT_BYTEJUMP_RELATIVE) {
@@ -543,7 +544,7 @@ static int DetectBytejumpSetup(DetectEngineCtx *de_ctx, Signature *s, const char
 
     if (nbytes != NULL) {
         DetectByteIndexType index;
-        if (!DetectByteRetrieveSMVar(nbytes, s, &index)) {
+        if (!DetectByteRetrieveSMVar(nbytes, s, sm_list, &index)) {
             SCLogError("Unknown byte_extract var "
                        "seen in byte_jump - %s",
                     nbytes);
@@ -556,7 +557,7 @@ static int DetectBytejumpSetup(DetectEngineCtx *de_ctx, Signature *s, const char
 
     if (offset != NULL) {
         DetectByteIndexType index;
-        if (!DetectByteRetrieveSMVar(offset, s, &index)) {
+        if (!DetectByteRetrieveSMVar(offset, s, sm_list, &index)) {
             SCLogError("Unknown byte_extract var "
                        "seen in byte_jump - %s",
                     offset);
@@ -568,7 +569,8 @@ static int DetectBytejumpSetup(DetectEngineCtx *de_ctx, Signature *s, const char
         offset = NULL;
     }
 
-    if (SigMatchAppendSMToList(de_ctx, s, DETECT_BYTEJUMP, (SigMatchCtx *)data, sm_list) == NULL) {
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_BYTEJUMP, (SigMatchCtx *)data, sm_list) ==
+            NULL) {
         goto error;
     }
 
@@ -766,7 +768,7 @@ static int DetectBytejumpTestParse09(void)
     Signature *s = SigAlloc();
     FAIL_IF_NULL(s);
 
-    FAIL_IF(DetectSignatureSetAppProto(s, ALPROTO_DCERPC) < 0);
+    FAIL_IF(SCDetectSignatureSetAppProto(s, ALPROTO_DCERPC) < 0);
 
     FAIL_IF_NOT(DetectBytejumpSetup(NULL, s,
                         "4,0, align, multiplier 2, "

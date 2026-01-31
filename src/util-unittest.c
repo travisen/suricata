@@ -283,8 +283,6 @@ void UtCleanup(void)
 void UtRunModeRegister(void)
 {
     RunModeRegisterNewRunMode(RUNMODE_UNITTEST, "unittest", "Unittest mode", NULL, NULL);
-
-    return;
 }
 
 /*
@@ -299,7 +297,8 @@ void UtRunModeRegister(void)
 static int UtSelftestTrue(void)
 {
     if (1)return 1;
-    else  return 0;
+    else
+        return 0;
 }
 
 /** \brief False test
@@ -310,7 +309,8 @@ static int UtSelftestTrue(void)
 static int UtSelftestFalse(void)
 {
     if (0)return 0;
-    else  return 1;
+    else
+        return 1;
 }
 
 /** \brief Run self tests

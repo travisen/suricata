@@ -38,6 +38,7 @@
 
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-content.h"
 #include "detect-pcre.h"
 #include "detect-engine-mpm.h"
@@ -78,8 +79,8 @@ static InspectionBuffer *GetData2(DetectEngineThreadCtx *det_ctx,
 {
     InspectionBuffer *buffer = InspectionBufferGet(det_ctx, list_id);
     if (buffer->inspect == NULL) {
-        InspectionBufferSetup(det_ctx, list_id, buffer, (const uint8_t *)"", 0);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(
+                det_ctx, list_id, buffer, (const uint8_t *)"", 0, transforms);
     }
 
     return buffer;
@@ -91,15 +92,17 @@ static InspectionBuffer *GetData2(DetectEngineThreadCtx *det_ctx,
 void DetectHttpStatMsgRegister (void)
 {
     /* http_stat_msg content modifier */
-    sigmatch_table[DETECT_AL_HTTP_STAT_MSG].name = "http_stat_msg";
-    sigmatch_table[DETECT_AL_HTTP_STAT_MSG].desc = "content modifier to match on HTTP stat-msg-buffer";
-    sigmatch_table[DETECT_AL_HTTP_STAT_MSG].url = "/rules/http-keywords.html#http-stat-msg";
-    sigmatch_table[DETECT_AL_HTTP_STAT_MSG].Setup = DetectHttpStatMsgSetup;
+    sigmatch_table[DETECT_HTTP_STAT_MSG_CM].name = "http_stat_msg";
+    sigmatch_table[DETECT_HTTP_STAT_MSG_CM].desc =
+            "content modifier to match on HTTP stat-msg-buffer";
+    sigmatch_table[DETECT_HTTP_STAT_MSG_CM].url = "/rules/http-keywords.html#http-stat-msg";
+    sigmatch_table[DETECT_HTTP_STAT_MSG_CM].Setup = DetectHttpStatMsgSetup;
 #ifdef UNITTESTS
-    sigmatch_table[DETECT_AL_HTTP_STAT_MSG].RegisterTests = DetectHttpStatMsgRegisterTests;
+    sigmatch_table[DETECT_HTTP_STAT_MSG_CM].RegisterTests = DetectHttpStatMsgRegisterTests;
 #endif
-    sigmatch_table[DETECT_AL_HTTP_STAT_MSG].flags |= SIGMATCH_NOOPT|SIGMATCH_INFO_CONTENT_MODIFIER;
-    sigmatch_table[DETECT_AL_HTTP_STAT_MSG].alternative = DETECT_HTTP_STAT_MSG;
+    sigmatch_table[DETECT_HTTP_STAT_MSG_CM].flags |=
+            SIGMATCH_NOOPT | SIGMATCH_INFO_CONTENT_MODIFIER;
+    sigmatch_table[DETECT_HTTP_STAT_MSG_CM].alternative = DETECT_HTTP_STAT_MSG;
 
     /* http.stat_msg sticky buffer */
     sigmatch_table[DETECT_HTTP_STAT_MSG].name = "http.stat_msg";
@@ -109,10 +112,10 @@ void DetectHttpStatMsgRegister (void)
     sigmatch_table[DETECT_HTTP_STAT_MSG].flags |= SIGMATCH_NOOPT|SIGMATCH_INFO_STICKY_BUFFER;
 
     DetectAppLayerInspectEngineRegister("http_stat_msg", ALPROTO_HTTP1, SIG_FLAG_TOCLIENT,
-            HTP_RESPONSE_LINE, DetectEngineInspectBufferGeneric, GetData);
+            HTP_RESPONSE_PROGRESS_LINE, DetectEngineInspectBufferGeneric, GetData);
 
     DetectAppLayerMpmRegister("http_stat_msg", SIG_FLAG_TOCLIENT, 3, PrefilterGenericMpmRegister,
-            GetData, ALPROTO_HTTP1, HTP_RESPONSE_LINE);
+            GetData, ALPROTO_HTTP1, HTP_RESPONSE_PROGRESS_LINE);
 
     DetectAppLayerInspectEngineRegister("http_stat_msg", ALPROTO_HTTP2, SIG_FLAG_TOCLIENT,
             HTTP2StateDataServer, DetectEngineInspectBufferGeneric, GetData2);
@@ -139,7 +142,7 @@ void DetectHttpStatMsgRegister (void)
 static int DetectHttpStatMsgSetup(DetectEngineCtx *de_ctx, Signature *s, const char *arg)
 {
     return DetectEngineContentModifierBufferSetup(
-            de_ctx, s, arg, DETECT_AL_HTTP_STAT_MSG, g_http_stat_msg_buffer_id, ALPROTO_HTTP1);
+            de_ctx, s, arg, DETECT_HTTP_STAT_MSG_CM, g_http_stat_msg_buffer_id, ALPROTO_HTTP1);
 }
 
 /**
@@ -153,9 +156,9 @@ static int DetectHttpStatMsgSetup(DetectEngineCtx *de_ctx, Signature *s, const c
  */
 static int DetectHttpStatMsgSetupSticky(DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
-    if (DetectBufferSetActiveList(de_ctx, s, g_http_stat_msg_buffer_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_http_stat_msg_buffer_id) < 0)
         return -1;
-    if (DetectSignatureSetAppProto(s, ALPROTO_HTTP) < 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_HTTP) < 0)
         return -1;
     return 0;
 }
@@ -170,14 +173,14 @@ static InspectionBuffer *GetData(DetectEngineThreadCtx *det_ctx,
     if (buffer->inspect == NULL) {
         htp_tx_t *tx = (htp_tx_t *)txv;
 
-        if (tx->response_message == NULL)
+        if (htp_tx_response_message(tx) == NULL)
             return NULL;
 
-        const uint32_t data_len = bstr_len(tx->response_message);
-        const uint8_t *data = bstr_ptr(tx->response_message);
+        const uint32_t data_len = (uint32_t)bstr_len(htp_tx_response_message(tx));
+        const uint8_t *data = bstr_ptr(htp_tx_response_message(tx));
 
-        InspectionBufferSetup(det_ctx, list_id, buffer, data, data_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(
+                det_ctx, list_id, buffer, data, data_len, transforms);
     }
 
     return buffer;

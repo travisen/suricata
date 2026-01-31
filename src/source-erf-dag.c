@@ -32,7 +32,7 @@
 
 #include "util-privs.h"
 #include "util-datalink.h"
-#include "util-device.h"
+#include "util-device-private.h"
 #include "tmqh-packetpool.h"
 #include "source-erf-dag.h"
 
@@ -89,7 +89,7 @@ NoErfDagSupportExit(ThreadVars *tv, const void *initdata, void **data)
 /* Number of bytes per loop to process before fetching more data. */
 #define BYTES_PER_LOOP (4 * 1024 * 1024) /* 4 MB */
 
-extern uint16_t max_pending_packets;
+extern uint32_t max_pending_packets;
 
 typedef struct ErfDagThreadVars_ {
     ThreadVars *tv;
@@ -362,7 +362,7 @@ ReceiveErfDagLoop(ThreadVars *tv, void *data, void *slot)
             SCReturnInt(TM_ECODE_FAILED);
         }
 
-        StatsSyncCountersIfSignalled(tv);
+        StatsSyncCountersIfSignalled(&tv->stats);
 
         SCLogDebug("Read %d records from stream: %d, DAG: %s",
             pkts_read, dtv->dagstream, dtv->dagname);
@@ -426,7 +426,7 @@ ProcessErfDagRecords(ErfDagThreadVars *ewtn, uint8_t *top, uint32_t *pkts_read)
             break;
         case ERF_TYPE_ETH:
             if (dr->lctr) {
-                StatsAddUI64(ewtn->tv, ewtn->drops, SCNtohs(dr->lctr));
+                StatsCounterAddI64(&ewtn->tv->stats, ewtn->drops, SCNtohs(dr->lctr));
             }
             break;
         default:
@@ -513,7 +513,7 @@ ProcessErfDagRecord(ErfDagThreadVars *ewtn, char *prec)
     uint64_t usecs = ts >> 32;
     p->ts = SCTIME_ADD_USECS(p->ts, usecs);
 
-    StatsIncr(ewtn->tv, ewtn->packets);
+    StatsCounterIncr(&ewtn->tv->stats, ewtn->packets);
     ewtn->bytes += wlen;
 
     if (TmThreadsSlotProcessPkt(ewtn->tv, ewtn->slot, p) != TM_ECODE_OK) {
@@ -534,17 +534,12 @@ ReceiveErfDagThreadExitStats(ThreadVars *tv, void *data)
 {
     ErfDagThreadVars *ewtn = (ErfDagThreadVars *)data;
 
-    (void)SC_ATOMIC_SET(ewtn->livedev->pkts,
-        StatsGetLocalCounterValue(tv, ewtn->packets));
-    (void)SC_ATOMIC_SET(ewtn->livedev->drop,
-        StatsGetLocalCounterValue(tv, ewtn->drops));
+    (void)SC_ATOMIC_SET(ewtn->livedev->pkts, StatsCounterGetLocalValue(&tv->stats, ewtn->packets));
+    (void)SC_ATOMIC_SET(ewtn->livedev->drop, StatsCounterGetLocalValue(&tv->stats, ewtn->drops));
 
-    SCLogInfo("Stream: %d; Bytes: %"PRIu64"; Packets: %"PRIu64
-        "; Drops: %"PRIu64,
-        ewtn->dagstream,
-        ewtn->bytes,
-        StatsGetLocalCounterValue(tv, ewtn->packets),
-        StatsGetLocalCounterValue(tv, ewtn->drops));
+    SCLogInfo("Stream: %d; Bytes: %" PRIu64 "; Packets: %" PRIi64 "; Drops: %" PRIi64,
+            ewtn->dagstream, ewtn->bytes, StatsCounterGetLocalValue(&tv->stats, ewtn->packets),
+            StatsCounterGetLocalValue(&tv->stats, ewtn->drops));
 }
 
 /**

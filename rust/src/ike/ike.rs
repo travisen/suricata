@@ -23,13 +23,19 @@ use self::ipsec_parser::*;
 use crate::applayer;
 use crate::applayer::*;
 use crate::core::{self, *};
+use crate::direction::Direction;
+use crate::flow::Flow;
 use crate::ike::ikev1::{handle_ikev1, IkeV1Header, Ikev1Container};
 use crate::ike::ikev2::{handle_ikev2, Ikev2Container};
 use crate::ike::parser::*;
-use nom7::Err;
+use nom8::Err;
 use std;
 use std::collections::HashSet;
 use std::ffi::CString;
+use suricata_sys::sys::{
+    AppLayerParserState, AppProto, SCAppLayerParserConfParserEnabled,
+    SCAppLayerProtoDetectConfProtoDetectionEnabled, SCAppLayerRegisterParserAlias,
+};
 
 #[derive(AppLayerEvent)]
 pub enum IkeEvent {
@@ -112,7 +118,6 @@ pub struct IKETransaction {
     /// errors seen during exchange
     pub errors: u32,
 
-    logged: LoggerFlags,
     pub tx_data: applayer::AppLayerTxData,
 }
 
@@ -124,11 +129,11 @@ impl Transaction for IKETransaction {
 
 impl IKETransaction {
     pub fn new(direction: Direction) -> Self {
-	Self {
-	    direction,
-	    tx_data: applayer::AppLayerTxData::for_direction(direction),
-	    ..Default::default()
-	}
+        Self {
+            direction,
+            tx_data: applayer::AppLayerTxData::for_direction(direction),
+            ..Default::default()
+        }
     }
 
     /// Set an event.
@@ -171,7 +176,9 @@ impl IKEState {
     }
 
     pub fn get_tx(&mut self, tx_id: u64) -> Option<&mut IKETransaction> {
-        self.transactions.iter_mut().find(|tx| tx.tx_id == tx_id + 1)
+        self.transactions
+            .iter_mut()
+            .find(|tx| tx.tx_id == tx_id + 1)
     }
 
     pub fn new_tx(&mut self, direction: Direction) -> IKETransaction {
@@ -277,8 +284,7 @@ fn probe(input: &[u8], direction: Direction, rdir: *mut u8) -> bool {
 // C exports.
 
 /// C entry point for a probing parser.
-#[no_mangle]
-pub unsafe extern "C" fn rs_ike_probing_parser(
+unsafe extern "C" fn ike_probing_parser(
     _flow: *const Flow, direction: u8, input: *const u8, input_len: u32, rdir: *mut u8,
 ) -> AppProto {
     if input_len < 28 {
@@ -295,8 +301,7 @@ pub unsafe extern "C" fn rs_ike_probing_parser(
     return ALPROTO_FAILED;
 }
 
-#[no_mangle]
-pub extern "C" fn rs_ike_state_new(
+extern "C" fn ike_state_new(
     _orig_state: *mut std::os::raw::c_void, _orig_proto: AppProto,
 ) -> *mut std::os::raw::c_void {
     let state = IKEState::default();
@@ -304,38 +309,33 @@ pub extern "C" fn rs_ike_state_new(
     return Box::into_raw(boxed) as *mut _;
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_ike_state_free(state: *mut std::os::raw::c_void) {
+unsafe extern "C" fn ike_state_free(state: *mut std::os::raw::c_void) {
     // Just unbox...
     std::mem::drop(Box::from_raw(state as *mut IKEState));
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_ike_state_tx_free(state: *mut std::os::raw::c_void, tx_id: u64) {
+unsafe extern "C" fn ike_state_tx_free(state: *mut std::os::raw::c_void, tx_id: u64) {
     let state = cast_pointer!(state, IKEState);
     state.free_tx(tx_id);
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_ike_parse_request(
-    _flow: *const Flow, state: *mut std::os::raw::c_void, _pstate: *mut std::os::raw::c_void,
-    stream_slice: StreamSlice, _data: *const std::os::raw::c_void,
+unsafe extern "C" fn ike_parse_request(
+    _flow: *mut Flow, state: *mut std::os::raw::c_void, _pstate: *mut AppLayerParserState,
+    stream_slice: StreamSlice, _data: *mut std::os::raw::c_void,
 ) -> AppLayerResult {
     let state = cast_pointer!(state, IKEState);
     return state.handle_input(stream_slice.as_slice(), Direction::ToServer);
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_ike_parse_response(
-    _flow: *const Flow, state: *mut std::os::raw::c_void, _pstate: *mut std::os::raw::c_void,
-    stream_slice: StreamSlice, _data: *const std::os::raw::c_void,
+unsafe extern "C" fn ike_parse_response(
+    _flow: *mut Flow, state: *mut std::os::raw::c_void, _pstate: *mut AppLayerParserState,
+    stream_slice: StreamSlice, _data: *mut std::os::raw::c_void,
 ) -> AppLayerResult {
     let state = cast_pointer!(state, IKEState);
     return state.handle_input(stream_slice.as_slice(), Direction::ToClient);
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_ike_state_get_tx(
+unsafe extern "C" fn ike_state_get_tx(
     state: *mut std::os::raw::c_void, tx_id: u64,
 ) -> *mut std::os::raw::c_void {
     let state = cast_pointer!(state, IKEState);
@@ -349,39 +349,15 @@ pub unsafe extern "C" fn rs_ike_state_get_tx(
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_ike_state_get_tx_count(state: *mut std::os::raw::c_void) -> u64 {
+unsafe extern "C" fn ike_state_get_tx_count(state: *mut std::os::raw::c_void) -> u64 {
     let state = cast_pointer!(state, IKEState);
     return state.tx_id;
 }
 
-#[no_mangle]
-pub extern "C" fn rs_ike_state_progress_completion_status(_direction: u8) -> std::os::raw::c_int {
-    // This parser uses 1 to signal transaction completion status.
-    return 1;
-}
-
-#[no_mangle]
-pub extern "C" fn rs_ike_tx_get_alstate_progress(
+extern "C" fn ike_tx_get_alstate_progress(
     _tx: *mut std::os::raw::c_void, _direction: u8,
 ) -> std::os::raw::c_int {
     return 1;
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn rs_ike_tx_get_logged(
-    _state: *mut std::os::raw::c_void, tx: *mut std::os::raw::c_void,
-) -> u32 {
-    let tx = cast_pointer!(tx, IKETransaction);
-    return tx.logged.get();
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn rs_ike_tx_set_logged(
-    _state: *mut std::os::raw::c_void, tx: *mut std::os::raw::c_void, logged: u32,
-) {
-    let tx = cast_pointer!(tx, IKETransaction);
-    tx.logged.set(logged);
 }
 
 static mut ALPROTO_IKE: AppProto = ALPROTO_UNKNOWN;
@@ -390,55 +366,56 @@ static mut ALPROTO_IKE: AppProto = ALPROTO_UNKNOWN;
 const PARSER_NAME: &[u8] = b"ike\0";
 const PARSER_ALIAS: &[u8] = b"ikev2\0";
 
-export_tx_data_get!(rs_ike_get_tx_data, IKETransaction);
-export_state_data_get!(rs_ike_get_state_data, IKEState);
+export_tx_data_get!(ike_get_tx_data, IKETransaction);
+export_state_data_get!(ike_get_state_data, IKEState);
 
 #[no_mangle]
-pub unsafe extern "C" fn rs_ike_register_parser() {
+pub unsafe extern "C" fn SCRegisterIkeParser() {
     let default_port = CString::new("500").unwrap();
     let parser = RustParser {
         name: PARSER_NAME.as_ptr() as *const std::os::raw::c_char,
         default_port: default_port.as_ptr(),
         ipproto: core::IPPROTO_UDP,
-        probe_ts: Some(rs_ike_probing_parser),
-        probe_tc: Some(rs_ike_probing_parser),
+        probe_ts: Some(ike_probing_parser),
+        probe_tc: Some(ike_probing_parser),
         min_depth: 0,
         max_depth: 16,
-        state_new: rs_ike_state_new,
-        state_free: rs_ike_state_free,
-        tx_free: rs_ike_state_tx_free,
-        parse_ts: rs_ike_parse_request,
-        parse_tc: rs_ike_parse_response,
-        get_tx_count: rs_ike_state_get_tx_count,
-        get_tx: rs_ike_state_get_tx,
+        state_new: ike_state_new,
+        state_free: ike_state_free,
+        tx_free: ike_state_tx_free,
+        parse_ts: ike_parse_request,
+        parse_tc: ike_parse_response,
+        get_tx_count: ike_state_get_tx_count,
+        get_tx: ike_state_get_tx,
         tx_comp_st_ts: 1,
         tx_comp_st_tc: 1,
-        tx_get_progress: rs_ike_tx_get_alstate_progress,
+        tx_get_progress: ike_tx_get_alstate_progress,
         get_eventinfo: Some(IkeEvent::get_event_info),
         get_eventinfo_byid: Some(IkeEvent::get_event_info_by_id),
         localstorage_new: None,
         localstorage_free: None,
         get_tx_files: None,
         get_tx_iterator: Some(applayer::state_get_tx_iterator::<IKEState, IKETransaction>),
-        get_tx_data: rs_ike_get_tx_data,
-        get_state_data: rs_ike_get_state_data,
+        get_tx_data: ike_get_tx_data,
+        get_state_data: ike_get_state_data,
         apply_tx_config: None,
         flags: 0,
-        truncate: None,
         get_frame_id_by_name: None,
         get_frame_name_by_id: None,
+        get_state_id_by_name: None,
+        get_state_name_by_id: None,
     };
 
     let ip_proto_str = CString::new("udp").unwrap();
 
-    if AppLayerProtoDetectConfProtoDetectionEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
-        let alproto = AppLayerRegisterProtocolDetection(&parser, 1);
+    if SCAppLayerProtoDetectConfProtoDetectionEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
+        let alproto = applayer_register_protocol_detection(&parser, 1);
         ALPROTO_IKE = alproto;
-        if AppLayerParserConfParserEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
+        if SCAppLayerParserConfParserEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
             let _ = AppLayerRegisterParser(&parser, alproto);
         }
 
-        AppLayerRegisterParserAlias(
+        SCAppLayerRegisterParserAlias(
             PARSER_NAME.as_ptr() as *const std::os::raw::c_char,
             PARSER_ALIAS.as_ptr() as *const std::os::raw::c_char,
         );

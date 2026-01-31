@@ -21,11 +21,28 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __DETECT_FILEDATA_H__
-#define __DETECT_FILEDATA_H__
+#ifndef SURICATA_DETECT_FILEDATA_H
+#define SURICATA_DETECT_FILEDATA_H
 
 /* prototypes */
 void DetectFiledataRegister (void);
+
+/* File handler registration */
+#define MAX_DETECT_ALPROTO_CNT 10
+typedef struct DetectFileHandlerTableElmt_ {
+    const char *name;
+    int priority;
+    PrefilterRegisterFunc PrefilterFn;
+    InspectEngineFuncPtr Callback;
+    InspectionBufferGetDataPtr GetData;
+    int al_protocols[MAX_DETECT_ALPROTO_CNT];
+    int tx_progress;
+    int progress;
+} DetectFileHandlerTableElmt;
+void DetectFileRegisterFileProtocols(DetectFileHandlerTableElmt *entry);
+
+/* File registration table */
+extern DetectFileHandlerTableElmt filehandler_table[DETECT_TBLSIZE_STATIC];
 
 typedef struct PrefilterMpmFiledata {
     int list_id;
@@ -40,4 +57,4 @@ uint8_t DetectEngineInspectFiledata(DetectEngineCtx *de_ctx, DetectEngineThreadC
 int PrefilterMpmFiledataRegister(DetectEngineCtx *de_ctx, SigGroupHead *sgh, MpmCtx *mpm_ctx,
         const DetectBufferMpmRegistry *mpm_reg, int list_id);
 
-#endif /* __DETECT_FILEDATA_H__ */
+#endif /* SURICATA_DETECT_FILEDATA_H */

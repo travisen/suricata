@@ -32,8 +32,8 @@
 #include "threadvars.h"
 #include "tm-threads.h"
 #include "queue.h"
-#include "util-signal.h"
 
+#include "detect-engine.h"
 #include "detect-engine-loader.h"
 #include "detect-engine-build.h"
 #include "detect-engine-analyzer.h"
@@ -55,12 +55,8 @@ extern int engine_analysis;
 static bool fp_engine_analysis_set = false;
 bool rule_engine_analysis_set = false;
 
-/**
- *  \brief Create the path if default-rule-path was specified
- *  \param sig_file The name of the file
- *  \retval str Pointer to the string path + sig_file
- */
-char *DetectLoadCompleteSigPath(const DetectEngineCtx *de_ctx, const char *sig_file)
+static char *DetectLoadCompleteSigPathWithKey(
+        const DetectEngineCtx *de_ctx, const char *default_key, const char *sig_file)
 {
     const char *defaultpath = NULL;
     char *path = NULL;
@@ -74,11 +70,10 @@ char *DetectLoadCompleteSigPath(const DetectEngineCtx *de_ctx, const char *sig_f
     /* If we have a configuration prefix, only use it if the primary configuration node
      * is not marked as final, as that means it was provided on the command line with
      * a --set. */
-    ConfNode *default_rule_path = ConfGetNode("default-rule-path");
+    SCConfNode *default_rule_path = SCConfGetNode(default_key);
     if ((!default_rule_path || !default_rule_path->final) && strlen(de_ctx->config_prefix) > 0) {
-        snprintf(varname, sizeof(varname), "%s.default-rule-path",
-                de_ctx->config_prefix);
-        default_rule_path = ConfGetNode(varname);
+        snprintf(varname, sizeof(varname), "%s.%s", de_ctx->config_prefix, default_key);
+        default_rule_path = SCConfGetNode(varname);
     }
     if (default_rule_path) {
         defaultpath = default_rule_path->val;
@@ -104,6 +99,16 @@ char *DetectLoadCompleteSigPath(const DetectEngineCtx *de_ctx, const char *sig_f
 }
 
 /**
+ *  \brief Create the path if default-rule-path was specified
+ *  \param sig_file The name of the file
+ *  \retval str Pointer to the string path + sig_file
+ */
+char *DetectLoadCompleteSigPath(const DetectEngineCtx *de_ctx, const char *sig_file)
+{
+    return DetectLoadCompleteSigPathWithKey(de_ctx, "default-rule-path", sig_file);
+}
+
+/**
  *  \brief Load a file with signatures
  *  \param de_ctx Pointer to the detection engine context
  *  \param sig_file Filename to load signatures from
@@ -111,10 +116,9 @@ char *DetectLoadCompleteSigPath(const DetectEngineCtx *de_ctx, const char *sig_f
  *  \param badsigs_tot Will store number of invalid signatures in the file
  *  \retval 0 on success, -1 on error
  */
-static int DetectLoadSigFile(
-        DetectEngineCtx *de_ctx, char *sig_file, int *goodsigs, int *badsigs, int *skippedsigs)
+static int DetectLoadSigFile(DetectEngineCtx *de_ctx, const char *sig_file, int *goodsigs,
+        int *badsigs, int *skippedsigs, const bool firewall_rule)
 {
-    Signature *sig = NULL;
     int good = 0, bad = 0, skipped = 0;
     char line[DETECT_MAX_RULE_SIZE] = "";
     size_t offset = 0;
@@ -132,7 +136,14 @@ static int DetectLoadSigFile(
         return -1;
     }
 
-    while(fgets(line + offset, (int)sizeof(line) - offset, fp) != NULL) {
+    while (1) {
+        /* help clang to understand offset can't get > sizeof(line), so the argument to
+         * fgets can't get negative. */
+        BUG_ON(offset >= sizeof(line));
+        char *res = fgets(line + offset, (int)(sizeof(line) - offset), fp);
+        if (res == NULL)
+            break;
+
         lineno++;
         size_t len = strlen(line);
 
@@ -165,10 +176,13 @@ static int DetectLoadSigFile(
         de_ctx->rule_file = sig_file;
         de_ctx->rule_line = lineno - multiline;
 
-        sig = DetectEngineAppendSig(de_ctx, line);
+        Signature *sig = NULL;
+        if (firewall_rule)
+            sig = DetectFirewallRuleAppendNew(de_ctx, line);
+        else
+            sig = DetectEngineAppendSig(de_ctx, line);
         if (sig != NULL) {
             if (rule_engine_analysis_set || fp_engine_analysis_set) {
-                RetrieveFPForSig(de_ctx, sig);
                 if (fp_engine_analysis_set) {
                     EngineAnalysisFP(de_ctx, sig, line);
                 }
@@ -260,7 +274,7 @@ static int ProcessSigFiles(DetectEngineCtx *de_ctx, char *pattern, SigFileLoader
         } else {
             SCLogConfig("Loading rule file: %s", fname);
         }
-        r = DetectLoadSigFile(de_ctx, fname, good_sigs, bad_sigs, skipped_sigs);
+        r = DetectLoadSigFile(de_ctx, fname, good_sigs, bad_sigs, skipped_sigs, false);
         if (r < 0) {
             ++(st->bad_files);
         }
@@ -278,6 +292,76 @@ static int ProcessSigFiles(DetectEngineCtx *de_ctx, char *pattern, SigFileLoader
     return r;
 }
 
+static int LoadFirewallRuleFiles(DetectEngineCtx *de_ctx)
+{
+    if (de_ctx->firewall_rule_file_exclusive) {
+        int32_t good_sigs = 0;
+        int32_t bad_sigs = 0;
+        int32_t skipped_sigs = 0;
+
+        SCLogDebug("fw: rule file full path \"%s\"", de_ctx->firewall_rule_file_exclusive);
+
+        int ret = DetectLoadSigFile(de_ctx, de_ctx->firewall_rule_file_exclusive, &good_sigs,
+                &bad_sigs, &skipped_sigs, true);
+
+        /* for now be as strict as possible */
+        if (ret != 0 || bad_sigs != 0 || skipped_sigs != 0) {
+            /* Some rules failed to load, just exit as
+             * errors would have already been logged. */
+            exit(EXIT_FAILURE);
+        }
+
+        if (good_sigs == 0) {
+            SCLogNotice("fw: No rules loaded from %s.", de_ctx->firewall_rule_file_exclusive);
+        } else {
+            SCLogNotice("fw: %d rules loaded from %s.", good_sigs,
+                    de_ctx->firewall_rule_file_exclusive);
+            de_ctx->sig_stat.good_sigs_total += good_sigs;
+        }
+
+        return 0;
+    }
+
+    SCConfNode *default_fw_rule_path = SCConfGetNode("firewall.rule-path");
+    if (default_fw_rule_path == NULL) {
+        SCLogNotice("fw: firewall.rule-path not defined, skip loading firewall rules");
+        return 0;
+    }
+    SCConfNode *rule_files = SCConfGetNode("firewall.rule-files");
+    if (rule_files == NULL) {
+        SCLogNotice("fw: firewall.rule-files not defined, skip loading firewall rules");
+        return 0;
+    }
+
+    SCConfNode *file = NULL;
+    TAILQ_FOREACH (file, &rule_files->head, next) {
+        int32_t good_sigs = 0;
+        int32_t bad_sigs = 0;
+        int32_t skipped_sigs = 0;
+
+        char *sfile = DetectLoadCompleteSigPathWithKey(de_ctx, "firewall.rule-path", file->val);
+        SCLogNotice("fw: rule file full path \"%s\"", sfile);
+
+        int ret = DetectLoadSigFile(de_ctx, sfile, &good_sigs, &bad_sigs, &skipped_sigs, true);
+        SCFree(sfile);
+
+        /* for now be as strict as possible */
+        if (ret != 0 || bad_sigs != 0 || skipped_sigs != 0) {
+            /* Some rules failed to load, just exit as
+             * errors would have already been logged. */
+            exit(EXIT_FAILURE);
+        }
+
+        if (good_sigs == 0) {
+            SCLogNotice("fw: No rules loaded from %s.", file->val);
+        } else {
+            SCLogNotice("fw: %d rules loaded from %s.", good_sigs, file->val);
+            de_ctx->sig_stat.good_sigs_total += good_sigs;
+        }
+    }
+    return 0;
+}
+
 /**
  *  \brief Load signatures
  *  \param de_ctx Pointer to the detection engine context
@@ -289,8 +373,8 @@ int SigLoadSignatures(DetectEngineCtx *de_ctx, char *sig_file, bool sig_file_exc
 {
     SCEnter();
 
-    ConfNode *rule_files;
-    ConfNode *file = NULL;
+    SCConfNode *rule_files;
+    SCConfNode *file = NULL;
     SigFileLoaderStat *sig_stat = &de_ctx->sig_stat;
     int ret = 0;
     char *sfile = NULL;
@@ -300,23 +384,37 @@ int SigLoadSignatures(DetectEngineCtx *de_ctx, char *sig_file, bool sig_file_exc
     int skipped_sigs = 0;
 
     if (strlen(de_ctx->config_prefix) > 0) {
-        snprintf(varname, sizeof(varname), "%s.rule-files",
-                de_ctx->config_prefix);
+        snprintf(varname, sizeof(varname), "%s.rule-files", de_ctx->config_prefix);
     }
 
-    if (RunmodeGetCurrent() == RUNMODE_ENGINE_ANALYSIS) {
+    if (SCRunmodeGet() == RUNMODE_ENGINE_ANALYSIS) {
         SetupEngineAnalysis(de_ctx, &fp_engine_analysis_set, &rule_engine_analysis_set);
+    }
+
+    if (EngineModeIsFirewall() || de_ctx->firewall_rule_file_exclusive) {
+        if (LoadFirewallRuleFiles(de_ctx) < 0) {
+            if (de_ctx->failure_fatal) {
+                exit(EXIT_FAILURE);
+            }
+            ret = -1;
+            goto end;
+        }
+
+        /* skip regular rules if we used a exclusive firewall rule file */
+        if (!sig_file_exclusive && de_ctx->firewall_rule_file_exclusive) {
+            ret = 0;
+            goto skip_regular_rules;
+        }
     }
 
     /* ok, let's load signature files from the general config */
     if (!(sig_file != NULL && sig_file_exclusive)) {
-        rule_files = ConfGetNode(varname);
+        rule_files = SCConfGetNode(varname);
         if (rule_files != NULL) {
-            if (!ConfNodeIsSequence(rule_files)) {
+            if (!SCConfNodeIsSequence(rule_files)) {
                 SCLogWarning("Invalid rule-files configuration section: "
                              "expected a list of filenames.");
-            }
-            else {
+            } else {
                 TAILQ_FOREACH(file, &rule_files->head, next) {
                     sfile = DetectLoadCompleteSigPath(de_ctx, file->val);
                     good_sigs = bad_sigs = skipped_sigs = 0;
@@ -353,6 +451,7 @@ int SigLoadSignatures(DetectEngineCtx *de_ctx, char *sig_file, bool sig_file_exc
         }
     }
 
+skip_regular_rules:
     /* now we should have signatures to work with */
     if (sig_stat->good_sigs_total <= 0) {
         if (sig_stat->total_files > 0) {
@@ -405,7 +504,7 @@ int SigLoadSignatures(DetectEngineCtx *de_ctx, char *sig_file, bool sig_file_exc
 
  end:
     gettimeofday(&de_ctx->last_reload, NULL);
-    if (RunmodeGetCurrent() == RUNMODE_ENGINE_ANALYSIS) {
+    if (SCRunmodeGet() == RUNMODE_ENGINE_ANALYSIS) {
         CleanupEngineAnalysis(de_ctx);
     }
 
@@ -469,6 +568,12 @@ int DetectLoadersSync(void)
                 done = true;
             }
             SCMutexUnlock(&loader->m);
+            if (!done) {
+                /* nudge thread in case it's sleeping */
+                SCCtrlMutexLock(loader->tv->ctrl_mutex);
+                pthread_cond_broadcast(loader->tv->ctrl_cond);
+                SCCtrlMutexUnlock(loader->tv->ctrl_mutex);
+            }
         }
         SCMutexLock(&loader->m);
         if (loader->result != 0) {
@@ -495,7 +600,7 @@ static void DetectLoaderInit(DetectLoaderControl *loader)
 void DetectLoadersInit(void)
 {
     intmax_t setting = NLOADERS;
-    (void)ConfGetInt("multi-detect.loaders", &setting);
+    (void)SCConfGetInt("multi-detect.loaders", &setting);
 
     if (setting < 1 || setting > 1024) {
         FatalError("invalid multi-detect.loaders setting %" PRIdMAX, setting);
@@ -524,7 +629,9 @@ static void TmThreadWakeupDetectLoaderThreads(void)
         while (tv != NULL) {
             if (strncmp(tv->name,"DL#",3) == 0) {
                 BUG_ON(tv->ctrl_cond == NULL);
+                SCCtrlMutexLock(tv->ctrl_mutex);
                 pthread_cond_broadcast(tv->ctrl_cond);
+                SCCtrlMutexUnlock(tv->ctrl_mutex);
             }
             tv = tv->next;
         }
@@ -568,6 +675,9 @@ static TmEcode DetectLoaderThreadInit(ThreadVars *t, const void *initdata, void 
     /* pass thread data back to caller */
     *data = ftd;
 
+    DetectLoaderControl *loader = &loaders[ftd->instance];
+    loader->tv = t;
+
     return TM_ECODE_OK;
 }
 
@@ -585,14 +695,8 @@ static TmEcode DetectLoader(ThreadVars *th_v, void *thread_data)
 
     TmThreadsSetFlag(th_v, THV_INIT_DONE | THV_RUNNING);
     SCLogDebug("loader thread started");
-    while (1)
-    {
-        if (TmThreadsCheckFlag(th_v, THV_PAUSE)) {
-            TmThreadsSetFlag(th_v, THV_PAUSED);
-            TmThreadTestThreadUnPaused(th_v);
-            TmThreadsUnsetFlag(th_v, THV_PAUSED);
-        }
-
+    bool run = TmThreadsWaitForUnpause(th_v);
+    while (run) {
         /* see if we have tasks */
 
         DetectLoaderControl *loader = &loaders[ftd->instance];
@@ -609,13 +713,22 @@ static TmEcode DetectLoader(ThreadVars *th_v, void *thread_data)
 
         SCMutexUnlock(&loader->m);
 
-        if (TmThreadsCheckFlag(th_v, THV_KILL)) {
-            break;
-        }
-
         /* just wait until someone wakes us up */
         SCCtrlMutexLock(th_v->ctrl_mutex);
-        SCCtrlCondWait(th_v->ctrl_cond, th_v->ctrl_mutex);
+        int rc = 0;
+        while (rc == 0) {
+            if (TmThreadsCheckFlag(th_v, THV_KILL)) {
+                run = false;
+                break;
+            }
+            SCMutexLock(&loader->m);
+            bool has_work = loader->task_list.tqh_first != NULL;
+            SCMutexUnlock(&loader->m);
+            if (has_work)
+                break;
+
+            rc = SCCtrlCondWait(th_v->ctrl_cond, th_v->ctrl_mutex);
+        }
         SCCtrlMutexUnlock(th_v->ctrl_mutex);
 
         SCLogDebug("woke up...");

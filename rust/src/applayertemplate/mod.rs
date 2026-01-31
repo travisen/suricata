@@ -20,5 +20,6 @@
 mod parser;
 pub mod template;
 /* TEMPLATE_START_REMOVE */
+pub mod detect;
 pub mod logger;
 /* TEMPLATE_END_REMOVE */

@@ -117,7 +117,6 @@ static void Add(SCFPSupportSMList **list, const int list_id, const int priority)
         new->next = ip->next;
         ip->next = new;
     }
-    return;
 }
 
 /**
@@ -238,6 +237,18 @@ static int DetectFastPatternSetup(DetectEngineCtx *de_ctx, Signature *s, const c
         pm = pm2;
     }
 
+    if (s->flags & SIG_FLAG_TXBOTHDIR && s->init_data->curbuf != NULL) {
+        if (DetectBufferToClient(de_ctx, s->init_data->curbuf->id, s->alproto)) {
+            if (s->init_data->init_flags & SIG_FLAG_INIT_TXDIR_STREAMING_TOSERVER) {
+                SCLogError("fast_pattern cannot be used on to_client keyword for "
+                           "transactional rule with a streaming buffer to server %u",
+                        s->id);
+                goto error;
+            }
+            s->init_data->init_flags |= SIG_FLAG_INIT_TXDIR_FAST_TOCLIENT;
+        }
+    }
+
     cd = (DetectContentData *)pm->ctx;
     if ((cd->flags & DETECT_CONTENT_NEGATED) &&
         ((cd->flags & DETECT_CONTENT_DISTANCE) ||
@@ -272,6 +283,10 @@ static int DetectFastPatternSetup(DetectEngineCtx *de_ctx, Signature *s, const c
                 }
             }
         }
+        if (SigMatchListSMBelongsTo(s, pm) == DETECT_SM_LIST_BASE64_DATA) {
+            SCLogError("fast_pattern cannot be used with base64_data");
+            goto error;
+        }
         cd->flags |= DETECT_CONTENT_FAST_PATTERN;
         return 0;
     }
@@ -304,8 +319,7 @@ static int DetectFastPatternSetup(DetectEngineCtx *de_ctx, Signature *s, const c
             goto error;
         }
         uint16_t offset;
-        if (StringParseUint16(&offset, 10, 0,
-                              (const char *)arg_substr) < 0) {
+        if (StringParseUint16(&offset, 10, 0, (const char *)arg_substr) <= 0) {
             SCLogError("Invalid fast pattern offset:"
                        " \"%s\"",
                     arg_substr);
@@ -320,8 +334,7 @@ static int DetectFastPatternSetup(DetectEngineCtx *de_ctx, Signature *s, const c
             goto error;
         }
         uint16_t length;
-        if (StringParseUint16(&length, 10, 0,
-                              (const char *)arg_substr) < 0) {
+        if (StringParseUint16(&length, 10, 0, (const char *)arg_substr) <= 0) {
             SCLogError("Invalid value for fast "
                        "pattern: \"%s\"",
                     arg_substr);
@@ -367,6 +380,7 @@ static int DetectFastPatternSetup(DetectEngineCtx *de_ctx, Signature *s, const c
 
 #ifdef UNITTESTS
 #include "detect-engine-alert.h"
+#include "detect-engine-buffer.h"
 static SigMatch *GetMatches(Signature *s, const int list)
 {
     SigMatch *sm = DetectBufferGetFirstSigMatch(s, list);
@@ -1026,6 +1040,7 @@ static int DetectFastPatternTest14(void)
     DetectEngineThreadCtx *det_ctx = NULL;
 
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
     Packet *p = UTHBuildPacket(buf, buflen, IPPROTO_TCP);
     FAIL_IF_NULL(p);
 
@@ -1057,6 +1072,7 @@ static int DetectFastPatternTest14(void)
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
     FlowShutdown();
+    StatsThreadCleanup(&th_v.stats);
     PASS;
 }
 

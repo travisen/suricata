@@ -25,6 +25,7 @@
 #include "conf.h"
 #include "datasets.h"
 #include "datasets-ipv4.h"
+#include "util-hash-lookup3.h"
 #include "util-thash.h"
 #include "util-print.h"
 
@@ -37,6 +38,20 @@ int IPv4Set(void *dst, void *src)
     return 0;
 }
 
+int IPv4JsonSet(void *dst, void *src)
+{
+    if (IPv4Set(dst, src) < 0)
+        return -1;
+
+    IPv4Type *src_s = src;
+    IPv4Type *dst_s = dst;
+
+    if (DatajsonCopyJson(&dst_s->json, &src_s->json) < 0)
+        return -1;
+
+    return 0;
+}
+
 bool IPv4Compare(void *a, void *b)
 {
     const IPv4Type *as = a;
@@ -45,18 +60,27 @@ bool IPv4Compare(void *a, void *b)
     return (memcmp(as->ipv4, bs->ipv4, sizeof(as->ipv4)) == 0);
 }
 
-uint32_t IPv4Hash(void *s)
+uint32_t IPv4Hash(uint32_t hash_seed, void *s)
 {
     const IPv4Type *str = s;
-    uint32_t hash = 5381;
-
-    for (int i = 0; i < (int)sizeof(str->ipv4); i++) {
-        hash = ((hash << 5) + hash) + str->ipv4[i]; /* hash * 33 + c */
-    }
-    return hash;
+    return hashword((uint32_t *)str->ipv4, 1, hash_seed);
 }
 
 // data stays in hash
 void IPv4Free(void *s)
 {
+}
+
+void IPv4JsonFree(void *s)
+{
+    const IPv4Type *as = s;
+    if (as->json.value) {
+        SCFree(as->json.value);
+    }
+}
+
+uint32_t IPv4JsonGetLength(void *s)
+{
+    const IPv4Type *as = s;
+    return as->json.len;
 }

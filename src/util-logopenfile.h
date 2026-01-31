@@ -21,8 +21,8 @@
  * \author Mike Pomraning <mpomraning@qualys.com>
  */
 
-#ifndef __UTIL_LOGOPENFILE_H__
-#define __UTIL_LOGOPENFILE_H__
+#ifndef SURICATA_UTIL_LOGOPENFILE_H
+#define SURICATA_UTIL_LOGOPENFILE_H
 
 #include "threads.h"
 #include "conf.h"            /* ConfNode   */
@@ -33,26 +33,26 @@
 #include "util-log-redis.h"
 #endif /* HAVE_LIBHIREDIS */
 
-#include "suricata-plugin.h"
+#include "output-eve.h"
 
 enum LogFileType {
     LOGFILE_TYPE_FILE,
     LOGFILE_TYPE_UNIX_DGRAM,
     LOGFILE_TYPE_UNIX_STREAM,
     LOGFILE_TYPE_REDIS,
-    LOGFILE_TYPE_PLUGIN,
+    /** New style or modular filetypes. */
+    LOGFILE_TYPE_FILETYPE,
     LOGFILE_TYPE_NOTSET
 };
 
-typedef struct SyslogSetup_ {
-    int alert_syslog_level;
-} SyslogSetup;
-
 typedef struct ThreadLogFileHashEntry {
-    uint64_t thread_id;
-    int slot_number; /* slot identifier -- for plugins */
-    bool isopen;
     struct LogFileCtx_ *ctx;
+
+    uint64_t thread_id;          /* OS thread identifier */
+    ThreadId internal_thread_id; /* Suri internal thread id; to assist output plugins correlating
+                                    usage */
+    uint16_t slot_number;        /* Slot identifier - used when forming per-thread output names*/
+    bool isopen;
 } ThreadLogFileHashEntry;
 
 struct LogFileCtx_;
@@ -62,11 +62,11 @@ typedef struct LogThreadedFileCtx_ {
     char *append;
 } LogThreadedFileCtx;
 
-typedef struct LogFilePluginCtx_ {
-    SCEveFileType *plugin;
+typedef struct LogFileTypeCtx_ {
+    SCEveFileType *filetype;
     void *init_data;
     void *thread_data;
-} LogFilePluginCtx;
+} LogFileTypeCtx;
 
 /** Global structure for Output Context */
 typedef struct LogFileCtx_ {
@@ -86,8 +86,9 @@ typedef struct LogFileCtx_ {
 
     int (*Write)(const char *buffer, int buffer_len, struct LogFileCtx_ *fp);
     void (*Close)(struct LogFileCtx_ *fp);
+    void (*Flush)(struct LogFileCtx_ *fp);
 
-    LogFilePluginCtx plugin;
+    LogFileTypeCtx filetype;
 
     /** It will be locked if the log/alert
      * record cannot be written to the file in one call */
@@ -107,6 +108,9 @@ typedef struct LogFileCtx_ {
     /** File permissions */
     uint32_t filemode;
 
+    /** File buffering */
+    uint32_t buffer_size;
+
     /** Suricata sensor name */
     char *sensor_name;
 
@@ -125,7 +129,7 @@ typedef struct LogFileCtx_ {
     /**< Used by some alert loggers like the unified ones that append
      * the date onto the end of files. */
     char *prefix;
-    size_t prefix_len;
+    uint32_t prefix_len;
 
     /** Generic size_limit and size_current
      * They must be common to the threads accessing the same file */
@@ -156,6 +160,9 @@ typedef struct LogFileCtx_ {
     uint64_t dropped;
 
     uint64_t output_errors;
+
+    /* Track buffered content */
+    uint64_t bytes_since_last_flush;
 } LogFileCtx;
 
 /* Min time (msecs) before trying to reconnect a Unix domain socket */
@@ -164,13 +171,17 @@ typedef struct LogFileCtx_ {
 /* flags for LogFileCtx */
 #define LOGFILE_ROTATE_INTERVAL 0x04
 
+/* Default EVE output buffering size */
+#define LOGFILE_EVE_BUFFER_SIZE 0
+
 LogFileCtx *LogFileNewCtx(void);
 int LogFileFreeCtx(LogFileCtx *);
 int LogFileWrite(LogFileCtx *file_ctx, MemBuffer *buffer);
+void LogFileFlush(LogFileCtx *file_ctx);
 
-LogFileCtx *LogFileEnsureExists(LogFileCtx *lf_ctx);
-int SCConfLogOpenGeneric(ConfNode *conf, LogFileCtx *, const char *, int);
+LogFileCtx *LogFileEnsureExists(ThreadId thread_id, LogFileCtx *lf_ctx);
+int SCConfLogOpenGeneric(SCConfNode *conf, LogFileCtx *, const char *, int);
 int SCConfLogReopen(LogFileCtx *);
 bool SCLogOpenThreadedFile(const char *log_path, const char *append, LogFileCtx *parent_ctx);
 
-#endif /* __UTIL_LOGOPENFILE_H__ */
+#endif /* SURICATA_UTIL_LOGOPENFILE_H */

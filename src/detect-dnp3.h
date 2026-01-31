@@ -15,8 +15,8 @@
  * 02110-1301, USA.
  */
 
-#ifndef __DETECT_DNP3_H__
-#define __DETECT_DNP3_H__
+#ifndef SURICATA_DETECT_DNP3_H
+#define SURICATA_DETECT_DNP3_H
 
 /**
  * Struct for mapping symbolic names to values.
@@ -26,9 +26,6 @@ typedef struct DNP3Mapping_ {
     uint16_t  value;
 } DNP3Mapping;
 
-/* Map of internal indicators to value for external use. */
-extern DNP3Mapping DNP3IndicatorsMap[];
-
 void DetectDNP3Register(void);
 
-#endif /* __DETECT_DNP3_H__ */
+#endif /* SURICATA_DETECT_DNP3_H */

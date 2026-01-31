@@ -68,13 +68,17 @@ Protocol
 
     alert :example-rule-emphasis:`http` $HOME_NET any -> $EXTERNAL_NET any (msg:"HTTP GET Request Containing Rule in URI"; flow:established,to_server; http.method; content:"GET"; http.uri; content:"rule"; fast_pattern; classtype:bad-unknown; sid:123; rev:1;)
 
-This keyword in a signature tells Suricata which protocol it
-concerns. You can choose between four basic protocols:
+The protocol value will limit what protocol(s) the signature will be applied to:
 
+* ip (ip stands for 'all' or 'any')
 * tcp (for tcp-traffic)
 * udp
-* icmp
-* ip (ip stands for 'all' or 'any')
+* icmp (both icmpv4 and icmpv6)
+* icmpv4
+* icmpv6
+* ipv4/ip4 - just IPv4
+* ipv6/ip6 - just IPv6
+* pkthdr (for inspecting packets w/o invalid headers)
 
 There are a couple of additional TCP related protocol options:
 
@@ -87,15 +91,21 @@ you can pick from. These are:
 * http (either HTTP1 or HTTP2)
 * http1
 * http2
-* ftp
 * tls (this includes ssl)
+* quic
+* ftp (ftp command channel)
+* ftp-data (ftp data channel)
 * smb
 * dns
+* doh2 (dns over http/2)
+* mdns
 * dcerpc
+* ldap
 * dhcp
 * ssh
 * smtp
 * imap
+* pop3
 * modbus (disabled by default)
 * dnp3 (disabled by default)
 * enip (disabled by default)
@@ -103,6 +113,7 @@ you can pick from. These are:
 * ike
 * krb5
 * bittorrent-dht
+* mqtt
 * ntp
 * dhcp
 * rfb
@@ -110,12 +121,34 @@ you can pick from. These are:
 * snmp
 * tftp
 * sip
+* telnet
+* websocket
+* pgsql
+
+This list of protocols can be obtained via ``suricata --list-rule-protos``.
 
 The availability of these protocols depends on whether the protocol
 is enabled in the configuration file, suricata.yaml.
 
 If you have a signature with the protocol declared as 'http', Suricata makes
 sure the signature will only match if the TCP stream contains http traffic.
+
+Explicit rule hooks
+~~~~~~~~~~~~~~~~~~~
+
+In Suricata 8 the protocol field can be used to force evaluation of a rule at
+a specific explicit protocol state. This takes the format of::
+
+    <proto>:<hook>
+
+Where each application protocol comes with a default set of hooks, as well as
+per protocol specific hooks.
+
+More details can be found in :ref:`rule-hooks`.
+
+.. note::
+
+   While developed for the firewall usecase, these hooks can be used in IDS/IPS rules as well.
 
 Source and destination
 ----------------------
@@ -226,11 +259,14 @@ Direction
 
 The directional arrow indicates which way the signature will be evaluated.
 In most signatures an arrow to the right (``->``) is used. This means that only
-packets with the same direction can match. However, it is also possible to
-have a rule match both directions (``<>``)::
+packets with the same direction can match.
+There is also the double arrow (``=>``), which respects the directionality as ``->``,
+but allows matching on bidirectional transactions, used with keywords matching each direction.
+Finally, it is also possible to have a rule match either directions (``<>``)::
 
   source -> destination
-  source <> destination  (both directions)
+  source => destination
+  source <> destination  (either directions)
 
 The following example illustrates direction. In this example there is a client
 with IP address 1.2.3.4 using port 1024. A server with IP address 5.6.7.8,
@@ -246,9 +282,62 @@ Now, let's say we have a rule with the following header::
 Only the traffic from the client to the server will be matched by this rule,
 as the direction specifies that we do not want to evaluate the response packet.
 
+Now, if we have a rule with the following header::
+
+    alert tcp 1.2.3.4 any <> 5.6.7.8 80
+
+Suricata will duplicate it and use the same rule with headers in both directions :
+
+    alert tcp 1.2.3.4 any -> 5.6.7.8 80
+    alert tcp 5.6.7.8 80 -> 1.2.3.4 any
+
 .. warning::
 
    There is no 'reverse' style direction, i.e. there is no ``<-``.
+
+
+.. _Transactional Rules:
+
+Transactional rules
+~~~~~~~~~~~~~~~~~~~
+
+Here is an example of a transactional rule:
+
+.. container:: example-rule
+
+    alert http any any :example-rule-emphasis:`=>` 5.6.7.8 80 (msg:"matching both uri and status"; sid: 1; http.uri; content: "/download"; http.stat_code; content: "200";)
+
+It will match on flows to 5.6.7.8 and port 80.
+And it will match on a full transaction, using both the uri from the request,
+and the stat_code from the response.
+As such, it will match only when Suricata got both request and response.
+
+Transactional rules can use direction-ambiguous keywords, by specifying the direction.
+
+.. container:: example-rule
+
+    alert http any any => 5.6.7.8 80 (msg:"matching json to server and xml to client"; sid: 1; http.content_type: :example-rule-emphasis:`to_server`; content: "json"; http.content_type: :example-rule-emphasis:`to_client`; content: "xml";)
+
+Transactional rules have some limitations :
+
+* They cannot use direction-ambiguous keywords
+* They are only meant to work on transactions with first a request to the server,
+  and then a response to the client, and not the other way around (not tested).
+* They cannot have ``fast_pattern`` or ``prefilter`` the direction to client
+  if they also have a streaming buffer on the direction to server, see example below.
+* They will refuse to load if a single directional rule is enough.
+
+This rule cannot have the ``fast_pattern`` to client, as ``file.data`` is a streaming buffer and will refuse to load.
+
+.. container:: example-rule
+
+    alert http any any => any any (file.data: to_server; content: "123";  http.stat_code; content: "500"; fast_patten;)
+
+If not explicit, a transactional rule will choose a fast_pattern to server by default.
+
+Transactional rules behavior depends on how transactions are implemented per
+protocol, see :ref:`Protocols` for more details.
+
 
 Rule options
 ------------
@@ -279,6 +368,36 @@ The rest of this chapter in the documentation documents the use of the various
 keywords.
 
 Some generic details about keywords follow.
+
+Disabling Alerts
+~~~~~~~~~~~~~~~~
+There is a way to disable alert generation for a rule using the keyword ``noalert``.
+When this keyword is part of a rule, no alert is generated if the other
+portions of the rule match. That is, the other rule actions will *still be
+applied.* Using ``noalert`` can be helpful when a rule is
+collecting or setting state using `flowbits`, `datasets` or other
+state maintenance constructs of the rule language. See :doc:`thresholding`
+for other ways to control alert frequency.
+
+The following rules demonstrate ``noalert`` with a familiar pattern:
+
+* The first rule marks state without generating an alert.
+* The second rule generates an alert if the state is set and additional
+  qualifications are met.
+
+.. container:: example-rule
+
+    :example-rule-action:`alert` :example-rule-header:`http any any -> $HOME_NET any` :example-rule-options:`(msg:"noalert example: set state"; flow:established,to_server; xbits:set,SC.EXAMPLE,track ip_dst, expire 10; noalert; http.method; content:"GET"; sid:1; )`
+
+    :example-rule-action:`alert` :example-rule-header:`http any any -> $HOME_NET any` :example-rule-options:`(msg:"noalert example: state use"; flow:established,to_server; xbits:isset,SC.EXAMPLE,track ip_dst; http.method; content:"POST"; sid: 2; )`
+
+In IPS mode, ``noalert`` is commonly used in when Suricata should `drop` network packets
+without generating alerts (example below).  The following rule is a simplified example
+showing how ``noalert`` could be used with IPS deployments to drop inbound SSH requests.
+
+.. container:: example-rule
+
+    :example-rule-action:`drop` :example-rule-header:`tcp any any -> any 22` :example-rule-options:`(msg:"Drop inbound SSH traffic"; noalert; sid: 3)`
 
 .. _rules-modifiers:
 

@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2023 Open Information Security Foundation
+/* Copyright (C) 2007-2025 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -38,13 +38,16 @@
 #include "detect-config.h"
 #include "detect-flowbits.h"
 
+#include "app-layer-events.h"
+
+#include "util-port-interval-tree.h"
 #include "util-profiling.h"
 #include "util-validate.h"
 #include "util-var-name.h"
 #include "util-conf.h"
 
 /* Magic numbers to make the rules of a certain order fall in the same group */
-#define DETECT_PGSCORE_RULE_PORT_WHITELISTED 111 /* Rule port group contains a whitelisted port */
+#define DETECT_PGSCORE_RULE_PORT_PRIORITIZED 111 /* Rule port group contains a priority port */
 #define DETECT_PGSCORE_RULE_MPM_FAST_PATTERN 99  /* Rule contains an MPM fast pattern */
 #define DETECT_PGSCORE_RULE_MPM_NEGATED      77  /* Rule contains a negated MPM */
 #define DETECT_PGSCORE_RULE_NO_MPM           55  /* Rule does not contain MPM */
@@ -173,25 +176,6 @@ int SignatureIsFileSha256Inspecting(const Signature *s)
     return 0;
 }
 
-/**
- *  \brief Check if a signature contains the filesize keyword.
- *
- *  \param s signature
- *
- *  \retval 0 no
- *  \retval 1 yes
- */
-int SignatureIsFilesizeInspecting(const Signature *s)
-{
-    if (s == NULL)
-        return 0;
-
-    if (s->file_flags & FILE_SIG_NEED_SIZE)
-        return 1;
-
-    return 0;
-}
-
 static bool SignatureInspectsBuffers(const Signature *s)
 {
     return (s->init_data->buffer_index > 0);
@@ -206,6 +190,10 @@ static bool SignatureInspectsBuffers(const Signature *s)
  */
 int SignatureIsIPOnly(DetectEngineCtx *de_ctx, const Signature *s)
 {
+    /* explicit hook means no IP-only */
+    if (s->init_data->hook.type != SIGNATURE_HOOK_TYPE_NOT_SET)
+        return 0;
+
     if (s->alproto != ALPROTO_UNKNOWN)
         return 0;
 
@@ -274,6 +262,10 @@ int SignatureIsIPOnly(DetectEngineCtx *de_ctx, const Signature *s)
  */
 static int SignatureIsPDOnly(const DetectEngineCtx *de_ctx, const Signature *s)
 {
+    /* explicit hook means no PD-only */
+    if (s->init_data->hook.type != SIGNATURE_HOOK_TYPE_NOT_SET)
+        return 0;
+
     if (s->alproto != ALPROTO_UNKNOWN)
         return 0;
 
@@ -297,7 +289,7 @@ static int SignatureIsPDOnly(const DetectEngineCtx *de_ctx, const Signature *s)
 
     int pd = 0;
     for ( ; sm != NULL; sm = sm->next) {
-        if (sm->type == DETECT_AL_APP_LAYER_PROTOCOL) {
+        if (sm->type == DETECT_APP_LAYER_PROTOCOL) {
             pd = 1;
         } else {
             /* flowbits are supported for dp only sigs, as long
@@ -352,6 +344,10 @@ static int SignatureIsInspectingPayload(DetectEngineCtx *de_ctx, const Signature
  */
 static int SignatureIsDEOnly(DetectEngineCtx *de_ctx, const Signature *s)
 {
+    /* explicit hook means no DE-only */
+    if (s->init_data->hook.type != SIGNATURE_HOOK_TYPE_NOT_SET)
+        SCReturnInt(0);
+
     if (s->alproto != ALPROTO_UNKNOWN) {
         SCReturnInt(0);
     }
@@ -405,6 +401,9 @@ void
 PacketCreateMask(Packet *p, SignatureMask *mask, AppProto alproto,
         bool app_decoder_events)
 {
+    if (!(PKT_IS_PSEUDOPKT(p))) {
+        (*mask) |= SIG_MASK_REQUIRE_REAL_PKT;
+    }
     if (!(p->flags & PKT_NOPAYLOAD_INSPECTION) && p->payload_len > 0) {
         SCLogDebug("packet has payload");
         (*mask) |= SIG_MASK_REQUIRE_PAYLOAD;
@@ -416,16 +415,18 @@ PacketCreateMask(Packet *p, SignatureMask *mask, AppProto alproto,
         (*mask) |= SIG_MASK_REQUIRE_NO_PAYLOAD;
     }
 
-    if (p->events.cnt > 0 || app_decoder_events != 0 || p->app_layer_events != NULL) {
+    if (p->events.cnt > 0 || app_decoder_events != 0 ||
+            (p->app_layer_events != NULL && p->app_layer_events->cnt)) {
         SCLogDebug("packet/flow has events set");
         (*mask) |= SIG_MASK_REQUIRE_ENGINE_EVENT;
     }
 
-    if (!(PKT_IS_PSEUDOPKT(p)) && PKT_IS_TCP(p)) {
-        if ((p->tcph->th_flags & MASK_TCP_INITDEINIT_FLAGS) != 0) {
+    if (!(PKT_IS_PSEUDOPKT(p)) && PacketIsTCP(p)) {
+        const TCPHdr *tcph = PacketGetTCP(p);
+        if ((tcph->th_flags & MASK_TCP_INITDEINIT_FLAGS) != 0) {
             (*mask) |= SIG_MASK_REQUIRE_FLAGS_INITDEINIT;
         }
-        if ((p->tcph->th_flags & MASK_TCP_UNUSUAL_FLAGS) != 0) {
+        if ((tcph->th_flags & MASK_TCP_UNUSUAL_FLAGS) != 0) {
             (*mask) |= SIG_MASK_REQUIRE_FLAGS_UNUSUAL;
         }
     }
@@ -440,6 +441,10 @@ static int SignatureCreateMask(Signature *s)
 {
     SCEnter();
 
+    if ((s->flags & (SIG_FLAG_REQUIRE_PACKET | SIG_FLAG_REQUIRE_STREAM)) ==
+            SIG_FLAG_REQUIRE_PACKET) {
+        s->mask |= SIG_MASK_REQUIRE_REAL_PKT;
+    }
     if (s->init_data->smlists[DETECT_SM_LIST_PMATCH] != NULL) {
         s->mask |= SIG_MASK_REQUIRE_PAYLOAD;
         SCLogDebug("sig requires payload");
@@ -474,32 +479,25 @@ static int SignatureCreateMask(Signature *s)
                 break;
             case DETECT_FLAGS:
             {
-                DetectFlagsData *fl = (DetectFlagsData *)sm->ctx;
+                DetectU8Data *fl = (DetectU8Data *)sm->ctx;
 
-                if (fl->flags & TH_SYN) {
+                uint8_t arg = 0;
+                if (fl->mode == DetectUintModeBitmask) {
+                    arg = fl->arg2;
+                } else if (fl->mode == DetectUintModeNegBitmask && fl->arg2 == 0) {
+                    arg = fl->arg1;
+                } else if (fl->mode == DetectUintModeEqual) {
+                    arg = fl->arg1;
+                }
+                if (arg & MASK_TCP_INITDEINIT_FLAGS) {
                     s->mask |= SIG_MASK_REQUIRE_FLAGS_INITDEINIT;
                     SCLogDebug("sig requires SIG_MASK_REQUIRE_FLAGS_INITDEINIT");
                 }
-                if (fl->flags & TH_RST) {
-                    s->mask |= SIG_MASK_REQUIRE_FLAGS_INITDEINIT;
-                    SCLogDebug("sig requires SIG_MASK_REQUIRE_FLAGS_INITDEINIT");
-                }
-                if (fl->flags & TH_FIN) {
-                    s->mask |= SIG_MASK_REQUIRE_FLAGS_INITDEINIT;
-                    SCLogDebug("sig requires SIG_MASK_REQUIRE_FLAGS_INITDEINIT");
-                }
-                if (fl->flags & TH_URG) {
+                if (arg & MASK_TCP_UNUSUAL_FLAGS) {
                     s->mask |= SIG_MASK_REQUIRE_FLAGS_UNUSUAL;
                     SCLogDebug("sig requires SIG_MASK_REQUIRE_FLAGS_UNUSUAL");
                 }
-                if (fl->flags & TH_ECN) {
-                    s->mask |= SIG_MASK_REQUIRE_FLAGS_UNUSUAL;
-                    SCLogDebug("sig requires SIG_MASK_REQUIRE_FLAGS_UNUSUAL");
-                }
-                if (fl->flags & TH_CWR) {
-                    s->mask |= SIG_MASK_REQUIRE_FLAGS_UNUSUAL;
-                    SCLogDebug("sig requires SIG_MASK_REQUIRE_FLAGS_UNUSUAL");
-                }
+
                 break;
             }
             case DETECT_DSIZE:
@@ -525,9 +523,12 @@ static int SignatureCreateMask(Signature *s)
                 }
                 break;
             }
-            case DETECT_AL_APP_LAYER_EVENT:
-                s->mask |= SIG_MASK_REQUIRE_ENGINE_EVENT;
-                break;
+            case DETECT_DECODE_EVENT:
+                // fallthrough
+            case DETECT_STREAM_EVENT:
+                // fallthrough
+            case DETECT_APP_LAYER_EVENT:
+                // fallthrough
             case DETECT_ENGINE_EVENT:
                 s->mask |= SIG_MASK_REQUIRE_ENGINE_EVENT;
                 break;
@@ -601,8 +602,8 @@ static bool RuleMpmIsNegated(const Signature *s)
     return (cd->flags & DETECT_CONTENT_NEGATED) ? true : false;
 }
 
-static json_t *RulesGroupPrintSghStats(const DetectEngineCtx *de_ctx, const SigGroupHead *sgh,
-        const int add_rules, const int add_mpm_stats)
+static SCJsonBuilder *RulesGroupPrintSghStats(const DetectEngineCtx *de_ctx,
+        const SigGroupHead *sgh, const int add_rules, const int add_mpm_stats)
 {
     uint32_t prefilter_cnt = 0;
     uint32_t mpm_cnt = 0;
@@ -627,24 +628,24 @@ static json_t *RulesGroupPrintSghStats(const DetectEngineCtx *de_ctx, const SigG
     } mpm_stats[max_buffer_type_id];
     memset(mpm_stats, 0x00, sizeof(mpm_stats));
 
-    uint32_t alstats[ALPROTO_MAX] = {0};
+    uint32_t alstats[g_alproto_max];
+    memset(alstats, 0, g_alproto_max * sizeof(uint32_t));
     uint32_t mpm_sizes[max_buffer_type_id][256];
     memset(mpm_sizes, 0, sizeof(mpm_sizes));
-    uint32_t alproto_mpm_bufs[ALPROTO_MAX][max_buffer_type_id];
+    uint32_t alproto_mpm_bufs[g_alproto_max][max_buffer_type_id];
     memset(alproto_mpm_bufs, 0, sizeof(alproto_mpm_bufs));
 
     DEBUG_VALIDATE_BUG_ON(sgh->init == NULL);
     if (sgh->init == NULL)
         return NULL;
 
-    json_t *js = json_object();
+    SCJsonBuilder *js = SCJbNewObject();
     if (unlikely(js == NULL))
         return NULL;
 
-    json_object_set_new(js, "id", json_integer(sgh->id));
+    SCJbSetUint(js, "id", sgh->id);
 
-    json_t *js_array = json_array();
-
+    SCJbOpenArray(js, "rules");
     for (uint32_t x = 0; x < sgh->init->sig_cnt; x++) {
         const Signature *s = sgh->init->match_array[x];
         if (s == NULL)
@@ -670,7 +671,7 @@ static json_t *RulesGroupPrintSghStats(const DetectEngineCtx *de_ctx, const SigG
             any5_cnt++;
         }
 
-        prefilter_cnt += (s->init_data->prefilter_sm != 0);
+        prefilter_cnt += (s->init_data->prefilter_sm != NULL);
         if (s->init_data->mpm_sm == NULL) {
             nonmpm_cnt++;
 
@@ -767,35 +768,37 @@ static json_t *RulesGroupPrintSghStats(const DetectEngineCtx *de_ctx, const SigG
         alstats[s->alproto]++;
 
         if (add_rules) {
-            json_t *js_sig = json_object();
-            if (unlikely(js == NULL))
-                continue;
-            json_object_set_new(js_sig, "sig_id", json_integer(s->id));
-            json_array_append_new(js_array, js_sig);
+            SCJsonBuilder *e = SCJbNewObject();
+            if (e != NULL) {
+                SCJbSetUint(e, "sig_id", s->id);
+                SCJbClose(e);
+                SCJbAppendObject(js, e);
+                SCJbFree(e);
+            }
         }
     }
+    SCJbClose(js);
 
-    json_object_set_new(js, "rules", js_array);
+    SCJbOpenObject(js, "stats");
+    SCJbSetUint(js, "total", sgh->init->sig_cnt);
 
-    json_t *stats = json_object();
-    json_object_set_new(stats, "total", json_integer(sgh->init->sig_cnt));
+    SCJbOpenObject(js, "types");
+    SCJbSetUint(js, "mpm", mpm_cnt);
+    SCJbSetUint(js, "non_mpm", nonmpm_cnt);
+    SCJbSetUint(js, "mpm_depth", mpm_depth_cnt);
+    SCJbSetUint(js, "mpm_endswith", mpm_endswith_cnt);
+    SCJbSetUint(js, "negated_mpm", negmpm_cnt);
+    SCJbSetUint(js, "payload_but_no_mpm", payload_no_mpm_cnt);
+    SCJbSetUint(js, "prefilter", prefilter_cnt);
+    SCJbSetUint(js, "syn", syn_cnt);
+    SCJbSetUint(js, "any5", any5_cnt);
+    SCJbClose(js);
 
-    json_t *types = json_object();
-    json_object_set_new(types, "mpm", json_integer(mpm_cnt));
-    json_object_set_new(types, "non_mpm", json_integer(nonmpm_cnt));
-    json_object_set_new(types, "mpm_depth", json_integer(mpm_depth_cnt));
-    json_object_set_new(types, "mpm_endswith", json_integer(mpm_endswith_cnt));
-    json_object_set_new(types, "negated_mpm", json_integer(negmpm_cnt));
-    json_object_set_new(types, "payload_but_no_mpm", json_integer(payload_no_mpm_cnt));
-    json_object_set_new(types, "prefilter", json_integer(prefilter_cnt));
-    json_object_set_new(types, "syn", json_integer(syn_cnt));
-    json_object_set_new(types, "any5", json_integer(any5_cnt));
-    json_object_set_new(stats, "types", types);
-
-    for (AppProto i = 0; i < ALPROTO_MAX; i++) {
+    for (AppProto i = 0; i < g_alproto_max; i++) {
         if (alstats[i] > 0) {
-            json_t *app = json_object();
-            json_object_set_new(app, "total", json_integer(alstats[i]));
+            const char *proto_name = (i == ALPROTO_UNKNOWN) ? "payload" : AppProtoToString(i);
+            SCJbOpenObject(js, proto_name);
+            SCJbSetUint(js, "total", alstats[i]);
 
             for (int y = 0; y < max_buffer_type_id; y++) {
                 if (alproto_mpm_bufs[i][y] == 0)
@@ -807,54 +810,59 @@ static json_t *RulesGroupPrintSghStats(const DetectEngineCtx *de_ctx, const SigG
                 else
                     name = DetectEngineBufferTypeGetNameById(de_ctx, y);
 
-                json_object_set_new(app, name, json_integer(alproto_mpm_bufs[i][y]));
+                SCJbSetUint(js, name, alproto_mpm_bufs[i][y]);
             }
-
-            const char *proto_name = (i == ALPROTO_UNKNOWN) ? "payload" : AppProtoToString(i);
-            json_object_set_new(stats, proto_name, app);
+            SCJbClose(js);
         }
     }
 
     if (add_mpm_stats) {
-        json_t *mpm_js = json_object();
+        SCJbOpenObject(js, "mpm");
 
         for (int i = 0; i < max_buffer_type_id; i++) {
             if (mpm_stats[i].cnt > 0) {
-
-                json_t *mpm_sizes_array = json_array();
-                for (int y = 0; y < 256; y++) {
-                    if (mpm_sizes[i][y] == 0)
-                        continue;
-
-                    json_t *e = json_object();
-                    json_object_set_new(e, "size", json_integer(y));
-                    json_object_set_new(e, "count", json_integer(mpm_sizes[i][y]));
-                    json_array_append_new(mpm_sizes_array, e);
-                }
-
-                json_t *buf = json_object();
-                json_object_set_new(buf, "total", json_integer(mpm_stats[i].cnt));
-                json_object_set_new(buf, "avg_strength", json_integer(mpm_stats[i].total / mpm_stats[i].cnt));
-                json_object_set_new(buf, "min_strength", json_integer(mpm_stats[i].min));
-                json_object_set_new(buf, "max_strength", json_integer(mpm_stats[i].max));
-
-                json_object_set_new(buf, "sizes", mpm_sizes_array);
-
                 const char *name;
                 if (i < DETECT_SM_LIST_DYNAMIC_START)
                     name = DetectListToHumanString(i);
                 else
                     name = DetectEngineBufferTypeGetNameById(de_ctx, i);
 
-                json_object_set_new(mpm_js, name, buf);
+                SCJbOpenArray(js, name);
+
+                for (int y = 0; y < 256; y++) {
+                    if (mpm_sizes[i][y] == 0)
+                        continue;
+
+                    SCJsonBuilder *e = SCJbNewObject();
+                    if (e != NULL) {
+                        SCJbSetUint(e, "size", y);
+                        SCJbSetUint(e, "count", mpm_sizes[i][y]);
+                        SCJbClose(e);
+                        SCJbAppendObject(js, e);
+                        SCJbFree(e);
+                    }
+                }
+
+                SCJsonBuilder *e = SCJbNewObject();
+                if (e != NULL) {
+                    SCJbSetUint(e, "total", mpm_stats[i].cnt);
+                    SCJbSetUint(e, "avg_strength", mpm_stats[i].total / mpm_stats[i].cnt);
+                    SCJbSetUint(e, "min_strength", mpm_stats[i].min);
+                    SCJbSetUint(e, "max_strength", mpm_stats[i].max);
+                    SCJbClose(e);
+                    SCJbAppendObject(js, e);
+                    SCJbFree(e);
+                }
+
+                SCJbClose(js);
             }
         }
-
-        json_object_set_new(stats, "mpm", mpm_js);
+        SCJbClose(js);
     }
-    json_object_set_new(js, "stats", stats);
+    SCJbClose(js);
 
-    json_object_set_new(js, "score", json_integer(sgh->init->score));
+    SCJbSetUint(js, "score", sgh->init->score);
+    SCJbClose(js);
 
     return js;
 }
@@ -862,101 +870,93 @@ static json_t *RulesGroupPrintSghStats(const DetectEngineCtx *de_ctx, const SigG
 static void RulesDumpGrouping(const DetectEngineCtx *de_ctx,
                        const int add_rules, const int add_mpm_stats)
 {
-    json_t *js = json_object();
+    SCJsonBuilder *js = SCJbNewObject();
     if (unlikely(js == NULL))
         return;
 
-    int p;
-    for (p = 0; p < 256; p++) {
+    for (int p = 0; p < 256; p++) {
         if (p == IPPROTO_TCP || p == IPPROTO_UDP) {
             const char *name = (p == IPPROTO_TCP) ? "tcp" : "udp";
 
-            json_t *tcp = json_object();
-
-            json_t *ts_array = json_array();
-            DetectPort *list = (p == IPPROTO_TCP) ? de_ctx->flow_gh[1].tcp :
-                                                    de_ctx->flow_gh[1].udp;
+            SCJbOpenObject(js, name);
+            SCJbOpenArray(js, "toserver");
+            const DetectPort *list =
+                    (p == IPPROTO_TCP) ? de_ctx->flow_gh[1].tcp : de_ctx->flow_gh[1].udp;
             while (list != NULL) {
-                json_t *port = json_object();
-                json_object_set_new(port, "port", json_integer(list->port));
-                json_object_set_new(port, "port2", json_integer(list->port2));
+                SCJsonBuilder *port = SCJbNewObject();
+                SCJbSetUint(port, "port", list->port);
+                SCJbSetUint(port, "port2", list->port2);
 
-                json_t *tcp_ts =
+                SCJsonBuilder *stats =
                         RulesGroupPrintSghStats(de_ctx, list->sh, add_rules, add_mpm_stats);
-                json_object_set_new(port, "rulegroup", tcp_ts);
-                json_array_append_new(ts_array, port);
+                SCJbSetObject(port, "rulegroup", stats);
+                SCJbFree(stats);
+                SCJbClose(port);
+                SCJbAppendObject(js, port);
+                SCJbFree(port);
 
                 list = list->next;
             }
-            json_object_set_new(tcp, "toserver", ts_array);
+            SCJbClose(js); // toserver array
 
-            json_t *tc_array = json_array();
+            SCJbOpenArray(js, "toclient");
             list = (p == IPPROTO_TCP) ? de_ctx->flow_gh[0].tcp :
                                         de_ctx->flow_gh[0].udp;
             while (list != NULL) {
-                json_t *port = json_object();
-                json_object_set_new(port, "port", json_integer(list->port));
-                json_object_set_new(port, "port2", json_integer(list->port2));
+                SCJsonBuilder *port = SCJbNewObject();
+                SCJbSetUint(port, "port", list->port);
+                SCJbSetUint(port, "port2", list->port2);
 
-                json_t *tcp_tc =
+                SCJsonBuilder *stats =
                         RulesGroupPrintSghStats(de_ctx, list->sh, add_rules, add_mpm_stats);
-                json_object_set_new(port, "rulegroup", tcp_tc);
-                json_array_append_new(tc_array, port);
+                SCJbSetObject(port, "rulegroup", stats);
+                SCJbFree(stats);
+                SCJbClose(port);
+                SCJbAppendObject(js, port);
+                SCJbFree(port);
 
                 list = list->next;
             }
-            json_object_set_new(tcp, "toclient", tc_array);
-
-            json_object_set_new(js, name, tcp);
+            SCJbClose(js); // toclient array
+            SCJbClose(js);
         } else if (p == IPPROTO_ICMP || p == IPPROTO_ICMPV6) {
             const char *name = (p == IPPROTO_ICMP) ? "icmpv4" : "icmpv6";
-            json_t *o = json_object();
+            SCJbOpenObject(js, name);
             if (de_ctx->flow_gh[1].sgh[p]) {
-                json_t *ts = json_object();
-                json_t *group_ts = RulesGroupPrintSghStats(
+                SCJbOpenObject(js, "toserver");
+                SCJsonBuilder *stats = RulesGroupPrintSghStats(
                         de_ctx, de_ctx->flow_gh[1].sgh[p], add_rules, add_mpm_stats);
-                json_object_set_new(ts, "rulegroup", group_ts);
-                json_object_set_new(o, "toserver", ts);
+                SCJbSetObject(js, "rulegroup", stats);
+                SCJbFree(stats);
+                SCJbClose(js);
             }
             if (de_ctx->flow_gh[0].sgh[p]) {
-                json_t *tc = json_object();
-                json_t *group_tc = RulesGroupPrintSghStats(
+                SCJbOpenObject(js, "toclient");
+                SCJsonBuilder *stats = RulesGroupPrintSghStats(
                         de_ctx, de_ctx->flow_gh[0].sgh[p], add_rules, add_mpm_stats);
-                json_object_set_new(tc, "rulegroup", group_tc);
-                json_object_set_new(o, "toclient", tc);
+                SCJbSetObject(js, "rulegroup", stats);
+                SCJbFree(stats);
+                SCJbClose(js);
             }
-            json_object_set_new(js, name, o);
+            SCJbClose(js);
         }
     }
+    SCJbClose(js);
 
     const char *filename = "rule_group.json";
-    const char *log_dir = ConfigGetLogDirectory();
+    const char *log_dir = SCConfigGetLogDirectory();
     char log_path[PATH_MAX] = "";
-
     snprintf(log_path, sizeof(log_path), "%s/%s", log_dir, filename);
 
     FILE *fp = fopen(log_path, "w");
-    if (fp == NULL) {
-        return;
+    if (fp != NULL) {
+        fwrite(SCJbPtr(js), SCJbLen(js), 1, fp);
+        (void)fclose(fp);
     }
-
-    char *js_s = json_dumps(js,
-                            JSON_PRESERVE_ORDER|JSON_ESCAPE_SLASH);
-    if (unlikely(js_s == NULL)) {
-        fclose(fp);
-        return;
-    }
-
-    json_object_clear(js);
-    json_decref(js);
-
-    fprintf(fp, "%s\n", js_s);
-    free(js_s);
-    fclose(fp);
-    return;
+    SCJbFree(js);
 }
 
-static int RulesGroupByProto(DetectEngineCtx *de_ctx)
+static int RulesGroupByIPProto(DetectEngineCtx *de_ctx)
 {
     Signature *s = de_ctx->sig_list;
 
@@ -967,8 +967,8 @@ static int RulesGroupByProto(DetectEngineCtx *de_ctx)
         if (s->type == SIG_TYPE_IPONLY)
             continue;
 
-        int p;
-        for (p = 0; p < 256; p++) {
+        /* traverse over IP protocol list from libc */
+        for (int p = 0; p < 256; p++) {
             if (p == IPPROTO_TCP || p == IPPROTO_UDP) {
                 continue;
             }
@@ -976,6 +976,7 @@ static int RulesGroupByProto(DetectEngineCtx *de_ctx)
                 continue;
             }
 
+            /* Signatures that are ICMP, SCTP, not IP only are handled here */
             if (s->flags & SIG_FLAG_TOCLIENT) {
                 SigGroupHeadAppendSig(de_ctx, &sgh_tc[p], s);
             }
@@ -1066,17 +1067,16 @@ static int RulesGroupByProto(DetectEngineCtx *de_ctx)
     return 0;
 }
 
-static int PortIsWhitelisted(const DetectEngineCtx *de_ctx,
-                             const DetectPort *a, int ipproto)
+static int PortIsPriority(const DetectEngineCtx *de_ctx, const DetectPort *a, int ipproto)
 {
-    DetectPort *w = de_ctx->tcp_whitelist;
+    DetectPort *w = de_ctx->tcp_priorityports;
     if (ipproto == IPPROTO_UDP)
-        w = de_ctx->udp_whitelist;
+        w = de_ctx->udp_priorityports;
 
     while (w) {
-        /* Make sure the whitelist port falls in the port range of a */
+        /* Make sure the priority port falls in the port range of a */
         DEBUG_VALIDATE_BUG_ON(a->port > a->port2);
-        if (w->port >= a->port && w->port <= a->port2) {
+        if (a->port == w->port && w->port2 == a->port2) {
             return 1;
         }
         w = w->next;
@@ -1085,7 +1085,7 @@ static int PortIsWhitelisted(const DetectEngineCtx *de_ctx,
     return 0;
 }
 
-static int RuleSetWhitelist(Signature *s)
+static int RuleSetScore(Signature *s)
 {
     DetectPort *p = NULL;
     if (s->flags & SIG_FLAG_TOSERVER)
@@ -1096,27 +1096,27 @@ static int RuleSetWhitelist(Signature *s)
         return 0;
 
     /* for sigs that don't use 'any' as port, see if we want to
-     * whitelist poor sigs */
+     * prioritize poor sigs */
     int wl = 0;
     if (!(p->port == 0 && p->port2 == 65535)) {
         /* pure pcre, bytetest, etc rules */
         if (RuleInspectsPayloadHasNoMpm(s)) {
-            SCLogDebug("Rule %u MPM has 1 byte fast_pattern. Whitelisting SGH's.", s->id);
+            SCLogDebug("Rule %u MPM has 1 byte fast_pattern. Prioritizing SGH's.", s->id);
             wl = DETECT_PGSCORE_RULE_MPM_FAST_PATTERN;
 
         } else if (RuleMpmIsNegated(s)) {
-            SCLogDebug("Rule %u MPM is negated. Whitelisting SGH's.", s->id);
+            SCLogDebug("Rule %u MPM is negated. Prioritizing SGH's.", s->id);
             wl = DETECT_PGSCORE_RULE_MPM_NEGATED;
 
             /* one byte pattern in packet/stream payloads */
         } else if (s->init_data->mpm_sm != NULL &&
                    s->init_data->mpm_sm_list == DETECT_SM_LIST_PMATCH &&
                    RuleGetMpmPatternSize(s) == 1) {
-            SCLogDebug("Rule %u No MPM. Payload inspecting. Whitelisting SGH's.", s->id);
+            SCLogDebug("Rule %u No MPM. Payload inspecting. Prioritizing SGH's.", s->id);
             wl = DETECT_PGSCORE_RULE_NO_MPM;
 
         } else if (DetectFlagsSignatureNeedsSynOnlyPackets(s)) {
-            SCLogDebug("Rule %u Needs SYN, so inspected often. Whitelisting SGH's.", s->id);
+            SCLogDebug("Rule %u Needs SYN, so inspected often. Prioritizing SGH's.", s->id);
             wl = DETECT_PGSCORE_RULE_SYN_ONLY;
         }
     }
@@ -1125,9 +1125,349 @@ static int RuleSetWhitelist(Signature *s)
     return wl;
 }
 
-int CreateGroupedPortList(DetectEngineCtx *de_ctx, DetectPort *port_list, DetectPort **newhead,
-        uint32_t unique_groups, int (*CompareFunc)(DetectPort *, DetectPort *));
-int CreateGroupedPortListCmpCnt(DetectPort *a, DetectPort *b);
+static int SortCompare(const void *a, const void *b)
+{
+    const DetectPort *pa = *(const DetectPort **)a;
+    const DetectPort *pb = *(const DetectPort **)b;
+
+    if (pa->sh->init->score < pb->sh->init->score) {
+        return 1;
+    } else if (pa->sh->init->score > pb->sh->init->score) {
+        return -1;
+    }
+
+    if (pa->sh->init->sig_cnt < pb->sh->init->sig_cnt) {
+        return 1;
+    } else if (pa->sh->init->sig_cnt > pb->sh->init->sig_cnt) {
+        return -1;
+    }
+
+    /* Hack to make the qsort output deterministic across platforms.
+     * This had to be done because the order of equal elements sorted
+     * by qsort is undeterministic and showed different output on BSD,
+     * MacOS and Windows. Sorting based on id makes it deterministic. */
+    if (pa->sh->id < pb->sh->id)
+        return -1;
+
+    return 1;
+}
+
+static inline void SortGroupList(
+        uint32_t *groups, DetectPort **list, int (*CompareFunc)(const void *, const void *))
+{
+    int cnt = 0;
+    for (DetectPort *x = *list; x != NULL; x = x->next) {
+        DEBUG_VALIDATE_BUG_ON(x->port > x->port2);
+        cnt++;
+    }
+    if (cnt <= 1)
+        return;
+
+    /* build temporary array to sort with qsort */
+    DetectPort **array = (DetectPort **)SCCalloc(cnt, sizeof(DetectPort *));
+    if (array == NULL)
+        return;
+
+    int idx = 0;
+    for (DetectPort *x = *list; x != NULL;) {
+        /* assign a temporary id to resolve otherwise equal groups */
+        x->sh->id = idx + 1;
+        SigGroupHeadSetSigCnt(x->sh, 0);
+        DetectPort *next = x->next;
+        x->next = x->prev = x->last = NULL;
+        DEBUG_VALIDATE_BUG_ON(x->port > x->port2);
+        array[idx++] = x;
+        x = next;
+    }
+    DEBUG_VALIDATE_BUG_ON(cnt != idx);
+
+    qsort(array, idx, sizeof(DetectPort *), SortCompare);
+
+    /* rebuild the list based on the qsort-ed array */
+    DetectPort *new_list = NULL, *tail = NULL;
+    for (int i = 0; i < idx; i++) {
+        DetectPort *p = array[i];
+        /* unset temporary group id */
+        p->sh->id = 0;
+
+        if (new_list == NULL) {
+            new_list = p;
+        }
+        if (tail != NULL) {
+            tail->next = p;
+        }
+        p->prev = tail;
+        tail = p;
+    }
+
+    *list = new_list;
+    *groups = idx;
+
+#if DEBUG
+    int dbgcnt = 0;
+    SCLogDebug("SORTED LIST:");
+    for (DetectPort *tmp = *list; tmp != NULL; tmp = tmp->next) {
+        SCLogDebug("item:= [%u:%u]; score: %d; sig_cnt: %d", tmp->port, tmp->port2,
+                tmp->sh->init->score, tmp->sh->init->sig_cnt);
+        dbgcnt++;
+        BUG_ON(dbgcnt > cnt);
+    }
+#endif
+    SCFree(array);
+}
+/** \internal
+ *  \brief Create a list of DetectPort objects sorted based on CompareFunc's
+ *         logic.
+ *
+ *  List can limit the number of groups. In this case an extra "join" group
+ *  is created that contains the sigs belonging to that. It's *appended* to
+ *  the list, meaning that if the list is walked linearly it's found last.
+ *  The joingr is meant to be a catch all.
+ *
+ */
+static int CreateGroupedPortList(DetectEngineCtx *de_ctx, DetectPort *port_list,
+        DetectPort **newhead, uint32_t unique_groups,
+        int (*CompareFunc)(const void *, const void *))
+{
+    DetectPort *tmplist = NULL, *joingr = NULL;
+    uint32_t groups = 0;
+
+    /* insert the ports into the tmplist, where it will
+     * be sorted descending on 'cnt' and on whether a group
+     * is prioritized. */
+    tmplist = port_list;
+    SortGroupList(&groups, &tmplist, SortCompare);
+    uint32_t left = unique_groups;
+    if (left == 0)
+        left = groups;
+
+    /* create another list: take the port groups from above
+     * and add them to the 2nd list until we have met our
+     * count. The rest is added to the 'join' group. */
+    DetectPort *tmplist2 = NULL, *tmplist2_tail = NULL;
+    DetectPort *gr, *next_gr;
+    for (gr = tmplist; gr != NULL;) {
+        next_gr = gr->next;
+
+        SCLogDebug("temp list gr %p %u:%u", gr, gr->port, gr->port2);
+        DetectPortPrint(gr);
+
+        /* if we've set up all the unique groups, add the rest to the
+         * catch-all joingr */
+        if (left == 0) {
+            if (joingr == NULL) {
+                DetectPortParse(de_ctx, &joingr, "0:65535");
+                if (joingr == NULL) {
+                    goto error;
+                }
+                SCLogDebug("joingr => %u-%u", joingr->port, joingr->port2);
+                joingr->next = NULL;
+            }
+            SigGroupHeadCopySigs(de_ctx, gr->sh, &joingr->sh);
+
+            /* when a group's sigs are added to the joingr, we can free it */
+            gr->next = NULL;
+            DetectPortFree(de_ctx, gr);
+            /* append */
+        } else {
+            gr->next = NULL;
+
+            if (tmplist2 == NULL) {
+                tmplist2 = gr;
+                tmplist2_tail = gr;
+            } else {
+                tmplist2_tail->next = gr;
+                tmplist2_tail = gr;
+            }
+        }
+
+        if (left > 0)
+            left--;
+
+        gr = next_gr;
+    }
+
+    /* if present, append the joingr that covers the rest */
+    if (joingr != NULL) {
+        SCLogDebug("appending joingr %p %u:%u", joingr, joingr->port, joingr->port2);
+
+        if (tmplist2 == NULL) {
+            tmplist2 = joingr;
+            // tmplist2_tail = joingr;
+        } else {
+            tmplist2_tail->next = joingr;
+            // tmplist2_tail = joingr;
+        }
+    } else {
+        SCLogDebug("no joingr");
+    }
+
+    /* pass back our new list to the caller */
+    *newhead = tmplist2;
+    DetectPortPrintList(*newhead);
+
+    return 0;
+error:
+    return -1;
+}
+
+#define UNDEFINED_PORT 0
+#define RANGE_PORT  1
+#define SINGLE_PORT 2
+
+typedef struct UniquePortPoint_ {
+    uint16_t port; /* value of the port */
+    bool single;   /* is the port single or part of a range */
+} UniquePortPoint;
+
+/**
+ * \brief Function to set unique port points. Consider all the ports
+ *        flattened out on one line, set the points that correspond
+ *        to a valid port. Also store whether the port point stored
+ *        was a single port or part of a range.
+ *
+ * \param p Port object to be set
+ * \param unique_list List of unique port points to be updated
+ * \param size_list Current size of the list
+ *
+ * \return Updated size of the list
+ */
+static inline uint32_t SetUniquePortPoints(
+        const DetectPort *p, uint8_t *unique_list, uint32_t size_list)
+{
+    if (unique_list[p->port] == UNDEFINED_PORT) {
+        if (p->port == p->port2) {
+            unique_list[p->port] = SINGLE_PORT;
+        } else {
+            unique_list[p->port] = RANGE_PORT;
+        }
+        size_list++;
+    } else if (((unique_list[p->port] == SINGLE_PORT) && (p->port != p->port2)) ||
+               ((unique_list[p->port] == RANGE_PORT) && (p->port == p->port2))) {
+        if ((p->port != UINT16_MAX) && (unique_list[p->port + 1] == UNDEFINED_PORT)) {
+            unique_list[p->port + 1] = RANGE_PORT;
+            size_list++;
+        }
+    }
+
+    /* Treat right boundary as single point to avoid creating unneeded
+     * ranges later on */
+    if (unique_list[p->port2] == UNDEFINED_PORT) {
+        size_list++;
+    }
+    unique_list[p->port2] = SINGLE_PORT;
+    return size_list;
+}
+
+/**
+ * \brief Function to set the *final* unique port points and save them
+ *        for later use. The points are already sorted because of the way
+ *        they have been retrieved and saved earlier for use at this point.
+ *
+ * \param unique_list List of the unique port points to be used
+ * \param size_unique_arr Number of unique port points
+ * \param final_arr List of the final unique port points to be created
+ */
+static inline void SetFinalUniquePortPoints(
+        const uint8_t *unique_list, const uint32_t size_unique_arr, UniquePortPoint *final_arr)
+{
+    for (uint32_t i = 0, j = 0; i < (UINT16_MAX + 1); i++) {
+        DEBUG_VALIDATE_BUG_ON(j > size_unique_arr);
+        if (unique_list[i] == RANGE_PORT) {
+            final_arr[j].port = (uint16_t)i;
+            final_arr[j++].single = false;
+        } else if (unique_list[i] == SINGLE_PORT) {
+            final_arr[j].port = (uint16_t)i;
+            final_arr[j++].single = true;
+        }
+    }
+}
+
+/**
+ * \brief Function to create the list of ports with the smallest ranges
+ *        by resolving overlaps and end point conditions. These contain the
+ *        correct SGHs as well after going over the interval tree to find
+ *        any range overlaps.
+ *
+ * \param de_ctx Detection Engine Context
+ * \param unique_list Final list of unique port points
+ * \param size_list Size of the unique_list
+ * \param it Pointer to the interval tree
+ * \param list Pointer to the list where final ports will be stored
+ *
+ * \return 0 on success, -1 otherwise
+ */
+static inline int CreatePortList(DetectEngineCtx *de_ctx, const uint8_t *unique_list,
+        const uint32_t size_list, SCPortIntervalTree *it, DetectPort **list)
+{
+    /* Only do the operations if there is at least one unique port */
+    if (size_list == 0)
+        return 0;
+    UniquePortPoint *final_unique_points =
+            (UniquePortPoint *)SCCalloc(size_list, sizeof(UniquePortPoint));
+    if (final_unique_points == NULL)
+        return -1;
+    SetFinalUniquePortPoints(unique_list, size_list, final_unique_points);
+    /* Handle edge case when there is just one unique port */
+    if (size_list == 1) {
+        SCPortIntervalFindOverlappingRanges(
+                de_ctx, final_unique_points[0].port, final_unique_points[0].port, &it->tree, list);
+    } else {
+        UniquePortPoint *p1 = &final_unique_points[0];
+        UniquePortPoint *p2 = &final_unique_points[1];
+        uint16_t port = p1 ? p1->port : 0; // just for cppcheck
+        uint16_t port2 = p2->port;
+        for (uint32_t i = 1; i < size_list; i++) {
+            DEBUG_VALIDATE_BUG_ON(port > port2);
+            if ((p1 && p1->single) && p2->single) {
+                SCPortIntervalFindOverlappingRanges(de_ctx, port, port, &it->tree, list);
+                SCPortIntervalFindOverlappingRanges(de_ctx, port2, port2, &it->tree, list);
+                port = port2 + 1;
+            } else if (p1 && p1->single) {
+                SCPortIntervalFindOverlappingRanges(de_ctx, port, port, &it->tree, list);
+                if ((port2 > port + 1)) {
+                    SCPortIntervalFindOverlappingRanges(
+                            de_ctx, port + 1, port2 - 1, &it->tree, list);
+                    port = port2;
+                } else {
+                    port = port + 1;
+                }
+            } else if (p2->single) {
+                /* If port2 is boundary and less or equal to port + 1, create a range
+                 * keeping the boundary away as it is single port */
+                if ((port2 >= port + 1)) {
+                    SCPortIntervalFindOverlappingRanges(de_ctx, port, port2 - 1, &it->tree, list);
+                }
+                /* Deal with port2 as it is a single port */
+                SCPortIntervalFindOverlappingRanges(de_ctx, port2, port2, &it->tree, list);
+                port = port2 + 1;
+            } else {
+                if ((port2 > port + 1)) {
+                    SCPortIntervalFindOverlappingRanges(de_ctx, port, port2 - 1, &it->tree, list);
+                    port = port2;
+                } else {
+                    SCPortIntervalFindOverlappingRanges(de_ctx, port, port2, &it->tree, list);
+                    port = port2 + 1;
+                }
+            }
+            /* if the current port matches the p2->port, assign it to p1 so that
+             * there is a UniquePortPoint object to check other info like whether
+             * the port with this value is single */
+            if (port == p2->port) {
+                p1 = p2;
+            } else {
+                p1 = NULL;
+            }
+            if (i + 1 < size_list) {
+                p2 = &final_unique_points[i + 1];
+                port2 = p2->port;
+            }
+        }
+    }
+    /* final_unique_points array is no longer needed */
+    SCFree(final_unique_points);
+    return 0;
+}
 
 static DetectPort *RulesGroupByPorts(DetectEngineCtx *de_ctx, uint8_t ipproto, uint32_t direction)
 {
@@ -1136,8 +1476,14 @@ static DetectPort *RulesGroupByPorts(DetectEngineCtx *de_ctx, uint8_t ipproto, u
      *         that belong to the SGH. */
     DetectPortHashInit(de_ctx);
 
+    uint32_t size_unique_port_arr = 0;
     const Signature *s = de_ctx->sig_list;
     DetectPort *list = NULL;
+
+    uint8_t *unique_port_points = (uint8_t *)SCCalloc(UINT16_MAX + 1, sizeof(uint8_t));
+    if (unique_port_points == NULL)
+        return NULL;
+
     while (s) {
         /* IP Only rules are handled separately */
         if (s->type == SIG_TYPE_IPONLY)
@@ -1176,8 +1522,7 @@ static DetectPort *RulesGroupByPorts(DetectEngineCtx *de_ctx, uint8_t ipproto, u
 
         int wl = s->init_data->score;
         while (p) {
-            int pwl = PortIsWhitelisted(de_ctx, p, ipproto) ? DETECT_PGSCORE_RULE_PORT_WHITELISTED
-                                                            : 0;
+            int pwl = PortIsPriority(de_ctx, p, ipproto) ? DETECT_PGSCORE_RULE_PORT_PRIORITIZED : 0;
             pwl = MAX(wl,pwl);
 
             DetectPort *lookup = DetectPortHashLookup(de_ctx, p);
@@ -1190,6 +1535,8 @@ static DetectPort *RulesGroupByPorts(DetectEngineCtx *de_ctx, uint8_t ipproto, u
                 SigGroupHeadAppendSig(de_ctx, &tmp2->sh, s);
                 tmp2->sh->init->score = pwl;
                 DetectPortHashAdd(de_ctx, tmp2);
+                size_unique_port_arr =
+                        SetUniquePortPoints(tmp2, unique_port_points, size_unique_port_arr);
             }
 
             p = p->next;
@@ -1198,18 +1545,34 @@ static DetectPort *RulesGroupByPorts(DetectEngineCtx *de_ctx, uint8_t ipproto, u
         s = s->next;
     }
 
-    /* step 2: create a list of DetectPort objects */
+    /* step 2: create a list of the smallest port ranges with
+     * appropriate SGHs */
+
+    /* Create an interval tree of all the given ports to make the search
+     * for overlaps later on easier */
+    SCPortIntervalTree *it = SCPortIntervalTreeInit();
+    if (it == NULL)
+        goto error;
+
     HashListTableBucket *htb = NULL;
-    for (htb = HashListTableGetListHead(de_ctx->dport_hash_table);
-            htb != NULL;
-            htb = HashListTableGetListNext(htb))
-    {
+    for (htb = HashListTableGetListHead(de_ctx->dport_hash_table); htb != NULL;
+            htb = HashListTableGetListNext(htb)) {
         DetectPort *p = HashListTableGetListData(htb);
-        DetectPort *tmp = DetectPortCopySingle(de_ctx, p);
-        BUG_ON(tmp == NULL);
-        int r = DetectPortInsert(de_ctx, &list , tmp);
-        BUG_ON(r == -1);
+        if (SCPortIntervalInsert(de_ctx, it, p) != SC_OK) {
+            SCLogDebug("Port was not inserted in the tree");
+            goto error;
+        }
     }
+
+    /* Create a sorted list of ports in ascending order after resolving overlaps
+     * and corresponding SGHs */
+    if (CreatePortList(de_ctx, unique_port_points, size_unique_port_arr, it, &list) < 0)
+        goto error;
+
+    /* unique_port_points array is no longer needed */
+    SCFree(unique_port_points);
+
+    /* Port hashes are no longer needed */
     DetectPortHashFree(de_ctx);
 
     SCLogDebug("rules analyzed");
@@ -1218,7 +1581,7 @@ static DetectPort *RulesGroupByPorts(DetectEngineCtx *de_ctx, uint8_t ipproto, u
     DetectPort *newlist = NULL;
     uint16_t groupmax = (direction == SIG_FLAG_TOCLIENT) ? de_ctx->max_uniq_toclient_groups :
                                                            de_ctx->max_uniq_toserver_groups;
-    CreateGroupedPortList(de_ctx, list, &newlist, groupmax, CreateGroupedPortListCmpCnt);
+    CreateGroupedPortList(de_ctx, list, &newlist, groupmax, SortCompare);
     list = newlist;
 
     /* step 4: deduplicate the SGH's */
@@ -1256,24 +1619,39 @@ static DetectPort *RulesGroupByPorts(DetectEngineCtx *de_ctx, uint8_t ipproto, u
     }
 #if 0
     for (iter = list ; iter != NULL; iter = iter->next) {
-        SCLogInfo("PORT %u-%u %p (sgh=%s, whitelisted=%s/%d)",
+        SCLogInfo("PORT %u-%u %p (sgh=%s, prioritized=%s/%d)",
                 iter->port, iter->port2, iter->sh,
                 iter->flags & PORT_SIGGROUPHEAD_COPY ? "ref" : "own",
-                iter->sh->init->whitelist ? "true" : "false",
-                iter->sh->init->whitelist);
+                iter->sh->init->score ? "true" : "false",
+                iter->sh->init->score);
     }
 #endif
     SCLogPerf("%s %s: %u port groups, %u unique SGH's, %u copies",
             ipproto == 6 ? "TCP" : "UDP",
             direction == SIG_FLAG_TOSERVER ? "toserver" : "toclient",
             cnt, own, ref);
+    SCPortIntervalTreeFree(de_ctx, it);
     return list;
+
+error:
+    if (unique_port_points != NULL)
+        SCFree(unique_port_points);
+    if (it != NULL)
+        SCPortIntervalTreeFree(de_ctx, it);
+
+    return NULL;
 }
 
 void SignatureSetType(DetectEngineCtx *de_ctx, Signature *s)
 {
     BUG_ON(s->type != SIG_TYPE_NOT_SET);
     int iponly = 0;
+
+    if (s->init_data->hook.type == SIGNATURE_HOOK_TYPE_APP) {
+        s->type = SIG_TYPE_APP_TX;
+        SCLogDebug("%u: set to app_tx due to hook type app", s->id);
+        SCReturn;
+    }
 
     /* see if the sig is dp only */
     if (SignatureIsPDOnly(de_ctx, s) == 1) {
@@ -1334,7 +1712,6 @@ void SignatureSetType(DetectEngineCtx *de_ctx, Signature *s)
     }
 }
 
-extern int g_skip_prefilter;
 /**
  * \brief Preprocess signature, classify ip-only, etc, build sig array
  *
@@ -1362,9 +1739,10 @@ int SigPrepareStage1(DetectEngineCtx *de_ctx)
 
     /* now for every rule add the source group */
     for (Signature *s = de_ctx->sig_list; s != NULL; s = s->next) {
-        de_ctx->sig_array[s->num] = s;
+        de_ctx->sig_array[s->iid] = s;
 
-        SCLogDebug("Signature %" PRIu32 ", internal id %" PRIu32 ", ptrs %p %p ", s->id, s->num, s, de_ctx->sig_array[s->num]);
+        SCLogDebug("Signature %" PRIu32 ", internal id %" PRIu32 ", ptrs %p %p ", s->id, s->iid, s,
+                de_ctx->sig_array[s->iid]);
 
         if (s->type == SIG_TYPE_PDONLY) {
             SCLogDebug("Signature %"PRIu32" is considered \"PD only\"", s->id);
@@ -1416,40 +1794,7 @@ int SigPrepareStage1(DetectEngineCtx *de_ctx)
         DetectContentPropagateLimits(s);
         SigParseApplyDsizeToContent(s);
 
-        RuleSetWhitelist(s);
-
-        /* if keyword engines are enabled in the config, handle them here */
-        if (!g_skip_prefilter && de_ctx->prefilter_setting == DETECT_PREFILTER_AUTO &&
-                !(s->flags & SIG_FLAG_PREFILTER)) {
-            int prefilter_list = DETECT_TBLSIZE;
-
-            // TODO buffers?
-
-            /* get the keyword supporting prefilter with the lowest type */
-            for (int i = 0; i < DETECT_SM_LIST_MAX; i++) {
-                for (SigMatch *sm = s->init_data->smlists[i]; sm != NULL; sm = sm->next) {
-                    if (sigmatch_table[sm->type].SupportsPrefilter != NULL) {
-                        if (sigmatch_table[sm->type].SupportsPrefilter(s)) {
-                            prefilter_list = MIN(prefilter_list, sm->type);
-                        }
-                    }
-                }
-            }
-
-            /* apply that keyword as prefilter */
-            if (prefilter_list != DETECT_TBLSIZE) {
-                for (int i = 0; i < DETECT_SM_LIST_MAX; i++) {
-                    for (SigMatch *sm = s->init_data->smlists[i]; sm != NULL; sm = sm->next) {
-                        if (sm->type == prefilter_list) {
-                            s->init_data->prefilter_sm = sm;
-                            s->flags |= SIG_FLAG_PREFILTER;
-                            SCLogConfig("sid %u: prefilter is on \"%s\"", s->id, sigmatch_table[sm->type].name);
-                            break;
-                        }
-                    }
-                }
-            }
-        }
+        RuleSetScore(s);
 
         /* run buffer type callbacks if any */
         for (int x = 0; x < DETECT_SM_LIST_MAX; x++) {
@@ -1489,179 +1834,6 @@ error:
     return -1;
 }
 
-static int PortGroupWhitelist(const DetectPort *a)
-{
-    return a->sh->init->score;
-}
-
-int CreateGroupedPortListCmpCnt(DetectPort *a, DetectPort *b)
-{
-    if (PortGroupWhitelist(a) && !PortGroupWhitelist(b)) {
-        SCLogDebug("%u:%u (cnt %u, wl %d) wins against %u:%u (cnt %u, wl %d)", a->port, a->port2,
-                a->sh->init->sig_cnt, PortGroupWhitelist(a), b->port, b->port2,
-                b->sh->init->sig_cnt, PortGroupWhitelist(b));
-        return 1;
-    } else if (!PortGroupWhitelist(a) && PortGroupWhitelist(b)) {
-        SCLogDebug("%u:%u (cnt %u, wl %d) loses against %u:%u (cnt %u, wl %d)", a->port, a->port2,
-                a->sh->init->sig_cnt, PortGroupWhitelist(a), b->port, b->port2,
-                b->sh->init->sig_cnt, PortGroupWhitelist(b));
-        return 0;
-    } else if (PortGroupWhitelist(a) > PortGroupWhitelist(b)) {
-        SCLogDebug("%u:%u (cnt %u, wl %d) wins against %u:%u (cnt %u, wl %d)", a->port, a->port2,
-                a->sh->init->sig_cnt, PortGroupWhitelist(a), b->port, b->port2,
-                b->sh->init->sig_cnt, PortGroupWhitelist(b));
-        return 1;
-    } else if (PortGroupWhitelist(a) == PortGroupWhitelist(b)) {
-        if (a->sh->init->sig_cnt > b->sh->init->sig_cnt) {
-            SCLogDebug("%u:%u (cnt %u, wl %d) wins against %u:%u (cnt %u, wl %d)", a->port,
-                    a->port2, a->sh->init->sig_cnt, PortGroupWhitelist(a), b->port, b->port2,
-                    b->sh->init->sig_cnt, PortGroupWhitelist(b));
-            return 1;
-        }
-    }
-
-    SCLogDebug("%u:%u (cnt %u, wl %d) loses against %u:%u (cnt %u, wl %d)", a->port, a->port2,
-            a->sh->init->sig_cnt, PortGroupWhitelist(a), b->port, b->port2, b->sh->init->sig_cnt,
-            PortGroupWhitelist(b));
-    return 0;
-}
-
-/** \internal
- *  \brief Create a list of DetectPort objects sorted based on CompareFunc's
- *         logic.
- *
- *  List can limit the number of groups. In this case an extra "join" group
- *  is created that contains the sigs belonging to that. It's *appended* to
- *  the list, meaning that if the list is walked linearly it's found last.
- *  The joingr is meant to be a catch all.
- *
- */
-int CreateGroupedPortList(DetectEngineCtx *de_ctx, DetectPort *port_list, DetectPort **newhead,
-        uint32_t unique_groups, int (*CompareFunc)(DetectPort *, DetectPort *))
-{
-    DetectPort *tmplist = NULL, *joingr = NULL;
-    char insert = 0;
-    uint32_t groups = 0;
-    DetectPort *list;
-
-    /* insert the ports into the tmplist, where it will
-     * be sorted descending on 'cnt' and on whether a group
-     * is whitelisted. */
-
-    DetectPort *oldhead = port_list;
-    while (oldhead) {
-        /* take the top of the list */
-        list = oldhead;
-        oldhead = oldhead->next;
-        list->next = NULL;
-
-        groups++;
-        SigGroupHeadSetSigCnt(list->sh, 0);
-
-        /* insert it */
-        DetectPort *tmpgr = tmplist, *prevtmpgr = NULL;
-        if (tmplist == NULL) {
-            /* empty list, set head */
-            tmplist = list;
-        } else {
-            /* look for the place to insert */
-            for ( ; tmpgr != NULL && !insert; tmpgr = tmpgr->next) {
-                if (CompareFunc(list, tmpgr) == 1) {
-                    if (tmpgr == tmplist) {
-                        list->next = tmplist;
-                        tmplist = list;
-                        SCLogDebug("new list top: %u:%u", tmplist->port, tmplist->port2);
-                    } else {
-                        list->next = prevtmpgr->next;
-                        prevtmpgr->next = list;
-                    }
-                    insert = 1;
-                    break;
-                }
-                prevtmpgr = tmpgr;
-            }
-            if (insert == 0) {
-                list->next = NULL;
-                prevtmpgr->next = list;
-            }
-            insert = 0;
-        }
-    }
-
-    uint32_t left = unique_groups;
-    if (left == 0)
-        left = groups;
-
-    /* create another list: take the port groups from above
-     * and add them to the 2nd list until we have met our
-     * count. The rest is added to the 'join' group. */
-    DetectPort *tmplist2 = NULL, *tmplist2_tail = NULL;
-    DetectPort *gr, *next_gr;
-    for (gr = tmplist; gr != NULL; ) {
-        next_gr = gr->next;
-
-        SCLogDebug("temp list gr %p %u:%u", gr, gr->port, gr->port2);
-        DetectPortPrint(gr);
-
-        /* if we've set up all the unique groups, add the rest to the
-         * catch-all joingr */
-        if (left == 0) {
-            if (joingr == NULL) {
-                DetectPortParse(de_ctx, &joingr, "0:65535");
-                if (joingr == NULL) {
-                    goto error;
-                }
-                SCLogDebug("joingr => %u-%u", joingr->port, joingr->port2);
-                joingr->next = NULL;
-            }
-            SigGroupHeadCopySigs(de_ctx,gr->sh,&joingr->sh);
-
-            /* when a group's sigs are added to the joingr, we can free it */
-            gr->next = NULL;
-            DetectPortFree(de_ctx, gr);
-        /* append */
-        } else {
-            gr->next = NULL;
-
-            if (tmplist2 == NULL) {
-                tmplist2 = gr;
-                tmplist2_tail = gr;
-            } else {
-                tmplist2_tail->next = gr;
-                tmplist2_tail = gr;
-            }
-        }
-
-        if (left > 0)
-            left--;
-
-        gr = next_gr;
-    }
-
-    /* if present, append the joingr that covers the rest */
-    if (joingr != NULL) {
-        SCLogDebug("appending joingr %p %u:%u", joingr, joingr->port, joingr->port2);
-
-        if (tmplist2 == NULL) {
-            tmplist2 = joingr;
-            //tmplist2_tail = joingr;
-        } else {
-            tmplist2_tail->next = joingr;
-            //tmplist2_tail = joingr;
-        }
-    } else {
-        SCLogDebug("no joingr");
-    }
-
-    /* pass back our new list to the caller */
-    *newhead = tmplist2;
-    DetectPortPrintList(*newhead);
-
-    return 0;
-error:
-    return -1;
-}
-
 /**
  *  \internal
  *  \brief add a decoder event signature to the detection engine ctx
@@ -1670,6 +1842,27 @@ static void DetectEngineAddDecoderEventSig(DetectEngineCtx *de_ctx, Signature *s
 {
     SCLogDebug("adding signature %"PRIu32" to the decoder event sgh", s->id);
     SigGroupHeadAppendSig(de_ctx, &de_ctx->decoder_event_sgh, s);
+}
+
+static void DetectEngineAddSigToPreStreamHook(DetectEngineCtx *de_ctx, Signature *s)
+{
+    SCLogDebug("adding signature %" PRIu32 " to the pre_stream hook sgh", s->id);
+
+    if ((s->flags & (SIG_FLAG_TOSERVER | SIG_FLAG_TOCLIENT)) ==
+            (SIG_FLAG_TOSERVER | SIG_FLAG_TOCLIENT)) {
+        SigGroupHeadAppendSig(de_ctx, &de_ctx->pre_stream_sgh[0], s);
+        SigGroupHeadAppendSig(de_ctx, &de_ctx->pre_stream_sgh[1], s);
+    } else if (s->flags & SIG_FLAG_TOSERVER) {
+        SigGroupHeadAppendSig(de_ctx, &de_ctx->pre_stream_sgh[0], s);
+    } else if (s->flags & SIG_FLAG_TOCLIENT) {
+        SigGroupHeadAppendSig(de_ctx, &de_ctx->pre_stream_sgh[1], s);
+    }
+}
+
+static void DetectEngineAddSigToPreFlowHook(DetectEngineCtx *de_ctx, Signature *s)
+{
+    SCLogDebug("adding signature %" PRIu32 " to the pre_flow hook sgh", s->id);
+    SigGroupHeadAppendSig(de_ctx, &de_ctx->pre_flow_sgh, s);
 }
 
 /**
@@ -1694,7 +1887,7 @@ int SigPrepareStage2(DetectEngineCtx *de_ctx)
     de_ctx->flow_gh[0].udp = RulesGroupByPorts(de_ctx, IPPROTO_UDP, SIG_FLAG_TOCLIENT);
 
     /* Setup the other IP Protocols (so not TCP/UDP) */
-    RulesGroupByProto(de_ctx);
+    RulesGroupByIPProto(de_ctx);
 
     /* now for every rule add the source group to our temp lists */
     for (Signature *s = de_ctx->sig_list; s != NULL; s = s->next) {
@@ -1703,6 +1896,12 @@ int SigPrepareStage2(DetectEngineCtx *de_ctx)
             IPOnlyAddSignature(de_ctx, &de_ctx->io_ctx, s);
         } else if (s->type == SIG_TYPE_DEONLY) {
             DetectEngineAddDecoderEventSig(de_ctx, s);
+        } else if (s->type == SIG_TYPE_PKT && s->init_data->hook.type == SIGNATURE_HOOK_TYPE_PKT &&
+                   s->init_data->hook.t.pkt.ph == SIGNATURE_HOOK_PKT_PRE_STREAM) {
+            DetectEngineAddSigToPreStreamHook(de_ctx, s);
+        } else if (s->type == SIG_TYPE_PKT && s->init_data->hook.type == SIGNATURE_HOOK_TYPE_PKT &&
+                   s->init_data->hook.t.pkt.ph == SIGNATURE_HOOK_PKT_PRE_FLOW) {
+            DetectEngineAddSigToPreFlowHook(de_ctx, s);
         }
     }
 
@@ -1721,10 +1920,47 @@ static void DetectEngineBuildDecoderEventSgh(DetectEngineCtx *de_ctx)
     SigGroupHeadBuildMatchArray(de_ctx, de_ctx->decoder_event_sgh, max_idx);
 }
 
+static void DetectEngineBuildPreStreamHookSghs(DetectEngineCtx *de_ctx)
+{
+    uint32_t max_idx = DetectEngineGetMaxSigId(de_ctx);
+    if (de_ctx->pre_stream_sgh[0] != NULL) {
+        SigGroupHeadSetSigCnt(de_ctx->pre_stream_sgh[0], max_idx);
+        SigGroupHeadBuildMatchArray(de_ctx, de_ctx->pre_stream_sgh[0], max_idx);
+        PrefilterSetupRuleGroup(de_ctx, de_ctx->pre_stream_sgh[0]);
+    }
+    if (de_ctx->pre_stream_sgh[1] != NULL) {
+        SigGroupHeadSetSigCnt(de_ctx->pre_stream_sgh[1], max_idx);
+        SigGroupHeadBuildMatchArray(de_ctx, de_ctx->pre_stream_sgh[1], max_idx);
+        PrefilterSetupRuleGroup(de_ctx, de_ctx->pre_stream_sgh[1]);
+    }
+
+    if (de_ctx->pre_stream_sgh[0] != NULL || de_ctx->pre_stream_sgh[1] != NULL) {
+        de_ctx->PreStreamHook = DetectPreStream;
+    }
+}
+
+static void DetectEngineBuildPreFlowHookSghs(DetectEngineCtx *de_ctx)
+{
+    if (de_ctx->pre_flow_sgh != NULL) {
+        uint32_t max_idx = DetectEngineGetMaxSigId(de_ctx);
+        SigGroupHeadSetSigCnt(de_ctx->pre_flow_sgh, max_idx);
+        SigGroupHeadBuildMatchArray(de_ctx, de_ctx->pre_flow_sgh, max_idx);
+        PrefilterSetupRuleGroup(de_ctx, de_ctx->pre_flow_sgh);
+        de_ctx->PreFlowHook = DetectPreFlow;
+    }
+}
+
 int SigPrepareStage3(DetectEngineCtx *de_ctx)
 {
     /* prepare the decoder event sgh */
     DetectEngineBuildDecoderEventSgh(de_ctx);
+
+    /* pre_flow hook sgh */
+    DetectEngineBuildPreFlowHookSghs(de_ctx);
+
+    /* pre_stream hook sghs */
+    DetectEngineBuildPreStreamHookSghs(de_ctx);
+
     return 0;
 }
 
@@ -1737,6 +1973,15 @@ int SigAddressCleanupStage1(DetectEngineCtx *de_ctx)
     if (de_ctx->decoder_event_sgh)
         SigGroupHeadFree(de_ctx, de_ctx->decoder_event_sgh);
     de_ctx->decoder_event_sgh = NULL;
+    if (de_ctx->pre_flow_sgh)
+        SigGroupHeadFree(de_ctx, de_ctx->pre_flow_sgh);
+    de_ctx->pre_flow_sgh = NULL;
+    if (de_ctx->pre_stream_sgh[0])
+        SigGroupHeadFree(de_ctx, de_ctx->pre_stream_sgh[0]);
+    de_ctx->pre_stream_sgh[0] = NULL;
+    if (de_ctx->pre_stream_sgh[1])
+        SigGroupHeadFree(de_ctx, de_ctx->pre_stream_sgh[1]);
+    de_ctx->pre_stream_sgh[1] = NULL;
 
     for (int f = 0; f < FLOW_STATES; f++) {
         for (int p = 0; p < 256; p++) {
@@ -1821,8 +2066,6 @@ int SigPrepareStage4(DetectEngineCtx *de_ctx)
 
         PrefilterSetupRuleGroup(de_ctx, sgh);
 
-        SigGroupHeadBuildNonPrefilterArray(de_ctx, sgh);
-
         sgh->id = idx;
         cnt++;
     }
@@ -1833,16 +2076,17 @@ int SigPrepareStage4(DetectEngineCtx *de_ctx)
     if (de_ctx->decoder_event_sgh != NULL) {
         /* no need to set filestore count here as that would make a
          * signature not decode event only. */
+        PrefilterSetupRuleGroup(de_ctx, de_ctx->decoder_event_sgh);
     }
 
     int dump_grouping = 0;
-    (void)ConfGetBool("detect.profiling.grouping.dump-to-disk", &dump_grouping);
+    (void)SCConfGetBool("detect.profiling.grouping.dump-to-disk", &dump_grouping);
 
     if (dump_grouping) {
         int add_rules = 0;
-        (void)ConfGetBool("detect.profiling.grouping.include-rules", &add_rules);
+        (void)SCConfGetBool("detect.profiling.grouping.include-rules", &add_rules);
         int add_mpm_stats = 0;
-        (void)ConfGetBool("detect.profiling.grouping.include-mpm-stats", &add_mpm_stats);
+        (void)SCConfGetBool("detect.profiling.grouping.include-mpm-stats", &add_mpm_stats);
 
         RulesDumpGrouping(de_ctx, add_rules, add_mpm_stats);
     }
@@ -1921,7 +2165,15 @@ static int SigMatchPrepare(DetectEngineCtx *de_ctx)
                 sm = nsm;
             }
         }
+        if (s->init_data->cidr_dst != NULL)
+            IPOnlyCIDRListFree(s->init_data->cidr_dst);
+
+        if (s->init_data->cidr_src != NULL)
+            IPOnlyCIDRListFree(s->init_data->cidr_src);
+
         SCFree(s->init_data->buffers);
+        SCFree(s->init_data->rule_state_dependant_sids_array);
+        SCFree(s->init_data->rule_state_flowbits_ids_array);
         SCFree(s->init_data);
         s->init_data = NULL;
     }
@@ -1950,7 +2202,7 @@ int SigGroupBuild(DetectEngineCtx *de_ctx)
      * signums. */
     de_ctx->signum = 0;
     while (s != NULL) {
-        s->num = de_ctx->signum++;
+        s->iid = de_ctx->signum++;
 
         s = s->next;
     }
@@ -1993,17 +2245,19 @@ int SigGroupBuild(DetectEngineCtx *de_ctx)
     de_ctx->profile_match_logging_threshold = UINT_MAX; // disabled
 
     intmax_t v = 0;
-    if (ConfGetInt("detect.profiling.inspect-logging-threshold", &v) == 1)
+    if (SCConfGetInt("detect.profiling.inspect-logging-threshold", &v) == 1)
         de_ctx->profile_match_logging_threshold = (uint32_t)v;
 #endif
 #ifdef PROFILE_RULES
     SCProfilingRuleInitCounters(de_ctx);
 #endif
 
-    ThresholdHashAllocate(de_ctx);
-
     if (!DetectEngineMultiTenantEnabled()) {
         VarNameStoreActivate();
+    }
+
+    if (EngineModeIsFirewall()) {
+        FirewallAnalyzer(de_ctx);
     }
     return 0;
 }

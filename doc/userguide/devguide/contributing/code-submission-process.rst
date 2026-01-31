@@ -15,15 +15,19 @@ Commits
 #. If your code changes or adds new behavior, add the related documentation
    updates in their own commit, but make sure to add the same ticket number to
    both commit messages.
-#. Commit messages need to be properly formatted (check the example further
-     below in this section):
+#. Commit messages need to be properly formatted (check the example further below in this section).
       * Meaningful and short (50 chars max) subject line followed by an empty line
       * Naming convention: prefix message with sub-system (**"rule parsing: fixing foobar"**). If
         you're not sure what to use, look at past commits to the file(s) in your PR.
       * Description, wrapped at ~72 characters
 #. Commits should be individually compilable, starting with the oldest commit. Make sure that
-     each commit can be built if it and the preceding commits in the PR are used.
+   each commit can be built if it and the preceding commits in the PR are used.
 #. Commits should be authored with the format: "FirstName LastName <name@example.com>"
+
+We recommend that you use git commit message template with the following command:
+``git config commit.template /path/to/suricata/git-template/commit-template.txt``
+The template lists items that help describe the context and include requisite information in
+the commit message. We reserve the right to strictly enforce the template in the future:
 
 Information that needs to be part of a commit (if applicable):
 
@@ -32,15 +36,17 @@ Information that needs to be part of a commit (if applicable):
 #. Coverity Scan issues addressed.
 #. Static analyzer error it fixes (cppcheck/scan-build/etc)
 
-When in doubt, check our git history for other messages or changes done to the
-same module your're working on. This is a good example of a `commit message
-<https://github.com/OISF/suricata/commit/33fca4d4db112b75ffa22eb2e6f14f038cbcc1f9>`_::
+.. note::
 
-    pcap/file: normalize file timestamps
+    When in doubt, check our git history for other messages or changes done to the
+    same module your're working on. This is a good example of a `commit message
+    <https://github.com/OISF/suricata/commit/33fca4d4db112b75ffa22eb2e6f14f038cbcc1f9>`_::
 
-    Normalize the timestamps that are too far in the past to epoch.
+       pcap/file: normalize file timestamps
 
-    Bug: #6240.
+       Normalize the timestamps that are too far in the past to epoch.
+
+       Bug: #6240.
 
 .. _pull-requests-criteria:
 
@@ -56,7 +62,7 @@ A github pull request is actually just a pointer to a branch in your tree. GitHu
 #. Incremental pull requests need to describe changes since the last PR
 #. Link to the ticket(s) that are addressed to it.
 #. When fixing an issue, update the issue status to ``In Review`` after submitting the PR.
-#. Pull requests are automatically tested using github actions (https://github.com/OISF/suricata/blob/master/.github/workflows/builds.yml).
+#. Pull requests are automatically tested using github actions (https://github.com/OISF/suricata/blob/main/.github/workflows/builds.yml).
    Failing builds won't be considered and should be closed immediately.
 #. Pull requests that change, or add a feature should include a documentation update commit
 

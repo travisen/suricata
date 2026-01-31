@@ -21,16 +21,20 @@ This is the documentation for Suricata |version|.
    configuration/index.rst
    reputation/index.rst
    initscripts
-   setting-up-ipsinline-for-linux
-   setting-up-ipsinline-for-windows
    output/index.rst
    lua/index.rst
    file-extraction/file-extraction.rst
+   protocols/protocols.rst
    public-data-sets
    capture-hardware/index.rst
    unix-socket.rst
+   plugins/index.rst
+   ips/index.rst
+   firewall/index.rst
    3rd-party-integration/index.rst
    manpages/index.rst
    acknowledgements
    licenses/index.rst
    devguide/index.rst
+   verifying-source-files
+   appendix/index.rst

@@ -22,33 +22,26 @@
  *  \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __DETECT_ENGINE_THRESHOLD_H__
-#define __DETECT_ENGINE_THRESHOLD_H__
+#ifndef SURICATA_DETECT_ENGINE_THRESHOLD_H
+#define SURICATA_DETECT_ENGINE_THRESHOLD_H
 
 #include "detect.h"
-#include "host.h"
-#include "ippair.h"
-#include "host-storage.h"
+#include "detect-threshold.h"
 
 void ThresholdInit(void);
+void ThresholdRegisterGlobalCounters(void);
+void ThresholdDestroy(void);
 
-HostStorageId ThresholdHostStorageId(void);
-int ThresholdHostHasThreshold(Host *);
-
-int ThresholdIPPairHasThreshold(IPPair *pair);
+uint32_t ThresholdsExpire(const SCTime_t ts);
 
 const DetectThresholdData *SigGetThresholdTypeIter(
         const Signature *, const SigMatchData **, int list);
-int PacketAlertThreshold(DetectEngineCtx *, DetectEngineThreadCtx *,
-        const DetectThresholdData *, Packet *,
-        const Signature *, PacketAlert *);
+int PacketAlertThreshold(const DetectEngineCtx *, DetectEngineThreadCtx *,
+        const DetectThresholdData *, Packet *, const Signature *, PacketAlert *);
 
-void ThresholdHashInit(DetectEngineCtx *);
-void ThresholdHashAllocate(DetectEngineCtx *);
-void ThresholdContextDestroy(DetectEngineCtx *);
-
-int ThresholdHostTimeoutCheck(Host *, SCTime_t);
-int ThresholdIPPairTimeoutCheck(IPPair *, SCTime_t);
 void ThresholdListFree(void *ptr);
+void ThresholdCacheThreadFree(void);
 
-#endif /* __DETECT_ENGINE_THRESHOLD_H__ */
+void FlowThresholdVarFree(void *ptr);
+
+#endif /* SURICATA_DETECT_ENGINE_THRESHOLD_H */

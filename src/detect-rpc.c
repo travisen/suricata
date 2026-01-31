@@ -96,14 +96,14 @@ static int DetectRpcMatch (DetectEngineThreadCtx *det_ctx, Packet *p,
     const DetectRpcData *rd = (const DetectRpcData *)ctx;
     char *rpcmsg = (char *)p->payload;
 
-    if (PKT_IS_TCP(p)) {
+    if (PacketIsTCP(p)) {
         /* if Rpc msg too small */
         if (p->payload_len < 28) {
             SCLogDebug("TCP packet to small for the rpc msg (%u)", p->payload_len);
             return 0;
         }
         rpcmsg += 4;
-    } else if (PKT_IS_UDP(p)) {
+    } else if (PacketIsUDP(p)) {
         /* if Rpc msg too small */
         if (p->payload_len < 24) {
             SCLogDebug("UDP packet to small for the rpc msg (%u)", p->payload_len);
@@ -270,7 +270,7 @@ int DetectRpcSetup (DetectEngineCtx *de_ctx, Signature *s, const char *rpcstr)
     rd = DetectRpcParse(de_ctx, rpcstr);
     if (rd == NULL) goto error;
 
-    if (SigMatchAppendSMToList(de_ctx, s, DETECT_RPC, (SigMatchCtx *)rd, DETECT_SM_LIST_MATCH) ==
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_RPC, (SigMatchCtx *)rd, DETECT_SM_LIST_MATCH) ==
             NULL) {
         goto error;
     }
@@ -479,6 +479,7 @@ static int DetectRpcTestSig01(void)
     DetectEngineThreadCtx *det_ctx;
 
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
 
     p = UTHBuildPacket(buf, buflen, IPPROTO_UDP);
 
@@ -517,11 +518,11 @@ static int DetectRpcTestSig01(void)
     FAIL_IF(PacketAlertCheck(p, 4) == 0);
     FAIL_IF(PacketAlertCheck(p, 5) > 0);
 
-    DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
-    DetectEngineCtxFree(de_ctx);
-
     UTHFreePackets(&p, 1);
 
+    DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
+    DetectEngineCtxFree(de_ctx);
+    StatsThreadCleanup(&th_v.stats);
     PASS;
 }
 

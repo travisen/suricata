@@ -21,18 +21,19 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __THREADVARS_H__
-#define __THREADVARS_H__
+#ifndef SURICATA_THREADVARS_H
+#define SURICATA_THREADVARS_H
 
 #include "tm-queues.h"
 #include "counters.h"
 #include "packet-queue.h"
 #include "util-atomic.h"
+#include "util-storage.h"
 
 struct TmSlot_;
 
 /** Thread flags set and read by threads to control the threads */
-#define THV_USE                 BIT_U32(0)  /** thread is in use */
+// bit 0 vacant
 #define THV_INIT_DONE           BIT_U32(1)  /** thread initialization done */
 #define THV_PAUSE               BIT_U32(2)  /** signal thread to pause itself */
 #define THV_PAUSED              BIT_U32(3)  /** the thread is paused atm */
@@ -44,7 +45,7 @@ struct TmSlot_;
 #define THV_DEINIT              BIT_U32(7)
 #define THV_RUNNING_DONE        BIT_U32(8)  /** thread has completed running and is entering
                                          * the de-init phase */
-#define THV_KILL_PKTACQ         BIT_U32(9)  /**< flag thread to stop packet acq */
+#define THV_REQ_FLOW_LOOP       BIT_U32(9)  /**< request thread to enter flow timeout loop */
 #define THV_FLOW_LOOP           BIT_U32(10) /**< thread is in flow shutdown loop */
 
 /** signal thread's capture method to create a fake packet to force through
@@ -64,7 +65,6 @@ typedef struct ThreadVars_ {
 
     char name[16];
     char *printable_name;
-    char *thread_group_name;
 
     uint8_t thread_setup_flags;
 
@@ -92,7 +92,7 @@ typedef struct ThreadVars_ {
 
     SC_ATOMIC_DECLARE(uint32_t, flags);
 
-    /** list of of TmSlot objects together forming the packet pipeline. */
+    /** list of TmSlot objects together forming the packet pipeline. */
     struct TmSlot_ *tm_slots;
 
     /** pointer to the flowworker in the pipeline. Used as starting point
@@ -119,13 +119,10 @@ typedef struct ThreadVars_ {
     /* counters */
 
     /** private counter store: counter updates modify this */
-    StatsPrivateThreadContext perf_private_ctx;
+    StatsThreadContext stats;
 
     /** pointer to the next thread */
     struct ThreadVars_ *next;
-
-    /** public counter store: counter syncs update this */
-    StatsPublicThreadContext perf_public_ctx;
 
     /* mutex and condition used by management threads */
 
@@ -135,6 +132,10 @@ typedef struct ThreadVars_ {
     struct FlowQueue_ *flow_queue;
     bool break_loop;
 
+    /** Interface-specific thread affinity */
+    char *iface_name;
+
+    Storage storage[];
 } ThreadVars;
 
 /** Thread setup flags: */
@@ -142,4 +143,4 @@ typedef struct ThreadVars_ {
 #define THREAD_SET_PRIORITY     0x02 /** Real time priority */
 #define THREAD_SET_AFFTYPE      0x04 /** Priority and affinity */
 
-#endif /* __THREADVARS_H__ */
+#endif /* SURICATA_THREADVARS_H */

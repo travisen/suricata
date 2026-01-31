@@ -28,6 +28,8 @@
 #include "decode.h"
 #include "detect.h"
 #include "detect-parse.h"
+#include "detect-engine-prefilter-common.h"
+#include "detect-engine-uint.h"
 
 #include "flow-var.h"
 #include "decode-events.h"
@@ -56,6 +58,69 @@ static void DetectEngineEventFree (DetectEngineCtx *, void *);
 void EngineEventRegisterTests(void);
 #endif
 
+static bool PrefilterEventIsPrefilterable(const Signature *s, int smtype)
+{
+    const SigMatch *sm;
+    for (sm = s->init_data->smlists[DETECT_SM_LIST_MATCH]; sm != NULL; sm = sm->next) {
+        if (sm->type == smtype) {
+            return true;
+        }
+    }
+    return false;
+}
+static bool PrefilterStreamEventIsPrefilterable(const Signature *s)
+{
+    return PrefilterEventIsPrefilterable(s, DETECT_STREAM_EVENT);
+}
+
+static bool PrefilterDecodeEventIsPrefilterable(const Signature *s)
+{
+    return PrefilterEventIsPrefilterable(s, DETECT_DECODE_EVENT);
+}
+
+static void PrefilterPacketEventSet(PrefilterPacketHeaderValue *v, void *smctx)
+{
+    const DetectEngineEventData *a = smctx;
+    v->u8[0] = PREFILTER_U8HASH_MODE_EQ;
+    v->u8[1] = a->event; // arg1
+    v->u8[2] = 0;        // arg2
+}
+
+static bool PrefilterPacketEventCompare(PrefilterPacketHeaderValue v, void *smctx)
+{
+    const DetectEngineEventData *a = smctx;
+    DetectUintData_u8 du8;
+    du8.mode = DETECT_UINT_EQ;
+    du8.arg1 = a->event;
+    du8.arg2 = 0;
+    return PrefilterPacketU8Compare(v, &du8);
+}
+
+static void PrefilterPacketEventMatch(DetectEngineThreadCtx *det_ctx, Packet *p, const void *pectx)
+{
+    const PrefilterPacketU8HashCtx *h = pectx;
+    for (uint8_t u = 0; u < p->events.cnt; u++) {
+        const SigsArray *sa = h->array[p->events.events[u]];
+        if (sa) {
+            PrefilterAddSids(&det_ctx->pmq, sa->sigs, sa->cnt);
+        }
+    }
+}
+
+static int PrefilterSetupStreamEvent(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
+{
+    return PrefilterSetupPacketHeaderU8Hash(de_ctx, sgh, DETECT_STREAM_EVENT,
+            SIG_MASK_REQUIRE_ENGINE_EVENT, PrefilterPacketEventSet, PrefilterPacketEventCompare,
+            PrefilterPacketEventMatch);
+}
+
+static int PrefilterSetupDecodeEvent(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
+{
+    return PrefilterSetupPacketHeaderU8Hash(de_ctx, sgh, DETECT_DECODE_EVENT,
+            SIG_MASK_REQUIRE_ENGINE_EVENT, PrefilterPacketEventSet, PrefilterPacketEventCompare,
+            PrefilterPacketEventMatch);
+}
+
 /**
  * \brief Registration function for decode-event: keyword
  */
@@ -73,12 +138,21 @@ void DetectEngineEventRegister (void)
     sigmatch_table[DETECT_DECODE_EVENT].Match = DetectEngineEventMatch;
     sigmatch_table[DETECT_DECODE_EVENT].Setup = DetectDecodeEventSetup;
     sigmatch_table[DETECT_DECODE_EVENT].Free  = DetectEngineEventFree;
+    sigmatch_table[DETECT_DECODE_EVENT].desc =
+            "match on events triggered by structural or invalid values during packet decoding";
+    sigmatch_table[DETECT_DECODE_EVENT].url = "/rules/decode-layer.html#decode-event";
     sigmatch_table[DETECT_DECODE_EVENT].flags |= SIGMATCH_DEONLY_COMPAT;
+    sigmatch_table[DETECT_DECODE_EVENT].SupportsPrefilter = PrefilterDecodeEventIsPrefilterable;
+    sigmatch_table[DETECT_DECODE_EVENT].SetupPrefilter = PrefilterSetupDecodeEvent;
 
     sigmatch_table[DETECT_STREAM_EVENT].name = "stream-event";
     sigmatch_table[DETECT_STREAM_EVENT].Match = DetectEngineEventMatch;
     sigmatch_table[DETECT_STREAM_EVENT].Setup = DetectStreamEventSetup;
     sigmatch_table[DETECT_STREAM_EVENT].Free  = DetectEngineEventFree;
+    sigmatch_table[DETECT_STREAM_EVENT].desc =
+            "match on events triggered by anomalies during TCP streaming";
+    sigmatch_table[DETECT_STREAM_EVENT].SupportsPrefilter = PrefilterStreamEventIsPrefilterable;
+    sigmatch_table[DETECT_STREAM_EVENT].SetupPrefilter = PrefilterSetupStreamEvent;
 
     DetectSetupParseRegexes(PARSE_REGEX, &parse_regex);
 }
@@ -211,7 +285,7 @@ static int DetectEngineEventSetupDo(
 
     SCLogDebug("rawstr %s %u", rawstr, de->event);
 
-    if (SigMatchAppendSMToList(de_ctx, s, smtype, (SigMatchCtx *)de, DETECT_SM_LIST_MATCH) ==
+    if (SCSigMatchAppendSMToList(de_ctx, s, smtype, (SigMatchCtx *)de, DETECT_SM_LIST_MATCH) ==
             NULL) {
         SCFree(de);
         return -1;
@@ -268,7 +342,7 @@ static int DetectStreamEventSetup (DetectEngineCtx *de_ctx, Signature *s, const 
     /* stream:$EVENT alias command develop as decode-event:stream.$EVENT */
     strlcat(srawstr, rawstr, sizeof(srawstr));
 
-    return DetectEngineEventSetup(de_ctx, s, srawstr);
+    return DetectEngineEventSetupDo(de_ctx, s, srawstr, DETECT_STREAM_EVENT);
 }
 
 /*
@@ -277,7 +351,7 @@ static int DetectStreamEventSetup (DetectEngineCtx *de_ctx, Signature *s, const 
 #ifdef UNITTESTS
 
 /**
- * \test EngineEventTestParse01 is a test for a  valid decode-event value
+ * \test EngineEventTestParse01 is a test for a valid decode-event value
  */
 static int EngineEventTestParse01 (void)
 {
@@ -290,9 +364,8 @@ static int EngineEventTestParse01 (void)
     PASS;
 }
 
-
 /**
- * \test EngineEventTestParse02 is a test for a  valid upper + lower case decode-event value
+ * \test EngineEventTestParse02 is a test for a valid upper + lower case decode-event value
  */
 static int EngineEventTestParse02 (void)
 {
@@ -306,7 +379,7 @@ static int EngineEventTestParse02 (void)
 }
 
 /**
- * \test EngineEventTestParse03 is a test for a  valid upper case decode-event value
+ * \test EngineEventTestParse03 is a test for a valid upper case decode-event value
  */
 static int EngineEventTestParse03 (void)
 {
@@ -320,7 +393,7 @@ static int EngineEventTestParse03 (void)
 }
 
 /**
- * \test EngineEventTestParse04 is a test for an  invalid upper case decode-event value
+ * \test EngineEventTestParse04 is a test for an invalid upper case decode-event value
  */
 static int EngineEventTestParse04 (void)
 {
@@ -334,7 +407,7 @@ static int EngineEventTestParse04 (void)
 }
 
 /**
- * \test EngineEventTestParse05 is a test for an  invalid char into the decode-event value
+ * \test EngineEventTestParse05 is a test for an invalid char into the decode-event value
  */
 static int EngineEventTestParse05 (void)
 {
@@ -374,7 +447,7 @@ static int EngineEventTestParse06 (void)
 
     FAIL_IF_NOT(DetectEngineEventMatch(NULL, p, NULL, sm->ctx));
 
-    SCFree(p);
+    PacketFree(p);
     SCFree(de);
     SCFree(sm);
 

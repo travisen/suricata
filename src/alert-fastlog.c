@@ -76,9 +76,17 @@ int AlertFastLogger(ThreadVars *tv, void *data, const Packet *p);
 
 void AlertFastLogRegister(void)
 {
-    OutputRegisterPacketModule(LOGGER_ALERT_FAST, MODULE_NAME, "fast",
-        AlertFastLogInitCtx, AlertFastLogger, AlertFastLogCondition,
-        AlertFastLogThreadInit, AlertFastLogThreadDeinit, NULL);
+    OutputPacketLoggerFunctions output_logger_functions = {
+        .LogFunc = AlertFastLogger,
+        .FlushFunc = NULL,
+        .ConditionFunc = AlertFastLogCondition,
+        .ThreadInitFunc = AlertFastLogThreadInit,
+        .ThreadDeinitFunc = AlertFastLogThreadDeinit,
+        .ThreadExitPrintStatsFunc = NULL,
+    };
+
+    OutputRegisterPacketModule(
+            LOGGER_ALERT_FAST, MODULE_NAME, "fast", AlertFastLogInitCtx, &output_logger_functions);
     AlertFastLogRegisterTests();
 }
 
@@ -109,10 +117,10 @@ int AlertFastLogger(ThreadVars *tv, void *data, const Packet *p)
     CreateTimeString(p->ts, timebuf, sizeof(timebuf));
 
     char srcip[46], dstip[46];
-    if (PKT_IS_IPV4(p)) {
+    if (PacketIsIPv4(p)) {
         PrintInet(AF_INET, (const void *)GET_IPV4_SRC_ADDR_PTR(p), srcip, sizeof(srcip));
         PrintInet(AF_INET, (const void *)GET_IPV4_DST_ADDR_PTR(p), dstip, sizeof(dstip));
-    } else if (PKT_IS_IPV6(p)) {
+    } else if (PacketIsIPv6(p)) {
         PrintInet(AF_INET6, (const void *)GET_IPV6_SRC_ADDR(p), srcip, sizeof(srcip));
         PrintInet(AF_INET6, (const void *)GET_IPV6_DST_ADDR(p), dstip, sizeof(dstip));
     } else {
@@ -129,21 +137,21 @@ int AlertFastLogger(ThreadVars *tv, void *data, const Packet *p)
 
     char proto[16] = "";
     const char *protoptr;
-    if (SCProtoNameValid(IP_GET_IPPROTO(p))) {
-        protoptr = known_proto[IP_GET_IPPROTO(p)];
+    if (SCProtoNameValid(PacketGetIPProto(p))) {
+        protoptr = known_proto[PacketGetIPProto(p)];
     } else {
-        snprintf(proto, sizeof(proto), "PROTO:%03" PRIu32, IP_GET_IPPROTO(p));
+        snprintf(proto, sizeof(proto), "PROTO:%03" PRIu32, PacketGetIPProto(p));
         protoptr = proto;
     }
     uint16_t src_port_or_icmp = p->sp;
     uint16_t dst_port_or_icmp = p->dp;
-    if (IP_GET_IPPROTO(p) == IPPROTO_ICMP || IP_GET_IPPROTO(p) == IPPROTO_ICMPV6) {
+    if (PacketGetIPProto(p) == IPPROTO_ICMP || PacketGetIPProto(p) == IPPROTO_ICMPV6) {
         src_port_or_icmp = p->icmp_s.type;
         dst_port_or_icmp = p->icmp_s.code;
     }
     for (i = 0; i < p->alerts.cnt; i++) {
         const PacketAlert *pa = &p->alerts.alerts[i];
-        if (unlikely(pa->s == NULL)) {
+        if (unlikely(pa->s == NULL || (pa->action & ACTION_ALERT) == 0)) {
             continue;
         }
 
@@ -171,9 +179,10 @@ int AlertFastLogger(ThreadVars *tv, void *data, const Packet *p)
                             pa->s->id, pa->s->rev, pa->s->msg, pa->s->class_msg, pa->s->prio);
             PrintBufferRawLineHex(alert_buffer, &size, MAX_FASTLOG_ALERT_SIZE,
                                   GET_PKT_DATA(p), GET_PKT_LEN(p) < 32 ? GET_PKT_LEN(p) : 32);
-            if (p->pcap_cnt != 0) {
-                PrintBufferData(alert_buffer, &size, MAX_FASTLOG_ALERT_SIZE, 
-                                "] [pcap file packet: %"PRIu64"]\n", p->pcap_cnt);
+            uint64_t pcap_cnt = PcapPacketCntGet(p);
+            if (pcap_cnt != 0) {
+                PrintBufferData(alert_buffer, &size, MAX_FASTLOG_ALERT_SIZE,
+                        "] [pcap file packet: %" PRIu64 "]\n", pcap_cnt);
             } else {
                 PrintBufferData(alert_buffer, &size, MAX_FASTLOG_ALERT_SIZE, "]\n");
             }
@@ -223,7 +232,7 @@ TmEcode AlertFastLogThreadDeinit(ThreadVars *t, void *data)
  * \param conf The configuration node for this output.
  * \return A LogFileCtx pointer on success, NULL on failure.
  */
-OutputInitResult AlertFastLogInitCtx(ConfNode *conf)
+OutputInitResult AlertFastLogInitCtx(SCConfNode *conf)
 {
     OutputInitResult result = { NULL, false };
     LogFileCtx *logfile_ctx = LogFileNewCtx();
@@ -270,16 +279,16 @@ static int AlertFastLogTest01(void)
     uint16_t buflen = strlen((char *)buf);
     Packet *p = NULL;
     ThreadVars th_v;
-    DetectEngineThreadCtx *det_ctx;
-
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
+
     p = UTHBuildPacket(buf, buflen, IPPROTO_TCP);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     FAIL_IF(de_ctx == NULL);
-
     de_ctx->flags |= DE_QUIET;
 
+    SCClassConfDeInitContext(de_ctx);
     FILE *fd = SCClassConfGenerateValidDummyClassConfigFD01();
     SCClassConfLoadClassificationConfigFile(de_ctx, fd);
 
@@ -288,18 +297,17 @@ static int AlertFastLogTest01(void)
             "Classtype:unknown; sid:1;)");
 
     SigGroupBuild(de_ctx);
+    DetectEngineThreadCtx *det_ctx;
     DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
 
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
     FAIL_IF_NOT(p->alerts.cnt == 1);
     FAIL_IF_NOT(strcmp(p->alerts.alerts[0].s->class_msg, "Unknown are we") == 0);
 
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
+    UTHFreePackets(&p, 1);
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
-
-    UTHFreePackets(&p, 1);
+    StatsThreadCleanup(&th_v.stats);
     PASS;
 }
 
@@ -310,17 +318,17 @@ static int AlertFastLogTest02(void)
     uint16_t buflen = strlen((char *)buf);
     Packet *p = NULL;
     ThreadVars th_v;
-    DetectEngineThreadCtx *det_ctx;
 
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
 
     p = UTHBuildPacket(buf, buflen, IPPROTO_TCP);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     FAIL_IF(de_ctx == NULL);
-
     de_ctx->flags |= DE_QUIET;
 
+    SCClassConfDeInitContext(de_ctx);
     FILE *fd = SCClassConfGenerateValidDummyClassConfigFD01();
     SCClassConfLoadClassificationConfigFile(de_ctx, fd);
 
@@ -329,18 +337,17 @@ static int AlertFastLogTest02(void)
             "Classtype:unknown; sid:1;)");
 
     SigGroupBuild(de_ctx);
+    DetectEngineThreadCtx *det_ctx;
     DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
 
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
     FAIL_IF_NOT(p->alerts.cnt == 1);
     FAIL_IF_NOT(strcmp(p->alerts.alerts[0].s->class_msg, "Unknown are we") == 0);
 
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
+    UTHFreePackets(&p, 1);
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
-
-    UTHFreePackets(&p, 1);
+    StatsThreadCleanup(&th_v.stats);
     PASS;
 }
 
@@ -351,12 +358,8 @@ static int AlertFastLogTest02(void)
  */
 void AlertFastLogRegisterTests(void)
 {
-
 #ifdef UNITTESTS
-
     UtRegisterTest("AlertFastLogTest01", AlertFastLogTest01);
     UtRegisterTest("AlertFastLogTest02", AlertFastLogTest02);
-
 #endif /* UNITTESTS */
-
 }

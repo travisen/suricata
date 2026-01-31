@@ -139,12 +139,12 @@ management and worker CPU set.
     threading:
       set-cpu-affinity: yes
       cpu-affinity:
-        - management-cpu-set:
-            cpu: [ 0 ]  # include only these CPUs in affinity settings
-        - receive-cpu-set:
-            cpu: [ 0 ]  # include only these CPUs in affinity settings
-        - worker-cpu-set:
-            cpu: [ 2,4,6,8 ]
+        management-cpu-set:
+          cpu: [ 0 ]  # include only these CPUs in affinity settings
+        receive-cpu-set:
+          cpu: [ 0 ]  # include only these CPUs in affinity settings
+        worker-cpu-set:
+          cpu: [ 2,4,6,8 ]
     ...
 
 Interrupt (power-saving) mode
@@ -184,3 +184,58 @@ Below is a sample configuration that demonstrates how to enable the interrupt mo
         - interface: 0000:3b:00.0
           interrupt-mode: true
           threads: 4
+
+.. _dpdk-automatic-interface-configuration:
+
+Automatic interface configuration
+---------------------------------
+
+A number of interface properties can be manually configured. However, Suricata
+can automatically configure the interface properties based on the NIC
+capabilities. This can be done by setting ``auto`` to ``mempool-size``,
+``mempool-cache-size``, ``rx-descriptors``, and ``tx-descriptors`` interface
+node properties.
+This will allow Suricata to automatically set the sizes of individual properties
+according to the best-effort calculation based on the NIC capabilities.
+For example, receive (RX) descriptors are calculated based on the maximal
+"power of 2" that is lower or equal to the number of descriptors supported
+by the NIC. Number of TX descriptors depends on the configured ``copy-mode``.
+IDS (none) mode uses no TX descriptors and does not create any TX queues by
+default. IPS and TAP mode uses the same number of TX descriptors as RX
+descriptors.
+The number of mempool and its cache is then derived from the count of
+descriptors.
+
+Rx (and Tx) descriptors are set to the highest possible value to allow more
+buffer room when traffic spikes occur. However, it requires more memory.
+Individual properties can still be set manually if needed.
+
+.. note:: Mellanox ConnectX-4 NICs may not support auto-configuration of
+  ``RX /TX descriptors``. Instead it can be set to a fixed value (e.g. 16384).
+
+.. _dpdk-link-state-change-timeout:
+
+Link State Change timeout
+-------------------------
+
+The `linkup-timeout` YAML configuration option allows the user to set a timeout
+period to wait until the interface's link is detected. This ensures that
+Suricata does not start processing packets until the link is up. This option is
+particularly useful for Intel E810 (Ice) NICs, which begin receiving packets
+only after a few seconds have passed since the interface started. In such cases,
+if this check is disabled, Suricata reports as started but only begins
+processing packets after a few seconds. This issue has not been observed with
+other cards.
+
+Setting the value to 0 causes Suricata to skip the link check.
+If the interface's link remains down after the timeout period, Suricata warns
+the user but continues with the engine initialization.
+
+.. _dpdk-encapsulation-stripping:
+
+Encapsulation stripping
+-----------------------
+
+Suricata supports stripping the hardware-offloaded encapsulation stripping on
+the supported NICs. Currently, VLAN encapsulation stripping is supported.
+VLAN encapsulation stripping can be enabled with `vlan-strip-offload`.

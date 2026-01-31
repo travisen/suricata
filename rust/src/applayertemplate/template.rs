@@ -16,18 +16,30 @@
  */
 
 use super::parser;
-use crate::applayer::{self, *};
-use crate::core::{AppProto, Flow, ALPROTO_UNKNOWN, IPPROTO_TCP};
-use nom7 as nom;
+use crate::applayer::*;
+use crate::conf::conf_get;
+use crate::core::{ALPROTO_UNKNOWN, IPPROTO_TCP};
+use crate::flow::Flow;
+use nom8 as nom;
+use nom8::{AsChar, Parser};
 use std;
 use std::collections::VecDeque;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
+use suricata_sys::sys::{
+    AppLayerParserState, AppProto, SCAppLayerParserConfParserEnabled,
+    SCAppLayerParserRegisterLogger, SCAppLayerParserStateIssetFlag,
+    SCAppLayerProtoDetectConfProtoDetectionEnabled,
+};
 
-static mut ALPROTO_TEMPLATE: AppProto = ALPROTO_UNKNOWN;
+static mut TEMPLATE_MAX_TX: usize = 256;
+
+pub(super) static mut ALPROTO_TEMPLATE: AppProto = ALPROTO_UNKNOWN;
 
 #[derive(AppLayerEvent)]
-enum TemplateEvent {}
+enum TemplateEvent {
+    TooManyTransactions,
+}
 
 pub struct TemplateTransaction {
     tx_id: u64,
@@ -114,7 +126,9 @@ impl TemplateState {
     }
 
     fn find_request(&mut self) -> Option<&mut TemplateTransaction> {
-        self.transactions.iter_mut().find(|tx| tx.response.is_none())
+        self.transactions
+            .iter_mut()
+            .find(|tx| tx.response.is_none())
     }
 
     fn parse_request(&mut self, input: &[u8]) -> AppLayerResult {
@@ -145,7 +159,14 @@ impl TemplateState {
                     SCLogNotice!("Request: {}", request);
                     let mut tx = self.new_tx();
                     tx.request = Some(request);
+                    if self.transactions.len() >= unsafe { TEMPLATE_MAX_TX } {
+                        tx.tx_data
+                            .set_event(TemplateEvent::TooManyTransactions as u8);
+                    }
                     self.transactions.push_back(tx);
+                    if self.transactions.len() >= unsafe { TEMPLATE_MAX_TX } {
+                        return AppLayerResult::err();
+                    }
                 }
                 Err(nom::Err::Incomplete(_)) => {
                     // Not enough data. This parser doesn't give us a good indication
@@ -188,7 +209,8 @@ impl TemplateState {
                 Ok((rem, response)) => {
                     start = rem;
 
-                    if let Some(tx) =  self.find_request() {
+                    if let Some(tx) = self.find_request() {
+                        tx.tx_data.updated_tc = true;
                         tx.response = Some(response);
                         SCLogNotice!("Found response for request:");
                         SCLogNotice!("- Request: {:?}", tx.request);
@@ -226,18 +248,18 @@ impl TemplateState {
 /// characters for that pattern.
 fn probe(input: &[u8]) -> nom::IResult<&[u8], ()> {
     let size = std::cmp::min(10, input.len());
-    let (rem, prefix) = nom::bytes::complete::take(size)(input)?;
+    let (rem, prefix) = nom::bytes::complete::take(size).parse(input)?;
     nom::sequence::terminated(
-        nom::bytes::complete::take_while1(nom::character::is_digit),
+        nom::bytes::complete::take_while1(|c: u8| c.is_dec_digit()),
         nom::bytes::complete::tag(":"),
-    )(prefix)?;
+    ).parse(prefix)?;
     Ok((rem, ()))
 }
 
 // C exports.
 
 /// C entry point for a probing parser.
-unsafe extern "C" fn rs_template_probing_parser(
+unsafe extern "C" fn template_probing_parser(
     _flow: *const Flow, _direction: u8, input: *const u8, input_len: u32, _rdir: *mut u8,
 ) -> AppProto {
     // Need at least 2 bytes.
@@ -250,28 +272,26 @@ unsafe extern "C" fn rs_template_probing_parser(
     return ALPROTO_UNKNOWN;
 }
 
-extern "C" fn rs_template_state_new(
-    _orig_state: *mut c_void, _orig_proto: AppProto,
-) -> *mut c_void {
+extern "C" fn template_state_new(_orig_state: *mut c_void, _orig_proto: AppProto) -> *mut c_void {
     let state = TemplateState::new();
     let boxed = Box::new(state);
     return Box::into_raw(boxed) as *mut c_void;
 }
 
-unsafe extern "C" fn rs_template_state_free(state: *mut c_void) {
+unsafe extern "C" fn template_state_free(state: *mut c_void) {
     std::mem::drop(Box::from_raw(state as *mut TemplateState));
 }
 
-unsafe extern "C" fn rs_template_state_tx_free(state: *mut c_void, tx_id: u64) {
+unsafe extern "C" fn template_state_tx_free(state: *mut c_void, tx_id: u64) {
     let state = cast_pointer!(state, TemplateState);
     state.free_tx(tx_id);
 }
 
-unsafe extern "C" fn rs_template_parse_request(
-    _flow: *const Flow, state: *mut c_void, pstate: *mut c_void, stream_slice: StreamSlice,
-    _data: *const c_void,
+unsafe extern "C" fn template_parse_request(
+    _flow: *mut Flow, state: *mut c_void, pstate: *mut AppLayerParserState,
+    stream_slice: StreamSlice, _data: *mut c_void,
 ) -> AppLayerResult {
-    let eof = AppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TS) > 0;
+    let eof = SCAppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TS) > 0;
 
     if eof {
         // If needed, handle EOF, or pass it into the parser.
@@ -291,11 +311,11 @@ unsafe extern "C" fn rs_template_parse_request(
     }
 }
 
-unsafe extern "C" fn rs_template_parse_response(
-    _flow: *const Flow, state: *mut c_void, pstate: *mut c_void, stream_slice: StreamSlice,
-    _data: *const c_void,
+unsafe extern "C" fn template_parse_response(
+    _flow: *mut Flow, state: *mut c_void, pstate: *mut AppLayerParserState,
+    stream_slice: StreamSlice, _data: *mut c_void,
 ) -> AppLayerResult {
-    let _eof = AppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TC) > 0;
+    let _eof = SCAppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TC) > 0;
     let state = cast_pointer!(state, TemplateState);
 
     if stream_slice.is_gap() {
@@ -309,7 +329,7 @@ unsafe extern "C" fn rs_template_parse_response(
     }
 }
 
-unsafe extern "C" fn rs_template_state_get_tx(state: *mut c_void, tx_id: u64) -> *mut c_void {
+unsafe extern "C" fn template_state_get_tx(state: *mut c_void, tx_id: u64) -> *mut c_void {
     let state = cast_pointer!(state, TemplateState);
     match state.get_tx(tx_id) {
         Some(tx) => {
@@ -321,12 +341,12 @@ unsafe extern "C" fn rs_template_state_get_tx(state: *mut c_void, tx_id: u64) ->
     }
 }
 
-unsafe extern "C" fn rs_template_state_get_tx_count(state: *mut c_void) -> u64 {
+unsafe extern "C" fn template_state_get_tx_count(state: *mut c_void) -> u64 {
     let state = cast_pointer!(state, TemplateState);
     return state.tx_id;
 }
 
-unsafe extern "C" fn rs_template_tx_get_alstate_progress(tx: *mut c_void, _direction: u8) -> c_int {
+unsafe extern "C" fn template_tx_get_alstate_progress(tx: *mut c_void, _direction: u8) -> c_int {
     let tx = cast_pointer!(tx, TemplateTransaction);
 
     // Transaction is done if we have a response.
@@ -336,49 +356,14 @@ unsafe extern "C" fn rs_template_tx_get_alstate_progress(tx: *mut c_void, _direc
     return 0;
 }
 
-/// Get the request buffer for a transaction from C.
-///
-/// No required for parsing, but an example function for retrieving a
-/// pointer to the request buffer from C for detection.
-#[no_mangle]
-pub unsafe extern "C" fn rs_template_get_request_buffer(
-    tx: *mut c_void, buf: *mut *const u8, len: *mut u32,
-) -> u8 {
-    let tx = cast_pointer!(tx, TemplateTransaction);
-    if let Some(ref request) = tx.request {
-        if !request.is_empty() {
-            *len = request.len() as u32;
-            *buf = request.as_ptr();
-            return 1;
-        }
-    }
-    return 0;
-}
-
-/// Get the response buffer for a transaction from C.
-#[no_mangle]
-pub unsafe extern "C" fn rs_template_get_response_buffer(
-    tx: *mut c_void, buf: *mut *const u8, len: *mut u32,
-) -> u8 {
-    let tx = cast_pointer!(tx, TemplateTransaction);
-    if let Some(ref response) = tx.response {
-        if !response.is_empty() {
-            *len = response.len() as u32;
-            *buf = response.as_ptr();
-            return 1;
-        }
-    }
-    return 0;
-}
-
-export_tx_data_get!(rs_template_get_tx_data, TemplateTransaction);
-export_state_data_get!(rs_template_get_state_data, TemplateState);
+export_tx_data_get!(template_get_tx_data, TemplateTransaction);
+export_state_data_get!(template_get_state_data, TemplateState);
 
 // Parser name as a C style string.
 const PARSER_NAME: &[u8] = b"template\0";
 
 #[no_mangle]
-pub unsafe extern "C" fn rs_template_register_parser() {
+pub unsafe extern "C" fn SCRegisterTemplateParser() {
     /* TEMPLATE_START_REMOVE */
     if crate::conf::conf_get_node("app-layer.protocols.template").is_none() {
         return;
@@ -390,45 +375,52 @@ pub unsafe extern "C" fn rs_template_register_parser() {
         name: PARSER_NAME.as_ptr() as *const c_char,
         default_port: default_port.as_ptr(),
         ipproto: IPPROTO_TCP,
-        probe_ts: Some(rs_template_probing_parser),
-        probe_tc: Some(rs_template_probing_parser),
+        probe_ts: Some(template_probing_parser),
+        probe_tc: Some(template_probing_parser),
         min_depth: 0,
         max_depth: 16,
-        state_new: rs_template_state_new,
-        state_free: rs_template_state_free,
-        tx_free: rs_template_state_tx_free,
-        parse_ts: rs_template_parse_request,
-        parse_tc: rs_template_parse_response,
-        get_tx_count: rs_template_state_get_tx_count,
-        get_tx: rs_template_state_get_tx,
+        state_new: template_state_new,
+        state_free: template_state_free,
+        tx_free: template_state_tx_free,
+        parse_ts: template_parse_request,
+        parse_tc: template_parse_response,
+        get_tx_count: template_state_get_tx_count,
+        get_tx: template_state_get_tx,
         tx_comp_st_ts: 1,
         tx_comp_st_tc: 1,
-        tx_get_progress: rs_template_tx_get_alstate_progress,
+        tx_get_progress: template_tx_get_alstate_progress,
         get_eventinfo: Some(TemplateEvent::get_event_info),
         get_eventinfo_byid: Some(TemplateEvent::get_event_info_by_id),
         localstorage_new: None,
         localstorage_free: None,
         get_tx_files: None,
-        get_tx_iterator: Some(
-            applayer::state_get_tx_iterator::<TemplateState, TemplateTransaction>,
-        ),
-        get_tx_data: rs_template_get_tx_data,
-        get_state_data: rs_template_get_state_data,
+        get_tx_iterator: Some(state_get_tx_iterator::<TemplateState, TemplateTransaction>),
+        get_tx_data: template_get_tx_data,
+        get_state_data: template_get_state_data,
         apply_tx_config: None,
         flags: APP_LAYER_PARSER_OPT_ACCEPT_GAPS,
-        truncate: None,
         get_frame_id_by_name: None,
         get_frame_name_by_id: None,
+        get_state_id_by_name: None,
+        get_state_name_by_id: None,
     };
 
     let ip_proto_str = CString::new("tcp").unwrap();
 
-    if AppLayerProtoDetectConfProtoDetectionEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
-        let alproto = AppLayerRegisterProtocolDetection(&parser, 1);
+    if SCAppLayerProtoDetectConfProtoDetectionEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
+        let alproto = applayer_register_protocol_detection(&parser, 1);
         ALPROTO_TEMPLATE = alproto;
-        if AppLayerParserConfParserEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
+        if SCAppLayerParserConfParserEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
             let _ = AppLayerRegisterParser(&parser, alproto);
         }
+        if let Some(val) = conf_get("app-layer.protocols.template.max-tx") {
+            if let Ok(v) = val.parse::<usize>() {
+                TEMPLATE_MAX_TX = v;
+            } else {
+                SCLogError!("Invalid value for template.max-tx");
+            }
+        }
+        SCAppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_TEMPLATE);
         SCLogNotice!("Rust template parser registered.");
     } else {
         SCLogNotice!("Protocol detector and parser disabled for TEMPLATE.");

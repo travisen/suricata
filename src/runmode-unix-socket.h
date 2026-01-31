@@ -20,8 +20,8 @@
  *  \author Eric Leblond <eric@regit.org>
  */
 
-#ifndef __RUNMODE_UNIX_SOCKET_H__
-#define __RUNMODE_UNIX_SOCKET_H__
+#ifndef SURICATA_RUNMODE_UNIX_SOCKET_H
+#define SURICATA_RUNMODE_UNIX_SOCKET_H
 
 void RunModeUnixSocketRegister(void);
 const char *RunModeUnixSocketGetDefaultMode(void);
@@ -38,6 +38,7 @@ TmEcode UnixSocketDatasetRemove(json_t *cmd, json_t* answer, void *data);
 TmEcode UnixSocketDatasetDump(json_t *cmd, json_t *answer, void *data);
 TmEcode UnixSocketDatasetClear(json_t *cmd, json_t *answer, void *data);
 TmEcode UnixSocketDatasetLookup(json_t *cmd, json_t *answer, void *data);
+TmEcode UnixSocketDatajsonAdd(json_t *cmd, json_t *answer, void *data);
 TmEcode UnixSocketRegisterTenantHandler(json_t *cmd, json_t* answer, void *data);
 TmEcode UnixSocketUnregisterTenantHandler(json_t *cmd, json_t* answer, void *data);
 TmEcode UnixSocketRegisterTenant(json_t *cmd, json_t* answer, void *data);
@@ -53,4 +54,4 @@ TmEcode UnixSocketShowAllMemcap(json_t *cmd, json_t *answer, void *data);
 TmEcode UnixSocketGetFlowStatsById(json_t *cmd, json_t *answer, void *data);
 #endif
 
-#endif /* __RUNMODE_UNIX_SOCKET_H__ */
+#endif /* SURICATA_RUNMODE_UNIX_SOCKET_H */

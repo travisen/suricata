@@ -28,10 +28,9 @@
 #include "util-spm.h"
 #include "util-spm-hs.h"
 #include "util-debug.h"
+#include "util-validate.h"
 
 #ifdef BUILD_HYPERSCAN
-
-#include <hs.h>
 
 /**
  * \internal
@@ -41,7 +40,7 @@ static int MatchEvent(unsigned int id, unsigned long long from,
                       unsigned long long to, unsigned int flags, void *context)
 {
     uint64_t *match_offset = context;
-    BUG_ON(*match_offset != UINT64_MAX);
+    DEBUG_VALIDATE_BUG_ON(*match_offset != UINT64_MAX);
     *match_offset = to;
     return 1; /* Terminate matching. */
 }
@@ -81,9 +80,8 @@ static int HSBuildDatabase(const uint8_t *needle, uint16_t needle_len,
     hs_error_t err = hs_compile(expr, flags, HS_MODE_BLOCK, NULL, &db,
                                 &compile_err);
     if (err != HS_SUCCESS) {
-        SCLogError("Unable to compile '%s' with Hyperscan, "
-                   "returned %d.",
-                expr, err);
+        HSLogCompileError(expr, compile_err, err);
+        SCFree(expr);
         return -1;
     }
 
@@ -96,6 +94,7 @@ static int HSBuildDatabase(const uint8_t *needle, uint16_t needle_len,
         /* If scratch allocation failed, this is not recoverable:  other SPM
          * contexts may need this scratch space. */
         SCLogError("Unable to alloc scratch for Hyperscan, returned %d.", err);
+        hs_free_database(db);
         return -1;
     }
     global_thread_ctx->ctx = scratch;
@@ -158,7 +157,7 @@ static uint8_t *HSScan(const SpmCtx *ctx, SpmThreadCtx *thread_ctx,
         return NULL;
     }
 
-    BUG_ON(match_offset < sctx->needle_len);
+    DEBUG_VALIDATE_BUG_ON(match_offset < sctx->needle_len);
 
     /* Note: existing API returns non-const ptr */
     return (uint8_t *)haystack + (match_offset - sctx->needle_len);

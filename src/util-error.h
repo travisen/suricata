@@ -19,25 +19,26 @@
  * \file
  */
 
-#ifndef __UTIL_ERROR_H__
-#define __UTIL_ERROR_H__
+#ifndef SURICATA_UTIL_ERROR_H
+#define SURICATA_UTIL_ERROR_H
 
 /* different error types */
-typedef enum {
+typedef enum SCError {
     SC_OK,
 
     SC_ENOMEM,
     SC_EINVAL,
     SC_ELIMIT,
     SC_EEXIST,
+    SC_ENOENT,
 
     SC_ERR_MAX
 } SCError;
 
-const char *SCErrorToString(SCError);
-
+#ifndef SURICATA_BINDGEN_H
 #include "threads.h"
 
 extern thread_local SCError sc_errno;
+#endif
 
-#endif /* __UTIL_ERROR_H__ */
+#endif /* SURICATA_UTIL_ERROR_H */

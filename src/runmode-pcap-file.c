@@ -45,8 +45,6 @@ void RunModeFilePcapRegister(void)
             "Multi-threaded pcap file mode. Packets from each flow are assigned to a consistent "
             "detection thread",
             RunModeFilePcapAutoFp, NULL);
-
-    return;
 }
 
 /**
@@ -57,7 +55,7 @@ int RunModeFilePcapSingle(void)
     const char *file = NULL;
     char tname[TM_THREAD_NAME_MAX];
 
-    if (ConfGet("pcap-file.file", &file) == 0) {
+    if (SCConfGet("pcap-file.file", &file) == 0) {
         FatalError("Failed retrieving pcap-file from Conf");
     }
 
@@ -127,7 +125,7 @@ int RunModeFilePcapAutoFp(void)
     uint16_t thread;
 
     const char *file = NULL;
-    if (ConfGet("pcap-file.file", &file) == 0) {
+    if (SCConfGet("pcap-file.file", &file) == 0) {
         FatalError("Failed retrieving pcap-file from Conf");
     }
     SCLogDebug("file %s", file);
@@ -210,8 +208,6 @@ int RunModeFilePcapAutoFp(void)
             FatalError("TmModuleGetByName for FlowWorker failed");
         }
         TmSlotSetFuncAppend(tv_detect_ncpu, tm_module, NULL);
-
-        TmThreadSetGroupName(tv_detect_ncpu, "Detect");
 
         TmThreadSetCPU(tv_detect_ncpu, WORKER_CPU_SET);
 

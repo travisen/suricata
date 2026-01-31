@@ -37,7 +37,7 @@
 #include "util-cpu.h"
 #include "util-affinity.h"
 #include "util-runmodes.h"
-#include "util-device.h"
+#include "util-device-private.h"
 
 const char *RunModeIpsNFQGetDefaultMode(void)
 {
@@ -51,7 +51,6 @@ void RunModeIpsNFQRegister(void)
 
     RunModeRegisterNewRunMode(RUNMODE_NFQ, "workers",
             "Multi queue NFQ IPS mode with one thread per queue", RunModeIpsNFQWorker, NULL);
-    return;
 }
 
 int RunModeIpsNFQAutoFp(void)

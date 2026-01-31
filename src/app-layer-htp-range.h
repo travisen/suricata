@@ -1,4 +1,4 @@
-/* Copyright (C) 2021 Open Information Security Foundation
+/* Copyright (C) 2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -15,13 +15,50 @@
  * 02110-1301, USA.
  */
 
-#ifndef __APP_LAYER_HTP_RANGE_H__
-#define __APP_LAYER_HTP_RANGE_H__
+#ifndef SURICATA_APP_LAYER_HTP_RANGE_H
+#define SURICATA_APP_LAYER_HTP_RANGE_H
 
-#include "suricata-common.h"
+#include "util-file.h"
 
+// forward declarations
+typedef struct HttpRangeContainerBuffer HttpRangeContainerBuffer;
+typedef struct HttpRangeContainerFile HttpRangeContainerFile;
+typedef struct HTTPContentRange HTTPContentRange;
+
+/** A structure representing a single range request :
+ * either skipping, buffering, or appending
+ * As this belongs to a flow, appending data to it is ensured to be thread-safe
+ * Only one block per file has the pointer to the container
+ */
+typedef struct HttpRangeContainerBlock {
+    /** state where we skip content */
+    uint64_t toskip;
+    /** current out of order range to write into */
+    HttpRangeContainerBuffer *current;
+    /** pointer to the main file container, where to directly append data */
+    HttpRangeContainerFile *container;
+    /** file container we are owning for now */
+    FileContainer *files;
+} HttpRangeContainerBlock;
+
+void SCHttpRangeFreeBlock(HttpRangeContainerBlock *b);
+
+// HttpRangeContainerBlock but trouble with headers inclusion order
+HttpRangeContainerBlock *SCHttpRangeContainerOpenFile(const unsigned char *key, uint32_t keylen,
+        const Flow *f, const HTTPContentRange *cr, const StreamingBufferConfig *sbcfg,
+        const unsigned char *name, uint16_t name_len, uint16_t flags, const unsigned char *data,
+        uint32_t data_len);
+
+int SCHttpRangeAppendData(const StreamingBufferConfig *sbcfg, HttpRangeContainerBlock *c,
+        const uint8_t *data, uint32_t len);
+
+bool SCHTPFileCloseHandleRange(const StreamingBufferConfig *sbcfg, FileContainer *, const uint16_t,
+        HttpRangeContainerBlock *, const uint8_t *, uint32_t);
+
+#ifndef SURICATA_BINDGEN_H
+
+#include "util-streaming-buffer.h"
 #include "util-thash.h"
-#include "rust.h"
 
 void HttpRangeContainersInit(void);
 void HttpRangeContainersDestroy(void);
@@ -63,7 +100,7 @@ typedef struct HttpRangeContainerFile {
     /** key length */
     uint32_t len;
     /** expire time in epoch */
-    uint32_t expire;
+    SCTime_t expire;
     /** pointer to hashtable data, for locking and use count */
     THashData *hdata;
     /** total expected size of the file in ranges */
@@ -82,33 +119,12 @@ typedef struct HttpRangeContainerFile {
     bool error;
 } HttpRangeContainerFile;
 
-/** A structure representing a single range request :
- * either skipping, buffering, or appending
- * As this belongs to a flow, appending data to it is ensured to be thread-safe
- * Only one block per file has the pointer to the container
- */
-typedef struct HttpRangeContainerBlock {
-    /** state where we skip content */
-    uint64_t toskip;
-    /** current out of order range to write into */
-    HttpRangeContainerBuffer *current;
-    /** pointer to the main file container, where to directly append data */
-    HttpRangeContainerFile *container;
-    /** file container we are owning for now */
-    FileContainer *files;
-} HttpRangeContainerBlock;
-
-int HttpRangeAppendData(const StreamingBufferConfig *sbcfg, HttpRangeContainerBlock *c,
-        const uint8_t *data, uint32_t len);
 File *HttpRangeClose(
         const StreamingBufferConfig *sbcfg, HttpRangeContainerBlock *c, uint16_t flags);
 
-// HttpRangeContainerBlock but trouble with headers inclusion order
-HttpRangeContainerBlock *HttpRangeContainerOpenFile(const unsigned char *key, uint32_t keylen,
-        const Flow *f, const HTTPContentRange *cr, const StreamingBufferConfig *sbcfg,
-        const unsigned char *name, uint16_t name_len, uint16_t flags, const unsigned char *data,
-        uint32_t data_len);
+uint64_t HTPByteRangeMemcapGlobalCounter(void);
+uint64_t HTPByteRangeMemuseGlobalCounter(void);
+int HTPByteRangeSetMemcap(uint64_t);
+#endif // SURICATA_BINDGEN_H
 
-void HttpRangeFreeBlock(HttpRangeContainerBlock *b);
-
-#endif /* __APP_LAYER_HTP_RANGE_H__ */
+#endif /* SURICATA_APP_LAYER_HTP_RANGE_H */

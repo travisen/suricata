@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2022 Open Information Security Foundation
+/* Copyright (C) 2007-2025 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -22,14 +22,15 @@
  * \author Gurvinder Singh <gurvindersinghdahiya@gmail.com>
  */
 
-#ifndef __STREAM_TCP_H__
-#define __STREAM_TCP_H__
+#ifndef SURICATA_STREAM_TCP_H
+#define SURICATA_STREAM_TCP_H
 
 #include "stream-tcp-private.h"
 
 #include "stream.h"
 #include "stream-tcp-reassemble.h"
 #include "suricata.h"
+#include "util-exception-policy-types.h"
 
 #define STREAM_VERBOSE false
 /* Flag to indicate that the checksum validation for the stream engine
@@ -38,6 +39,16 @@
 #define STREAMTCP_INIT_FLAG_DROP_INVALID           BIT_U8(1)
 #define STREAMTCP_INIT_FLAG_BYPASS                 BIT_U8(2)
 #define STREAMTCP_INIT_FLAG_INLINE                 BIT_U8(3)
+/** flag to drop packets with URG flag set */
+#define STREAMTCP_INIT_FLAG_DROP_URG BIT_U8(4)
+
+enum TcpStreamUrgentHandling {
+    TCP_STREAM_URGENT_INLINE, /**< treat as inline data */
+#define TCP_STREAM_URGENT_DEFAULT TCP_STREAM_URGENT_INLINE
+    TCP_STREAM_URGENT_DROP, /**< drop TCP packet with URG flag */
+    TCP_STREAM_URGENT_OOB,  /**< treat 1 byte of URG data as OOB */
+    TCP_STREAM_URGENT_GAP,  /**< treat 1 byte of URG data as GAP */
+};
 
 /*global flow data*/
 typedef struct TcpStreamCnf_ {
@@ -69,6 +80,8 @@ typedef struct TcpStreamCnf_ {
     enum ExceptionPolicy ssn_memcap_policy;
     enum ExceptionPolicy reassembly_memcap_policy;
     enum ExceptionPolicy midstream_policy;
+    enum TcpStreamUrgentHandling urgent_policy;
+    enum TcpStreamUrgentHandling urgent_oob_limit_policy;
 
     /* default to "LINUX" timestamp behavior if true*/
     bool liberal_timestamps;
@@ -79,24 +92,26 @@ typedef struct TcpStreamCnf_ {
 typedef struct StreamTcpThread_ {
     int ssn_pool_id;
 
-    uint16_t counter_tcp_active_sessions;
-    uint16_t counter_tcp_sessions;
+    StatsCounterId counter_tcp_active_sessions;
+    StatsCounterId counter_tcp_sessions;
     /** sessions not picked up because memcap was reached */
-    uint16_t counter_tcp_ssn_memcap;
-    uint16_t counter_tcp_ssn_from_cache;
-    uint16_t counter_tcp_ssn_from_pool;
+    StatsCounterId counter_tcp_ssn_memcap;
+    StatsCounterId counter_tcp_ssn_from_cache;
+    StatsCounterId counter_tcp_ssn_from_pool;
+    /** exception policy */
+    ExceptionPolicyCounters counter_tcp_ssn_memcap_eps;
     /** pseudo packets processed */
-    uint16_t counter_tcp_pseudo;
-    /** pseudo packets failed to setup */
-    uint16_t counter_tcp_pseudo_failed;
+    StatsCounterId counter_tcp_pseudo;
     /** packets rejected because their csum is invalid */
-    uint16_t counter_tcp_invalid_checksum;
+    StatsCounterId counter_tcp_invalid_checksum;
     /** midstream pickups */
-    uint16_t counter_tcp_midstream_pickups;
+    StatsCounterId counter_tcp_midstream_pickups;
+    /** exception policy stats */
+    ExceptionPolicyCounters counter_tcp_midstream_eps;
     /** wrong thread */
-    uint16_t counter_tcp_wrong_thread;
+    StatsCounterId counter_tcp_wrong_thread;
     /** ack for unseen data */
-    uint16_t counter_tcp_ack_unseen_data;
+    StatsCounterId counter_tcp_ack_unseen_data;
 
     /** tcp reassembly thread data */
     TcpReassemblyThreadCtx *ra_ctx;
@@ -116,7 +131,6 @@ int StreamTcpSetMemcap(uint64_t);
 uint64_t StreamTcpGetMemcap(void);
 int StreamTcpCheckMemcap(uint64_t);
 uint64_t StreamTcpMemuseCounter(void);
-uint64_t StreamTcpReassembleMemuseGlobalCounter(void);
 
 int StreamTcpSegmentForEach(const Packet *p, uint8_t flag,
                         StreamSegmentCallback CallbackFunc,
@@ -131,10 +145,9 @@ typedef int (*StreamReassembleRawFunc)(
 
 int StreamReassembleForFrame(TcpSession *ssn, TcpStream *stream, StreamReassembleRawFunc Callback,
         void *cb_data, const uint64_t offset, const bool eof);
-int StreamReassembleLog(TcpSession *ssn, TcpStream *stream,
-        StreamReassembleRawFunc Callback, void *cb_data,
-        uint64_t progress_in,
-        uint64_t *progress_out, bool eof);
+int StreamReassembleLog(const TcpSession *ssn, const TcpStream *stream,
+        StreamReassembleRawFunc Callback, void *cb_data, const uint64_t progress_in,
+        uint64_t *progress_out, const bool eof);
 int StreamReassembleRaw(TcpSession *ssn, const Packet *p,
         StreamReassembleRawFunc Callback, void *cb_data,
         uint64_t *progress_out, bool respect_inspect_depth);
@@ -143,7 +156,10 @@ void StreamReassembleRawUpdateProgress(TcpSession *ssn, Packet *p, const uint64_
 void StreamTcpDetectLogFlush(ThreadVars *tv, StreamTcpThread *stt, Flow *f, Packet *p, PacketQueueNoLock *pq);
 
 const char *StreamTcpStateAsString(const enum TcpState);
-const char *StreamTcpSsnStateAsString(const TcpSession *ssn);
+
+enum ExceptionPolicy StreamTcpSsnMemcapGetExceptionPolicy(void);
+enum ExceptionPolicy StreamTcpReassemblyMemcapGetExceptionPolicy(void);
+enum ExceptionPolicy StreamMidstreamGetExceptionPolicy(void);
 
 /** ------- Inline functions: ------ */
 
@@ -193,17 +209,12 @@ void StreamTcpStreamCleanup(TcpStream *stream);
 int StreamTcpBypassEnabled(void);
 bool StreamTcpInlineMode(void);
 
-int TcpSessionPacketSsnReuse(const Packet *p, const Flow *f, const void *tcp_ssn);
+bool TcpSessionPacketSsnReuse(const Packet *p, const Flow *f, const void *tcp_ssn);
 
 void StreamTcpUpdateAppLayerProgress(TcpSession *ssn, char direction,
         const uint32_t progress);
 
-uint64_t StreamTcpGetAcked(const TcpStream *stream);
 uint64_t StreamTcpGetUsable(const TcpStream *stream, const bool eof);
 uint64_t StreamDataRightEdge(const TcpStream *stream, const bool eof);
 
-void StreamTcpThreadCacheEnable(void);
-void StreamTcpThreadCacheCleanup(void);
-
-#endif /* __STREAM_TCP_H__ */
-
+#endif /* SURICATA_STREAM_TCP_H */

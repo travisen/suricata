@@ -22,13 +22,14 @@
  *
  */
 
-#include "detect-engine-register.h"
 #include "suricata-common.h"
+#include "detect-engine-register.h"
 
 #include "detect.h"
 #include "detect-parse.h"
 
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-state.h"
 #include "detect-engine-prefilter.h"
@@ -45,10 +46,10 @@ static int g_smb_nltmssp_user_buffer_id = 0;
 
 static int DetectSmbNtlmsspUserSetup(DetectEngineCtx *de_ctx, Signature *s, const char *arg)
 {
-    if (DetectBufferSetActiveList(de_ctx, s, g_smb_nltmssp_user_buffer_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_smb_nltmssp_user_buffer_id) < 0)
         return -1;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_SMB) < 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_SMB) < 0)
         return -1;
 
     return 0;
@@ -63,13 +64,12 @@ static InspectionBuffer *GetNtlmsspUserData(DetectEngineThreadCtx *det_ctx,
         uint32_t b_len = 0;
         const uint8_t *b = NULL;
 
-        if (rs_smb_tx_get_ntlmssp_user(txv, &b, &b_len) != 1)
+        if (SCSmbTxGetNtlmsspUser(txv, &b, &b_len) != 1)
             return NULL;
         if (b == NULL || b_len == 0)
             return NULL;
 
-        InspectionBufferSetup(det_ctx, list_id, buffer, b, b_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(det_ctx, list_id, buffer, b, b_len, transforms);
     }
     return buffer;
 }
@@ -80,6 +80,7 @@ void DetectSmbNtlmsspUserRegister(void)
     sigmatch_table[KEYWORD_ID].Setup = DetectSmbNtlmsspUserSetup;
     sigmatch_table[KEYWORD_ID].flags |= SIGMATCH_NOOPT | SIGMATCH_INFO_STICKY_BUFFER;
     sigmatch_table[KEYWORD_ID].desc = "sticky buffer to match on SMB ntlmssp user in session setup";
+    sigmatch_table[KEYWORD_ID].url = "/rules/smb-keywords.html#smb-ntlmssp-user";
 
     DetectAppLayerMpmRegister(BUFFER_NAME, SIG_FLAG_TOSERVER, 2, PrefilterGenericMpmRegister,
             GetNtlmsspUserData, ALPROTO_SMB, 1);
@@ -102,10 +103,10 @@ static int g_smb_nltmssp_domain_buffer_id = 0;
 
 static int DetectSmbNtlmsspDomainSetup(DetectEngineCtx *de_ctx, Signature *s, const char *arg)
 {
-    if (DetectBufferSetActiveList(de_ctx, s, g_smb_nltmssp_domain_buffer_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_smb_nltmssp_domain_buffer_id) < 0)
         return -1;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_SMB) < 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_SMB) < 0)
         return -1;
 
     return 0;
@@ -120,13 +121,12 @@ static InspectionBuffer *GetNtlmsspDomainData(DetectEngineThreadCtx *det_ctx,
         uint32_t b_len = 0;
         const uint8_t *b = NULL;
 
-        if (rs_smb_tx_get_ntlmssp_domain(txv, &b, &b_len) != 1)
+        if (SCSmbTxGetNtlmsspDomain(txv, &b, &b_len) != 1)
             return NULL;
         if (b == NULL || b_len == 0)
             return NULL;
 
-        InspectionBufferSetup(det_ctx, list_id, buffer, b, b_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(det_ctx, list_id, buffer, b, b_len, transforms);
     }
     return buffer;
 }
@@ -138,6 +138,7 @@ void DetectSmbNtlmsspDomainRegister(void)
     sigmatch_table[KEYWORD_ID].flags |= SIGMATCH_NOOPT | SIGMATCH_INFO_STICKY_BUFFER;
     sigmatch_table[KEYWORD_ID].desc =
             "sticky buffer to match on SMB ntlmssp domain in session setup";
+    sigmatch_table[KEYWORD_ID].url = "/rules/smb-keywords.html#smb-ntlmssp-domain";
 
     DetectAppLayerMpmRegister(BUFFER_NAME, SIG_FLAG_TOSERVER, 2, PrefilterGenericMpmRegister,
             GetNtlmsspDomainData, ALPROTO_SMB, 1);

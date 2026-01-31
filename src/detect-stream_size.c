@@ -26,6 +26,7 @@
 #include "suricata-common.h"
 #include "stream-tcp.h"
 #include "util-unittest.h"
+#include "util-unittest-helper.h"
 
 #include "detect.h"
 #include "detect-parse.h"
@@ -117,10 +118,9 @@ static int DetectStreamSizeMatchAux(const DetectStreamSizeData *sd, const TcpSes
 static int DetectStreamSizeMatch(
         DetectEngineThreadCtx *det_ctx, Packet *p, const Signature *s, const SigMatchCtx *ctx)
 {
-
     const DetectStreamSizeData *sd = (const DetectStreamSizeData *)ctx;
 
-    if (!(PKT_IS_TCP(p)))
+    if (!(PacketIsTCP(p)))
         return 0;
     if (p->flow == NULL || p->flow->protoctx == NULL)
         return 0;
@@ -142,11 +142,11 @@ static int DetectStreamSizeMatch(
  */
 static int DetectStreamSizeSetup (DetectEngineCtx *de_ctx, Signature *s, const char *streamstr)
 {
-    DetectStreamSizeData *sd = rs_detect_stream_size_parse(streamstr);
+    DetectStreamSizeData *sd = SCDetectStreamSizeParse(streamstr);
     if (sd == NULL)
         return -1;
 
-    if (SigMatchAppendSMToList(
+    if (SCSigMatchAppendSMToList(
                 de_ctx, s, DETECT_STREAM_SIZE, (SigMatchCtx *)sd, DETECT_SM_LIST_MATCH) == NULL) {
         DetectStreamSizeFree(de_ctx, sd);
         return -1;
@@ -161,7 +161,7 @@ static int DetectStreamSizeSetup (DetectEngineCtx *de_ctx, Signature *s, const c
  */
 void DetectStreamSizeFree(DetectEngineCtx *de_ctx, void *ptr)
 {
-    rs_detect_stream_size_free(ptr);
+    SCDetectStreamSizeFree(ptr);
 }
 
 /* prefilter code */
@@ -169,7 +169,7 @@ void DetectStreamSizeFree(DetectEngineCtx *de_ctx, void *ptr)
 static void PrefilterPacketStreamsizeMatch(
         DetectEngineThreadCtx *det_ctx, Packet *p, const void *pectx)
 {
-    if (!(PKT_IS_TCP(p)) || PKT_IS_PSEUDOPKT(p))
+    if (!(PacketIsTCP(p)))
         return;
 
     if (p->flow == NULL || p->flow->protoctx == NULL)
@@ -211,8 +211,9 @@ static bool PrefilterPacketStreamSizeCompare(PrefilterPacketHeaderValue v, void 
 
 static int PrefilterSetupStreamSize(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
 {
-    return PrefilterSetupPacketHeader(de_ctx, sgh, DETECT_STREAM_SIZE, PrefilterPacketStreamSizeSet,
-            PrefilterPacketStreamSizeCompare, PrefilterPacketStreamsizeMatch);
+    return PrefilterSetupPacketHeader(de_ctx, sgh, DETECT_STREAM_SIZE, SIG_MASK_REQUIRE_FLOW,
+            PrefilterPacketStreamSizeSet, PrefilterPacketStreamSizeCompare,
+            PrefilterPacketStreamsizeMatch);
 }
 
 static bool PrefilterStreamSizeIsPrefilterable(const Signature *s)
@@ -237,7 +238,7 @@ static int DetectStreamSizeParseTest01 (void)
 {
     int result = 0;
     DetectStreamSizeData *sd = NULL;
-    sd = rs_detect_stream_size_parse("server,<,6");
+    sd = SCDetectStreamSizeParse("server,<,6");
     if (sd != NULL) {
         if (sd->flags & StreamSizeServer && sd->du32.mode == DETECT_UINT_LT && sd->du32.arg1 == 6)
             result = 1;
@@ -256,7 +257,7 @@ static int DetectStreamSizeParseTest02 (void)
 {
     int result = 1;
     DetectStreamSizeData *sd = NULL;
-    sd = rs_detect_stream_size_parse("invalidoption,<,6");
+    sd = SCDetectStreamSizeParse("invalidoption,<,6");
     if (sd != NULL) {
         printf("expected: NULL got 0x%02X %" PRIu32 ": ", sd->flags, sd->du32.arg1);
         result = 0;
@@ -273,15 +274,11 @@ static int DetectStreamSizeParseTest02 (void)
 
 static int DetectStreamSizeParseTest03 (void)
 {
-
-    int result = 0;
-    DetectStreamSizeData *sd = NULL;
     TcpSession ssn;
     ThreadVars tv;
     DetectEngineThreadCtx dtx;
     Packet *p = PacketGetFromAlloc();
-    if (unlikely(p == NULL))
-        return 0;
+    FAIL_IF_NULL(p);
     Signature s;
     SigMatch sm;
     TcpStream client;
@@ -297,49 +294,25 @@ static int DetectStreamSizeParseTest03 (void)
     memset(&f, 0, sizeof(Flow));
     memset(&tcph, 0, sizeof(TCPHdr));
 
-    sd = rs_detect_stream_size_parse("client,>,8");
-    if (sd != NULL) {
-        if (!(sd->flags & StreamSizeClient)) {
-            printf("sd->flags not STREAM_SIZE_CLIENT: ");
-            DetectStreamSizeFree(NULL, sd);
-            SCFree(p);
-            return 0;
-        }
-
-        if (sd->du32.mode != DETECT_UINT_GT) {
-            printf("sd->mode not DETECTSSIZE_GT: ");
-            DetectStreamSizeFree(NULL, sd);
-            SCFree(p);
-            return 0;
-        }
-
-        if (sd->du32.arg1 != 8) {
-            printf("sd->ssize is %" PRIu32 ", not 8: ", sd->du32.arg1);
-            DetectStreamSizeFree(NULL, sd);
-            SCFree(p);
-            return 0;
-        }
-    } else {
-        printf("sd == NULL: ");
-        SCFree(p);
-        return 0;
-    }
+    DetectStreamSizeData *sd = SCDetectStreamSizeParse("client,>,8");
+    FAIL_IF_NULL(sd);
+    FAIL_IF_NOT(sd->flags & StreamSizeClient);
+    FAIL_IF_NOT(sd->du32.mode == DETECT_UINT_GT);
+    FAIL_IF_NOT(sd->du32.arg1 == 8);
 
     client.next_seq = 20;
     client.isn = 10;
     ssn.client = client;
     f.protoctx = &ssn;
     p->flow = &f;
-    p->tcph = &tcph;
+    PacketSetTCP(p, (uint8_t *)&tcph);
     sm.ctx = (SigMatchCtx*)sd;
 
-    result = DetectStreamSizeMatch(&dtx, p, &s, sm.ctx);
-    if (result == 0) {
-        printf("result 0 != 1: ");
-    }
+    int result = DetectStreamSizeMatch(&dtx, p, &s, sm.ctx);
+    FAIL_IF_NOT(result == 1);
     DetectStreamSizeFree(NULL, sd);
-    SCFree(p);
-    return result;
+    PacketFree(p);
+    PASS;
 }
 
 /**
@@ -349,15 +322,11 @@ static int DetectStreamSizeParseTest03 (void)
 
 static int DetectStreamSizeParseTest04 (void)
 {
-
-    int result = 0;
-    DetectStreamSizeData *sd = NULL;
     TcpSession ssn;
     ThreadVars tv;
     DetectEngineThreadCtx dtx;
     Packet *p = PacketGetFromAlloc();
-    if (unlikely(p == NULL))
-        return 0;
+    FAIL_IF_NULL(p);
     Signature s;
     SigMatch sm;
     TcpStream client;
@@ -373,32 +342,25 @@ static int DetectStreamSizeParseTest04 (void)
     memset(&f, 0, sizeof(Flow));
     memset(&ip4h, 0, sizeof(IPV4Hdr));
 
-    sd = rs_detect_stream_size_parse(" client , > , 8 ");
-    if (sd != NULL) {
-        if (!(sd->flags & StreamSizeClient) && sd->du32.mode != DETECT_UINT_GT &&
-                sd->du32.arg1 != 8) {
-            SCFree(p);
-            return 0;
-        }
-    } else
-        {
-        SCFree(p);
-        return 0;
-        }
+    DetectStreamSizeData *sd = SCDetectStreamSizeParse(" client , > , 8 ");
+    FAIL_IF_NULL(sd);
+    FAIL_IF_NOT(sd->flags & StreamSizeClient);
+    FAIL_IF_NOT(sd->du32.mode == DETECT_UINT_GT);
+    FAIL_IF_NOT(sd->du32.arg1 == 8);
 
     client.next_seq = 20;
     client.isn = 12;
     ssn.client = client;
     f.protoctx = &ssn;
     p->flow = &f;
-    p->ip4h = &ip4h;
+    UTHSetIPV4Hdr(p, &ip4h);
     sm.ctx = (SigMatchCtx*)sd;
 
-    if (!DetectStreamSizeMatch(&dtx, p, &s, sm.ctx))
-        result = 1;
+    FAIL_IF(DetectStreamSizeMatch(&dtx, p, &s, sm.ctx));
 
-    SCFree(p);
-    return result;
+    PacketFree(p);
+    DetectStreamSizeFree(NULL, sd);
+    PASS;
 }
 
 /**

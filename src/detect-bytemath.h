@@ -21,13 +21,13 @@
  * \author Jeff Lucovsky <jeff@lucovsky.org>
  */
 
-#ifndef __DETECT_BYTEMATH_H__
-#define __DETECT_BYTEMATH_H__
+#ifndef SURICATA_DETECT_BYTEMATH_H
+#define SURICATA_DETECT_BYTEMATH_H
 
 void DetectBytemathRegister(void);
 
-SigMatch *DetectByteMathRetrieveSMVar(const char *, const Signature *);
+SigMatch *DetectByteMathRetrieveSMVar(const char *, int sm_list, const Signature *);
 int DetectByteMathDoMatch(DetectEngineThreadCtx *, const DetectByteMathData *, const Signature *,
         const uint8_t *, const uint32_t, uint8_t, uint64_t, uint64_t *, uint8_t);
 
-#endif /* __DETECT_BYTEMATH_H__ */
+#endif /* SURICATA_DETECT_BYTEMATH_H */

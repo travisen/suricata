@@ -48,7 +48,7 @@ extern StreamingBufferConfig htp_sbcfg;
  *  \retval -2 not handling files on this flow
  */
 int HTPFileOpen(HtpState *s, HtpTxUserData *tx, const uint8_t *filename, uint16_t filename_len,
-        const uint8_t *data, uint32_t data_len, uint64_t txid, uint8_t direction)
+        const uint8_t *data, uint32_t data_len, uint8_t direction)
 {
     int retval = 0;
     uint16_t flags = 0;
@@ -58,13 +58,13 @@ int HTPFileOpen(HtpState *s, HtpTxUserData *tx, const uint8_t *filename, uint16_
 
     if (direction & STREAM_TOCLIENT) {
         files = &tx->files_tc;
-        flags = FileFlowFlagsToFlags(tx->tx_data.file_flags, STREAM_TOCLIENT);
+        flags = SCFileFlowFlagsToFlags(tx->tx_data.file_flags, STREAM_TOCLIENT);
 
         // we shall not open a new file if there is a current one
         DEBUG_VALIDATE_BUG_ON(tx->file_range != NULL);
     } else {
         files = &tx->files_ts;
-        flags = FileFlowFlagsToFlags(tx->tx_data.file_flags, STREAM_TOSERVER);
+        flags = SCFileFlowFlagsToFlags(tx->tx_data.file_flags, STREAM_TOSERVER);
     }
 
     if (FileOpenFileWithId(files, &htp_sbcfg, s->file_track_id++, filename, filename_len, data,
@@ -91,12 +91,12 @@ int HTPFileOpen(HtpState *s, HtpTxUserData *tx, const uint8_t *filename, uint16_
  * @param[in] rawvalue
  * @param[out] range
  *
- * @return HTP_OK on success, HTP_ERROR on failure.
+ * @return HTP_STATUS_OK on success, HTP_STATUS_ERROR on failure.
  */
-int HTPParseContentRange(bstr *rawvalue, HTTPContentRange *range)
+int HTPParseContentRange(const bstr *rawvalue, HTTPContentRange *range)
 {
-    uint32_t len = bstr_len(rawvalue);
-    return rs_http_parse_content_range(range, bstr_ptr(rawvalue), len);
+    uint32_t len = (uint32_t)bstr_len(rawvalue);
+    return SCHttpParseContentRange(range, bstr_ptr(rawvalue), len);
 }
 
 /**
@@ -105,14 +105,14 @@ int HTPParseContentRange(bstr *rawvalue, HTTPContentRange *range)
  * @param[in] rawvalue
  * @param[out] range
  *
- * @return HTP_OK on success, HTP_ERROR, -2, -3 on failure.
+ * @return HTP_STATUS_OK on success, HTP_STATUS_ERROR, -2, -3 on failure.
  */
 static int HTPParseAndCheckContentRange(
-        bstr *rawvalue, HTTPContentRange *range, HtpState *s, HtpTxUserData *htud)
+        const bstr *rawvalue, HTTPContentRange *range, HtpState *s, HtpTxUserData *htud)
 {
     int r = HTPParseContentRange(rawvalue, range);
     if (r != 0) {
-        AppLayerDecoderEventsSetEventRaw(&htud->tx_data.events, HTTP_DECODER_EVENT_RANGE_INVALID);
+        SCAppLayerDecoderEventsSetEventRaw(&htud->tx_data.events, HTTP_DECODER_EVENT_RANGE_INVALID);
         s->events++;
         SCLogDebug("parsing range failed, going back to normal file");
         return r;
@@ -129,7 +129,7 @@ static int HTPParseAndCheckContentRange(
         SCLogDebug("range without all information");
         return -3;
     } else if (range->start > range->end || range->end > range->size - 1) {
-        AppLayerDecoderEventsSetEventRaw(&htud->tx_data.events, HTTP_DECODER_EVENT_RANGE_INVALID);
+        SCAppLayerDecoderEventsSetEventRaw(&htud->tx_data.events, HTTP_DECODER_EVENT_RANGE_INVALID);
         s->events++;
         SCLogDebug("invalid range");
         return -4;
@@ -147,8 +147,8 @@ static int HTPParseAndCheckContentRange(
  *  \retval -1 error
  */
 int HTPFileOpenWithRange(HtpState *s, HtpTxUserData *txud, const uint8_t *filename,
-        uint16_t filename_len, const uint8_t *data, uint32_t data_len, uint64_t txid,
-        bstr *rawvalue, HtpTxUserData *htud)
+        uint16_t filename_len, const uint8_t *data, uint32_t data_len, const htp_tx_t *tx,
+        const bstr *rawvalue, HtpTxUserData *htud)
 {
     SCEnter();
     uint16_t flags;
@@ -159,7 +159,7 @@ int HTPFileOpenWithRange(HtpState *s, HtpTxUserData *txud, const uint8_t *filena
     HTTPContentRange crparsed;
     if (HTPParseAndCheckContentRange(rawvalue, &crparsed, s, htud) != 0) {
         // range is invalid, fall back to classic open
-        return HTPFileOpen(s, txud, filename, filename_len, data, data_len, txid, STREAM_TOCLIENT);
+        return HTPFileOpen(s, txud, filename, filename_len, data, data_len, STREAM_TOCLIENT);
     }
     flags = FileFlowToFlags(s->f, STREAM_TOCLIENT);
     FileContainer *files = &txud->files_tc;
@@ -179,27 +179,26 @@ int HTPFileOpenWithRange(HtpState *s, HtpTxUserData *txud, const uint8_t *filena
     }
 
     // Then, we will try to handle reassembly of different ranges of the same file
-    // TODO have the caller pass directly the tx
-    htp_tx_t *tx = htp_list_get(s->conn->transactions, txid - s->tx_freed);
-    if (!tx) {
-        SCReturnInt(-1);
-    }
     uint8_t *keyurl;
     uint32_t keylen;
-    if (tx->request_hostname != NULL) {
-        keylen = bstr_len(tx->request_hostname) + filename_len;
+    if (htp_tx_request_hostname(tx) != NULL) {
+        uint32_t hlen = (uint32_t)bstr_len(htp_tx_request_hostname(tx));
+        if (hlen > UINT16_MAX) {
+            hlen = UINT16_MAX;
+        }
+        keylen = hlen + filename_len;
         keyurl = SCMalloc(keylen);
         if (keyurl == NULL) {
             SCReturnInt(-1);
         }
-        memcpy(keyurl, bstr_ptr(tx->request_hostname), bstr_len(tx->request_hostname));
-        memcpy(keyurl + bstr_len(tx->request_hostname), filename, filename_len);
+        memcpy(keyurl, bstr_ptr(htp_tx_request_hostname(tx)), hlen);
+        memcpy(keyurl + hlen, filename, filename_len);
     } else {
         // do not reassemble file without host info
         SCReturnInt(0);
     }
     DEBUG_VALIDATE_BUG_ON(htud->file_range);
-    htud->file_range = HttpRangeContainerOpenFile(keyurl, keylen, s->f, &crparsed, &htp_sbcfg,
+    htud->file_range = SCHttpRangeContainerOpenFile(keyurl, keylen, s->f, &crparsed, &htp_sbcfg,
             filename, filename_len, flags, data, data_len);
     SCFree(keyurl);
     if (htud->file_range == NULL) {
@@ -221,8 +220,7 @@ int HTPFileOpenWithRange(HtpState *s, HtpTxUserData *txud, const uint8_t *filena
  *  \retval -1 error
  *  \retval -2 file doesn't need storing
  */
-int HTPFileStoreChunk(
-        HtpState *s, HtpTxUserData *tx, const uint8_t *data, uint32_t data_len, uint8_t direction)
+int HTPFileStoreChunk(HtpTxUserData *tx, const uint8_t *data, uint32_t data_len, uint8_t direction)
 {
     SCEnter();
 
@@ -244,7 +242,7 @@ int HTPFileStoreChunk(
     }
 
     if (tx->file_range != NULL) {
-        if (HttpRangeAppendData(&htp_sbcfg, tx->file_range, data, data_len) < 0) {
+        if (SCHttpRangeAppendData(&htp_sbcfg, tx->file_range, data, data_len) < 0) {
             SCLogDebug("Failed to append data");
         }
     }
@@ -260,36 +258,6 @@ int HTPFileStoreChunk(
 
 end:
     SCReturnInt(retval);
-}
-
-/** \brief close range, add reassembled file if possible
- *  \retval true if reassembled file was added
- *  \retval false if no reassembled file was added
- */
-bool HTPFileCloseHandleRange(const StreamingBufferConfig *sbcfg, FileContainer *files,
-        const uint16_t flags, HttpRangeContainerBlock *c, const uint8_t *data, uint32_t data_len)
-{
-    bool added = false;
-    if (HttpRangeAppendData(sbcfg, c, data, data_len) < 0) {
-        SCLogDebug("Failed to append data");
-    }
-    if (c->container) {
-        // we only call HttpRangeClose if we may some new data
-        // ie we do not call it if we skipped all this range request
-        THashDataLock(c->container->hdata);
-        if (c->container->error) {
-            SCLogDebug("range in ERROR state");
-        }
-        File *ranged = HttpRangeClose(sbcfg, c, flags);
-        if (ranged && files) {
-            /* HtpState owns the constructed file now */
-            FileContainerAdd(files, ranged);
-            added = true;
-        }
-        DEBUG_VALIDATE_BUG_ON(ranged && !files);
-        THashDataUnlock(c->container->hdata);
-    }
-    return added;
 }
 
 /**
@@ -308,8 +276,8 @@ bool HTPFileCloseHandleRange(const StreamingBufferConfig *sbcfg, FileContainer *
  *  \retval -1 error
  *  \retval -2 not storing files on this flow/tx
  */
-int HTPFileClose(HtpState *s, HtpTxUserData *tx, const uint8_t *data, uint32_t data_len,
-        uint8_t flags, uint8_t direction)
+int HTPFileClose(
+        HtpTxUserData *tx, const uint8_t *data, uint32_t data_len, uint8_t flags, uint8_t direction)
 {
     SCEnter();
 
@@ -342,11 +310,11 @@ int HTPFileClose(HtpState *s, HtpTxUserData *tx, const uint8_t *data, uint32_t d
 
     if (tx->file_range != NULL) {
         bool added =
-                HTPFileCloseHandleRange(&htp_sbcfg, files, flags, tx->file_range, data, data_len);
+                SCHTPFileCloseHandleRange(&htp_sbcfg, files, flags, tx->file_range, data, data_len);
         if (added) {
             tx->tx_data.files_opened++;
         }
-        HttpRangeFreeBlock(tx->file_range);
+        SCHttpRangeFreeBlock(tx->file_range);
         tx->file_range = NULL;
     }
 
@@ -404,9 +372,11 @@ static int HTPFileParserTest01(void)
 
     htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP1, http_state, 0);
     FAIL_IF_NULL(tx);
-    FAIL_IF_NULL(tx->request_method);
+    FAIL_IF_NULL(htp_tx_request_method(tx));
 
-    FAIL_IF(memcmp(bstr_util_strdup_to_c(tx->request_method), "POST", 4) != 0);
+    char *m = bstr_util_strdup_to_c(htp_tx_request_method(tx));
+    FAIL_IF(memcmp(m, "POST", 4) != 0);
+    SCFree(m);
 
     AppLayerParserThreadCtxFree(alp_tctx);
     StreamTcpFreeConfig(true);
@@ -478,8 +448,10 @@ static int HTPFileParserTest02(void)
 
     htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP1, http_state, 0);
     FAIL_IF_NULL(tx);
-    FAIL_IF_NULL(tx->request_method);
-    FAIL_IF(memcmp(bstr_util_strdup_to_c(tx->request_method), "POST", 4) != 0);
+    FAIL_IF_NULL(htp_tx_request_method(tx));
+    char *m = bstr_util_strdup_to_c(htp_tx_request_method(tx));
+    FAIL_IF(memcmp(m, "POST", 4) != 0);
+    SCFree(m);
     HtpTxUserData *tx_ud = htp_tx_get_user_data(tx);
     FAIL_IF_NULL(tx_ud);
     FAIL_IF_NULL(tx_ud->files_ts.tail);
@@ -570,9 +542,11 @@ static int HTPFileParserTest03(void)
 
     htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP1, http_state, 0);
     FAIL_IF_NULL(tx);
-    FAIL_IF_NULL(tx->request_method);
+    FAIL_IF_NULL(htp_tx_request_method(tx));
 
-    FAIL_IF(memcmp(bstr_util_strdup_to_c(tx->request_method), "POST", 4) != 0);
+    char *m = bstr_util_strdup_to_c(htp_tx_request_method(tx));
+    FAIL_IF(memcmp(m, "POST", 4) != 0);
+    SCFree(m);
 
     HtpTxUserData *tx_ud = htp_tx_get_user_data(tx);
     FAIL_IF_NULL(tx_ud);
@@ -666,9 +640,11 @@ static int HTPFileParserTest04(void)
 
     htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP1, http_state, 0);
     FAIL_IF_NULL(tx);
-    FAIL_IF_NULL(tx->request_method);
+    FAIL_IF_NULL(htp_tx_request_method(tx));
 
-    FAIL_IF(memcmp(bstr_util_strdup_to_c(tx->request_method), "POST", 4) != 0);
+    char *m = bstr_util_strdup_to_c(htp_tx_request_method(tx));
+    FAIL_IF(memcmp(m, "POST", 4) != 0);
+    SCFree(m);
 
     HtpTxUserData *tx_ud = htp_tx_get_user_data(tx);
     FAIL_IF_NULL(tx_ud);
@@ -732,9 +708,11 @@ static int HTPFileParserTest05(void)
 
     htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP1, http_state, 0);
     FAIL_IF_NULL(tx);
-    FAIL_IF_NULL(tx->request_method);
+    FAIL_IF_NULL(htp_tx_request_method(tx));
 
-    FAIL_IF(memcmp(bstr_util_strdup_to_c(tx->request_method), "POST", 4) != 0);
+    char *m = bstr_util_strdup_to_c(htp_tx_request_method(tx));
+    FAIL_IF(memcmp(m, "POST", 4) != 0);
+    SCFree(m);
 
     HtpTxUserData *tx_ud = htp_tx_get_user_data(tx);
     FAIL_IF_NULL(tx_ud);
@@ -807,9 +785,11 @@ static int HTPFileParserTest06(void)
 
     htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP1, http_state, 0);
     FAIL_IF_NULL(tx);
-    FAIL_IF_NULL(tx->request_method);
+    FAIL_IF_NULL(htp_tx_request_method(tx));
 
-    FAIL_IF(memcmp(bstr_util_strdup_to_c(tx->request_method), "POST", 4) != 0);
+    char *m = bstr_util_strdup_to_c(htp_tx_request_method(tx));
+    FAIL_IF(memcmp(m, "POST", 4) != 0);
+    SCFree(m);
 
     HtpTxUserData *tx_ud = htp_tx_get_user_data(tx);
     FAIL_IF_NULL(tx_ud);
@@ -872,8 +852,10 @@ static int HTPFileParserTest07(void)
 
     htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP1, http_state, 0);
     FAIL_IF_NULL(tx);
-    FAIL_IF_NULL(tx->request_method);
-    FAIL_IF(memcmp(bstr_util_strdup_to_c(tx->request_method), "POST", 4) != 0);
+    FAIL_IF_NULL(htp_tx_request_method(tx));
+    char *m = bstr_util_strdup_to_c(htp_tx_request_method(tx));
+    FAIL_IF(memcmp(m, "POST", 4) != 0);
+    SCFree(m);
 
     HtpTxUserData *tx_ud = htp_tx_get_user_data(tx);
     FAIL_IF_NULL(tx_ud);
@@ -1194,9 +1176,11 @@ static int HTPFileParserTest11(void)
 
     htp_tx_t *tx = AppLayerParserGetTx(IPPROTO_TCP, ALPROTO_HTTP1, http_state, 0);
     FAIL_IF_NULL(tx);
-    FAIL_IF_NULL(tx->request_method);
+    FAIL_IF_NULL(htp_tx_request_method(tx));
 
-    FAIL_IF(memcmp(bstr_util_strdup_to_c(tx->request_method), "POST", 4) != 0);
+    char *m = bstr_util_strdup_to_c(htp_tx_request_method(tx));
+    FAIL_IF(memcmp(m, "POST", 4) != 0);
+    SCFree(m);
 
     HtpTxUserData *tx_ud = htp_tx_get_user_data(tx);
     FAIL_IF_NULL(tx_ud);

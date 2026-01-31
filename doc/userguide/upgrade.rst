@@ -34,9 +34,246 @@ also check all the new features that have been added but are not covered by
 this guide. Those features are either not enabled by default or require
 dedicated new configuration.
 
+Upgrading to 9.0.0
+------------------
+
+Major Changes
+~~~~~~~~~~~~~
+- Encrypted quic traffic bypass is now independently controlled through
+  ``app-layer.protocols.quic.encryption-handling`` setting. The setting can either
+  be ``bypass``, ``track-only`` or ``full``.
+
+Logging Changes
+~~~~~~~~~~~~~~~
+- The format of IKEv1 proposal attributes has been changed to handle
+  duplicate attribute types. See :ref:`IKE logging changes
+  <9.0-ike-logging-changes>`
+
+- Ethertype values (``ether.ether_type``) are now logged matching the network order value.
+  E.g., previously, ``ether_type`` values were logged in host order;  an ethertype value of ``0xfbb7``
+  (network order) was logged as `47099`` (``0xb7fb``). This ethertype value will be logged as ``64439``.
+
+Other Changes
+~~~~~~~~~~~~~
+- ``engine-analysis`` output has been changed for keywords that now use the generic integers framework
+
+  - icmp_id
+  - tcp.ack
+  - tcp.seq
+  - tcp.window
+
+- ``dnp3`` has reduced the maximum number of open transactions from
+  500 down to 32, the maximum number of points per message from
+  unbounded to 16384, and the maximum number of objects per message
+  from unbounded to 2048. Configuration options, ``max-tx``,
+  ``max-points``, and ``max-objects`` have been added for users who
+  may need to change these defaults.
+- Hyperscan caching (`detect.sgh-mpm-caching`), when enabled, prunes
+  cache files that have not been used in the last 7 days by default.
+  See :ref:`Hyperscan caching configuration
+  <hyperscan-cache-configuration>` for more information.
+
+- The ``no`` option in ``app-layer.protocols.ssh.hassh`` is now
+  really enforced and there will be no hassh computation
+  even if rules try to use it.
+
+
+Upgrading to 8.0.1
+------------------
+
+Major changes
+~~~~~~~~~~~~~
+
+- Various expected PPP packet types will no longer be marked as Unsupported Protocol
+  when in a PPPOE packet.
+- Added Cisco Discovery Protocol Control Protocol as a valid PPP packet.
+
+Keyword changes
+~~~~~~~~~~~~~~~
+- Usage of multiple ``tls.cert_subject`` in a rule will print a warning
+  as this keyword was not and is not implemented as a multi-buffer.
+
 Upgrading 7.0 to 8.0
 --------------------
 .. note:: ``stats.whitelist`` has been renamed to ``stats.score`` in ``eve.json``
+
+Major changes
+~~~~~~~~~~~~~
+- SIP parser has been updated to inspect traffic carried by TCP as well.
+  SIP keywords can still match on their respective fields in addition
+  to these improvements.
+  Transactions are logged with the same schema regardless of which
+  transport protocol is carrying the payload.
+  Also, SIP protocol is detected using pattern matching and not only
+  probing parser.
+- ``SIP_PORTS`` variable has been introduced in suricata.yaml
+- Application layer's ``sip`` counter has been split into ``sip_tcp`` and ``sip_udp``
+  for the ``stats`` event.
+- Stats counters that are 0 can now be hidden from EVE logs. Default behavior
+  still logs those (see :ref:`EVE Output - Stats <eve-json-output-stats>` for configuration setting).
+- SDP parser, logger and sticky buffers have been introduced.
+  Due to SDP being encapsulated within other protocols, such as SIP, they cannot be directly enabled or disabled.
+  Instead, both the SDP parser and logger depend on being invoked by another parser (or logger).
+- ARP decoder and logger have been introduced.
+  Since ARP can be quite verbose and produce many events, the logger is disabled by default.
+- It is possible to see an increase of alerts, for the same rule-sets, if you
+  use many stream/payload rules, due to Suricata triggering TCP stream
+  reassembly earlier.
+- New transform ``from_base64`` that base64 decodes a buffer and passes the
+  decoded buffer. It's recommended that ``from_base64`` be used instead of ``base64_decode``
+- Datasets of type String now include the length of the strings to determine if the memcap value is reached.
+  This may lead to memcaps being hit for older setups that didn't take that into account.
+  For more details, check https://redmine.openinfosecfoundation.org/issues/3910
+- DNS logging has been modified to be more consistent across requests,
+  responses and alerts. See :doc:`DNS Logging Changes for 8.0
+  <upgrade/8.0-dns-logging-changes>`.
+- PF_RING support has been moved to a plugin. See :doc:`PF_RING plugin
+  <upgrade/8.0-pfring-plugin>`.
+- LDAP parser and logger have been introduced.
+- The following sticky buffers for matching SIP headers have been implemented:
+
+  - sip.via
+  - sip.from
+  - sip.to
+  - sip.content_type
+  - sip.content_length
+
+- Napatech support has been moved to a capture plugin. See :doc:`Napatech plugin
+  <upgrade/8.0-napatech-plugin>`.
+- Unknown requirements in the ``requires`` keyword will now be treated
+  as unmet requirements, causing the rule to not be loaded. See
+  :ref:`keyword_requires`.
+- The configuration setting controlling stream checksum checks no longer affects
+  checksum keyword validation. In Suricata 7.0, when ``stream.checksum-validation``
+  was set to ``no``, the checksum keywords (e.g., ``ipv4-csum``, ``tcpv4-csum``, etc)
+  will always consider it valid; e.g., ``tcpv4-csum: invalid`` will never match. In
+  Suricata 8.0, ``stream.checksum-validation`` no longer affects the checksum rule keywords.
+  E.g., ``ipv4-csum: valid`` will only match if the check sum is valid, even when engine
+  checksum validations are disabled.
+- Lua detection scripts (rules) now run in a sandboxed
+  environment. See :ref:`lua-detection`. Lua rules are now also
+  enabled by default.
+- Lua output scripts have no default module search path, a search path
+  will need to be set before external modules can be loaded. See the
+  new default configuration file or :ref:`lua-output-yaml` for more
+  details.
+- If the configuration value ``ftp.memcap`` is invalid, Suricata will set it to ``0`` which means
+  no limit will be placed. In previous Suricata releases, Suricata would terminate execution. A
+  warning message will be displayed `Invalid value <value> for ftp.memcap` when this occurs.
+- The utility applications ``suricatasc`` and ``suricatactl`` have
+  been rewritten in Rust. For most end-users this is a transparent
+  change, however if you run these tools from the source directory,
+  patch them or use them as Python modules your workflows may need to
+  be adapted.
+- Datasets now have a default max limit for hashsize of 65536. This is
+  configurable via the ``datasets.limits`` options.
+- For detect inspection recursion limits, if no value is provided, the default is
+  now set to 3000.
+- AF_PACKET now has better defaults:
+
+  - AF_PACKET will now default to defrag off for inline mode with
+    ``cluster_flow`` as its not recommended for inline use. However
+    it can still be enabled with the ``defrag`` configuration
+    parameter.
+  - AF_PACKET will now default to tpacket-v3 for non-inline modes,
+    it remains disabled for inline modes. To keep tpacket-v2 for
+    non-inline modes, the existing ``tpacket-v3`` configuration
+    parameter can be set to ``false``.
+  - The AF_PACKET default block size for both TPACKET_V2 and
+    TPACKET_V3 has been increased from 32k to 128k. This is to allow
+    for full size defragmented packets. For TPACKET_V3 the existing
+    ``block-size`` parameter can be used to change this back to the
+    old default of 32768 if needed. For TPACKET_V2 a new
+    configuration parameter has been added, ``v2-block-size`` which
+    can be used to tune this value for TPACKET_V2. Due to the
+    increased block size, memory usage has been increased, but
+    should not be an issue in most cases.
+- DPDK interface settings can now be configured automatically by setting 
+  ``auto`` to ``mempool-size``, ``mempool-cache-size``, ``rx-descriptors``,
+  ``tx-descriptors``. See :ref:`dpdk-automatic-interface-configuration`.
+- DPDK interface mempools are now allocated per thread instead of per port. This
+  change improves performance and should not be visible from the user
+  configuration perspective.
+- DPDK supports link state check, allowing Suricata to start only when the link
+  is up. This is especially useful for Intel E810 (ice) NICs as they need 
+  a few seconds before they are ready to receive packets. With this check
+  disabled, Suricata reports as started but only begins processing packets
+  after the previously mentioned interval. Other cards were not observed to have
+  this issue. This feature is disabled by default.
+  See :ref:`dpdk-link-state-change-timeout`.
+- Encrypted traffic bypass has been decoupled from stream.bypass setting.
+  This means that encrypted traffic can be bypassed while tracking/fully
+  inspecting other traffic as well.
+- Encrypted SSH traffic bypass is now independently controlled through
+  ``app-layer.protocols.ssh.encryption-handling`` setting. The setting can either
+  be ``bypass``, ``track-only`` or ``full``.
+  To retain the previous behavior of encrypted traffic bypass
+  combined with stream depth bypass, set
+  ``app-layer.protocols.ssh.encryption-handling`` to ``bypass`` (while also
+  setting ``app-layer.protocols.tls.encryption-handling`` to ``bypass`` and
+  ``stream.bypass`` to ``true``).
+- Spaces are accepted in HTTP1 URIs instead of in the protocol version. That is:
+  `GET /a b HTTP/1.1` gets now URI as `/a b` and protocol as `HTTP/1.1` when
+  it used to be URI as `/a` and protocol as `b HTTP/1.1`
+- The configuration structure of ``threading.cpu-affinity`` has been changed
+  from a list format to a dictionary format. Additionally, member properties of
+  `*-cpu-set` nodes have been moved one level up.
+  The support for list items such as `- worker-cpu-set`, `- management-cpu-set`,
+  etc. is still supported.
+  To convert to the new configuration format follow the example below or
+  the description in :ref:`suricata-yaml-threading`.
+
+  .. code-block:: diff
+
+      threading:
+        cpu-affinity:
+    -     - worker-cpu-set:
+    -         cpu: [0, 1]
+    +     worker-cpu-set:
+    +       cpu: [0, 1]
+- All applayer protocols except FTP and HTTP now trigger inspection upon completion
+  of a request/response in the respective direction. This means that earlier a
+  content that matched just because it fell in the inspection chunk without wholly
+  belonging to any one request/response may not match any longer.
+
+Removals
+~~~~~~~~
+- The ssh keywords ``ssh.protoversion`` and ``ssh.softwareversion`` have been removed.
+- The detect engine stats counters for non-mpm-prefiltered rules ``fnonmpm_list``
+  and ``nonmpm_list`` were not in use since Suricata 8.0.0 and **were thus removed
+  in 8.0.1.**
+
+Deprecations
+~~~~~~~~~~~~
+- The ``http-log`` output is now deprecated and will be removed in Suricata 9.0.
+- The ``tls-log`` output is now deprecated and will be removed in Suricata 9.0.
+- The ``syslog`` output is now deprecated and will be removed in
+  Suricata 9.0. Note that this is the standalone ``syslog`` output and
+  does affect the ``eve`` outputs ability to send to syslog.
+- The ``default`` option in ``app-layer.protocols.tls.encryption-handling`` is
+  now deprecated and will be removed in Suricata 9.0. The ``track-only`` option
+  should be used instead.
+
+Keyword changes
+~~~~~~~~~~~~~~~
+- ``ja3.hash`` and ``ja3s.hash`` no longer accept contents with non hexadecimal
+  characters, as they will never match.
+
+Logging changes
+~~~~~~~~~~~~~~~
+- RFB security result is now consistently logged as ``security_result`` when it was
+  sometimes logged with a dash instead of an underscore.
+- Application layer metadata is logged with alerts by default **only for rules that
+  use application layer keywords**. For other rules, the configuration parameter
+  ``detect.guess-applayer-tx`` can be used to force the detect engine to guess a
+  transaction, which is not guaranteed to be the one you expect. **In this case,
+  the engine will NOT log any transaction metadata if there is more than one
+  live transaction, to reduce the chances of logging unrelated data.** This may
+  lead to what looks like a regression in behavior, but it is a considered choice.
+
+Other Changes
+~~~~~~~~~~~~~
+- libhtp has been replaced with a rust version. This means libhtp is no longer built and linked as a shared library, and the libhtp dependency is now built directly into suricata.
 
 Upgrading 6.0 to 7.0
 --------------------
@@ -136,6 +373,16 @@ Logging changes
 
      For more information, refer to:
      https://redmine.openinfosecfoundation.org/issues/1275.
+
+- Engine logging/output now uses separate defaults for ``console`` and ``file``, to provide a cleaner output on the console.
+
+  Defaults are:
+
+  * ``console``: ``%D: %S: %M``
+
+  * ``file``: ``[%i - %m] %z %d: %S: %M``
+
+  The ``console`` output also changes based on verbosity level.
 
 Deprecations
 ~~~~~~~~~~~~

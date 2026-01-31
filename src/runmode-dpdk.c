@@ -1,4 +1,4 @@
-/* Copyright (C) 2021 Open Information Security Foundation
+/* Copyright (C) 2021-2025 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -39,24 +39,20 @@
 #include "util-byte.h"
 #include "util-cpu.h"
 #include "util-debug.h"
-#include "util-device.h"
+#include "util-device-private.h"
 #include "util-dpdk.h"
+#include "util-dpdk-bonding.h"
+#include "util-dpdk-common.h"
 #include "util-dpdk-i40e.h"
 #include "util-dpdk-ice.h"
 #include "util-dpdk-ixgbe.h"
-#include "util-dpdk-bonding.h"
+#include "util-dpdk-rss.h"
 #include "util-time.h"
 #include "util-conf.h"
 #include "suricata.h"
 #include "util-affinity.h"
 
 #ifdef HAVE_DPDK
-
-#define RSS_HKEY_LEN 40
-// General purpose RSS key for symmetric bidirectional flow distribution
-uint8_t rss_hkey[] = { 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D,
-    0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D,
-    0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A };
 
 // Calculates the closest multiple of y from x
 #define ROUNDUP(x, y) ((((x) + ((y)-1)) / (y)) * (y))
@@ -74,7 +70,7 @@ static char *AllocArgument(size_t arg_len);
 static char *AllocAndSetArgument(const char *arg);
 static char *AllocAndSetOption(const char *arg);
 
-static void ArgumentsInit(struct Arguments *args, unsigned capacity);
+static void ArgumentsInit(struct Arguments *args, uint16_t capacity);
 static void ArgumentsCleanup(struct Arguments *args);
 static void ArgumentsAdd(struct Arguments *args, char *value);
 static void ArgumentsAddOptionAndArgument(struct Arguments *args, const char *opt, const char *arg);
@@ -82,12 +78,14 @@ static void InitEal(void);
 
 static void ConfigSetIface(DPDKIfaceConfig *iconf, const char *entry_str);
 static int ConfigSetThreads(DPDKIfaceConfig *iconf, const char *entry_str);
-static int ConfigSetRxQueues(DPDKIfaceConfig *iconf, uint16_t nb_queues);
-static int ConfigSetTxQueues(DPDKIfaceConfig *iconf, uint16_t nb_queues);
-static int ConfigSetMempoolSize(DPDKIfaceConfig *iconf, intmax_t entry_int);
+static int ConfigSetRxQueues(DPDKIfaceConfig *iconf, uint16_t nb_queues, uint16_t max_queues);
+static int ConfigSetTxQueues(
+        DPDKIfaceConfig *iconf, uint16_t nb_queues, uint16_t max_queues, bool iface_sends_pkts);
+static int ConfigSetMempoolSize(DPDKIfaceConfig *iconf, const char *entry_str);
 static int ConfigSetMempoolCacheSize(DPDKIfaceConfig *iconf, const char *entry_str);
-static int ConfigSetRxDescriptors(DPDKIfaceConfig *iconf, intmax_t entry_int);
-static int ConfigSetTxDescriptors(DPDKIfaceConfig *iconf, intmax_t entry_int);
+static int ConfigSetRxDescriptors(DPDKIfaceConfig *iconf, const char *entry_str, uint16_t max_desc);
+static int ConfigSetTxDescriptors(
+        DPDKIfaceConfig *iconf, const char *entry_str, uint16_t max_desc, bool iface_sends_pkts);
 static int ConfigSetMtu(DPDKIfaceConfig *iconf, intmax_t entry_int);
 static bool ConfigSetPromiscuousMode(DPDKIfaceConfig *iconf, int entry_bool);
 static bool ConfigSetMulticast(DPDKIfaceConfig *iconf, int entry_bool);
@@ -112,16 +110,18 @@ static void DPDKDerefConfig(void *conf);
 
 #define DPDK_CONFIG_DEFAULT_THREADS                     "auto"
 #define DPDK_CONFIG_DEFAULT_INTERRUPT_MODE              false
-#define DPDK_CONFIG_DEFAULT_MEMPOOL_SIZE                65535
+#define DPDK_CONFIG_DEFAULT_MEMPOOL_SIZE                "auto"
 #define DPDK_CONFIG_DEFAULT_MEMPOOL_CACHE_SIZE          "auto"
-#define DPDK_CONFIG_DEFAULT_RX_DESCRIPTORS              1024
-#define DPDK_CONFIG_DEFAULT_TX_DESCRIPTORS              1024
+#define DPDK_CONFIG_DEFAULT_RX_DESCRIPTORS              "auto"
+#define DPDK_CONFIG_DEFAULT_TX_DESCRIPTORS              "auto"
 #define DPDK_CONFIG_DEFAULT_RSS_HASH_FUNCTIONS          RTE_ETH_RSS_IP
 #define DPDK_CONFIG_DEFAULT_MTU                         1500
 #define DPDK_CONFIG_DEFAULT_PROMISCUOUS_MODE            1
 #define DPDK_CONFIG_DEFAULT_MULTICAST_MODE              1
 #define DPDK_CONFIG_DEFAULT_CHECKSUM_VALIDATION         1
 #define DPDK_CONFIG_DEFAULT_CHECKSUM_VALIDATION_OFFLOAD 1
+#define DPDK_CONFIG_DEFAULT_VLAN_STRIP                  0
+#define DPDK_CONFIG_DEFAULT_LINKUP_TIMEOUT              0
 #define DPDK_CONFIG_DEFAULT_COPY_MODE                   "none"
 #define DPDK_CONFIG_DEFAULT_COPY_INTERFACE              "none"
 
@@ -133,7 +133,9 @@ DPDKIfaceConfigAttributes dpdk_yaml = {
     .checksum_checks = "checksum-checks",
     .checksum_checks_offload = "checksum-checks-offload",
     .mtu = "mtu",
+    .vlan_strip_offload = "vlan-strip-offload",
     .rss_hf = "rss-hash-functions",
+    .linkup_timeout = "linkup-timeout",
     .mempool_size = "mempool-size",
     .mempool_cache_size = "mempool-cache-size",
     .rx_descriptors = "rx-descriptors",
@@ -142,14 +144,40 @@ DPDKIfaceConfigAttributes dpdk_yaml = {
     .copy_iface = "copy-iface",
 };
 
-static int GreatestDivisorUpTo(uint32_t num, uint32_t max_num)
+/**
+ * \brief Input is a number of which we want to find the greatest divisor up to max_num (inclusive).
+ * The divisor is returned.
+ */
+static uint32_t GreatestDivisorUpTo(uint32_t num, uint32_t max_num)
 {
-    for (int i = max_num; i >= 2; i--) {
+    for (uint32_t i = max_num; i >= 2; i--) {
         if (num % i == 0) {
             return i;
         }
     }
     return 1;
+}
+
+/**
+ * \brief Input is a number of which we want to find the greatest power of 2 up to num. The power of
+ * 2 is returned or 0 if no valid power of 2 is found.
+ */
+static uint64_t GreatestPowOf2UpTo(uint64_t num)
+{
+    if (num == 0) {
+        return 0; // No power of 2 exists for 0
+    }
+
+    // Bit manipulation to isolate the highest set bit
+    num |= (num >> 1);
+    num |= (num >> 2);
+    num |= (num >> 4);
+    num |= (num >> 8);
+    num |= (num >> 16);
+    num |= (num >> 32);
+    num = num - (num >> 1);
+
+    return num;
 }
 
 static char *AllocArgument(size_t arg_len)
@@ -197,12 +225,12 @@ static char *AllocAndSetOption(const char *arg)
     size_t full_len = arg_len + strlen(dash_prefix);
 
     ptr = AllocArgument(full_len);
-    strlcpy(ptr, dash_prefix, strlen(dash_prefix) + 1);
+    strlcpy(ptr, dash_prefix, full_len);
     strlcat(ptr, arg, full_len + 1);
     SCReturnPtr(ptr, "char *");
 }
 
-static void ArgumentsInit(struct Arguments *args, unsigned capacity)
+static void ArgumentsInit(struct Arguments *args, uint16_t capacity)
 {
     SCEnter();
     args->argv = SCCalloc(capacity, sizeof(*args->argv)); // alloc array of pointers
@@ -262,8 +290,8 @@ static void InitEal(void)
 {
     SCEnter();
     int retval;
-    ConfNode *param;
-    const ConfNode *eal_params = ConfGetNode("dpdk.eal-params");
+    SCConfNode *param;
+    const SCConfNode *eal_params = SCConfGetNode("dpdk.eal-params");
     struct Arguments args;
     char **eal_argv;
 
@@ -275,9 +303,9 @@ static void InitEal(void)
     ArgumentsAdd(&args, AllocAndSetArgument("suricata"));
 
     TAILQ_FOREACH (param, &eal_params->head, next) {
-        if (ConfNodeIsSequence(param)) {
+        if (SCConfNodeIsSequence(param)) {
             const char *key = param->name;
-            ConfNode *val;
+            SCConfNode *val;
             TAILQ_FOREACH (val, &param->head, next) {
                 ArgumentsAddOptionAndArgument(&args, key, (const char *)val->val);
             }
@@ -302,7 +330,6 @@ static void InitEal(void)
     if (retval < 0) { // retval bound to the result of rte_eal_init
         FatalError("DPDK EAL initialization error: %s", rte_strerror(-retval));
     }
-    DPDKSetTimevalOfMachineStart();
 }
 
 static void DPDKDerefConfig(void *conf)
@@ -311,10 +338,7 @@ static void DPDKDerefConfig(void *conf)
     DPDKIfaceConfig *iconf = (DPDKIfaceConfig *)conf;
 
     if (SC_ATOMIC_SUB(iconf->ref, 1) == 1) {
-        if (iconf->pkt_mempool != NULL) {
-            rte_mempool_free(iconf->pkt_mempool);
-        }
-
+        DPDKDeviceResourcesDeinit(&iconf->pkt_mempools);
         SCFree(iconf);
     }
     SCReturn;
@@ -328,8 +352,7 @@ static void ConfigInit(DPDKIfaceConfig **iconf)
     if (ptr == NULL)
         FatalError("Could not allocate memory for DPDKIfaceConfig");
 
-    ptr->pkt_mempool = NULL;
-    ptr->out_port_id = -1; // make sure no port is set
+    ptr->out_port_id = UINT16_MAX; // make sure no port is set
     SC_ATOMIC_INIT(ptr->ref);
     (void)SC_ATOMIC_ADD(ptr->ref, 1);
     ptr->DerefFunc = DPDKDerefConfig;
@@ -349,7 +372,7 @@ static void ConfigSetIface(DPDKIfaceConfig *iconf, const char *entry_str)
 
     retval = rte_eth_dev_get_port_by_name(entry_str, &iconf->port_id);
     if (retval < 0)
-        FatalError("Interface \"%s\": %s", entry_str, rte_strerror(-retval));
+        FatalError("%s: interface not found: %s", entry_str, rte_strerror(-retval));
 
     strlcpy(iconf->iface, entry_str, sizeof(iconf->iface));
     SCReturn;
@@ -358,23 +381,28 @@ static void ConfigSetIface(DPDKIfaceConfig *iconf, const char *entry_str)
 static int ConfigSetThreads(DPDKIfaceConfig *iconf, const char *entry_str)
 {
     SCEnter();
-    static int32_t remaining_auto_cpus = -1;
+    static uint16_t remaining_auto_cpus = UINT16_MAX; // uninitialized
     if (!threading_set_cpu_affinity) {
         SCLogError("DPDK runmode requires configured thread affinity");
         SCReturnInt(-EINVAL);
     }
 
-    ThreadsAffinityType *wtaf = GetAffinityTypeFromName("worker-cpu-set");
+    bool wtaf_periface = true;
+    ThreadsAffinityType *wtaf = GetAffinityTypeForNameAndIface("worker-cpu-set", iconf->iface);
     if (wtaf == NULL) {
-        SCLogError("Specify worker-cpu-set list in the threading section");
-        SCReturnInt(-EINVAL);
+        wtaf_periface = false;
+        wtaf = GetAffinityTypeForNameAndIface("worker-cpu-set", NULL); // mandatory
+        if (wtaf == NULL) {
+            SCLogError("Specify worker-cpu-set list in the threading section");
+            SCReturnInt(-EINVAL);
+        }
     }
-    ThreadsAffinityType *mtaf = GetAffinityTypeFromName("management-cpu-set");
+    ThreadsAffinityType *mtaf = GetAffinityTypeForNameAndIface("management-cpu-set", NULL);
     if (mtaf == NULL) {
         SCLogError("Specify management-cpu-set list in the threading section");
         SCReturnInt(-EINVAL);
     }
-    uint32_t sched_cpus = UtilAffinityGetAffinedCPUNum(wtaf);
+    uint16_t sched_cpus = UtilAffinityGetAffinedCPUNum(wtaf);
     if (sched_cpus == UtilCpuGetNumProcessorsOnline()) {
         SCLogWarning(
                 "\"all\" specified in worker CPU cores affinity, excluding management threads");
@@ -402,27 +430,39 @@ static int ConfigSetThreads(DPDKIfaceConfig *iconf, const char *entry_str)
     }
 
     if (strcmp(entry_str, "auto") == 0) {
-        iconf->threads = (uint16_t)sched_cpus / LiveGetDeviceCount();
+        if (wtaf_periface) {
+            iconf->threads = (uint16_t)sched_cpus;
+            SCLogConfig("%s: auto-assigned %u threads", iconf->iface, iconf->threads);
+            SCReturnInt(0);
+        }
+
+        uint16_t live_dev_count = (uint16_t)LiveGetDeviceCountWithoutAssignedThreading();
+        if (live_dev_count == 0) {
+            SCLogError("No live devices found, cannot auto-assign threads");
+            SCReturnInt(-EINVAL);
+        }
+        iconf->threads = sched_cpus / live_dev_count;
         if (iconf->threads == 0) {
             SCLogError("Not enough worker CPU cores with affinity were configured");
             SCReturnInt(-ERANGE);
         }
 
-        if (remaining_auto_cpus > 0) {
-            iconf->threads++;
-            remaining_auto_cpus--;
-        } else if (remaining_auto_cpus == -1) {
-            remaining_auto_cpus = (int32_t)sched_cpus % LiveGetDeviceCount();
+        if (remaining_auto_cpus == UINT16_MAX) {
+            // first time auto-assignment
+            remaining_auto_cpus = sched_cpus % live_dev_count;
             if (remaining_auto_cpus > 0) {
                 iconf->threads++;
                 remaining_auto_cpus--;
             }
+        } else if (remaining_auto_cpus > 0) {
+            iconf->threads++;
+            remaining_auto_cpus--;
         }
         SCLogConfig("%s: auto-assigned %u threads", iconf->iface, iconf->threads);
         SCReturnInt(0);
     }
 
-    if (StringParseInt32(&iconf->threads, 10, 0, entry_str) < 0) {
+    if (StringParseUint16(&iconf->threads, 10, 0, entry_str) < 0) {
         SCLogError("Threads entry for interface %s contain non-numerical characters - \"%s\"",
                 iconf->iface, entry_str);
         SCReturnInt(-EINVAL);
@@ -445,40 +485,122 @@ static bool ConfigSetInterruptMode(DPDKIfaceConfig *iconf, bool enable)
     SCReturnBool(true);
 }
 
-static int ConfigSetRxQueues(DPDKIfaceConfig *iconf, uint16_t nb_queues)
+static int ConfigSetRxQueues(DPDKIfaceConfig *iconf, uint16_t nb_queues, uint16_t max_queues)
 {
     SCEnter();
+    if (nb_queues == 0) {
+        SCLogInfo("%s: positive number of RX queues is required", iconf->iface);
+        SCReturnInt(-ERANGE);
+    }
+
+    if (nb_queues > max_queues) {
+        SCLogInfo("%s: number of RX queues cannot exceed %" PRIu16, iconf->iface, max_queues);
+        SCReturnInt(-ERANGE);
+    }
+
     iconf->nb_rx_queues = nb_queues;
-    if (iconf->nb_rx_queues < 1) {
-        SCLogError("%s: positive number of RX queues is required", iconf->iface);
-        SCReturnInt(-ERANGE);
-    }
-
     SCReturnInt(0);
 }
 
-static int ConfigSetTxQueues(DPDKIfaceConfig *iconf, uint16_t nb_queues)
+static bool ConfigIfaceSendsPkts(const char *mode)
 {
     SCEnter();
+    if (strcmp(mode, "ips") == 0 || strcmp(mode, "tap") == 0) {
+        SCReturnBool(true);
+    }
+    SCReturnBool(false);
+}
+
+static int ConfigSetTxQueues(
+        DPDKIfaceConfig *iconf, uint16_t nb_queues, uint16_t max_queues, bool iface_sends_pkts)
+{
+    SCEnter();
+    if (nb_queues == 0 && iface_sends_pkts) {
+        SCLogInfo("%s: positive number of TX queues is required", iconf->iface);
+        SCReturnInt(-ERANGE);
+    }
+
+    if (nb_queues > max_queues) {
+        SCLogInfo("%s: number of TX queues cannot exceed %" PRIu16, iconf->iface, max_queues);
+        SCReturnInt(-ERANGE);
+    }
+
     iconf->nb_tx_queues = nb_queues;
-    if (iconf->nb_tx_queues < 1) {
-        SCLogError("%s: positive number of TX queues is required", iconf->iface);
+    SCReturnInt(0);
+}
+
+static uint32_t MempoolSizeCalculate(
+        uint32_t rx_queues, uint32_t rx_desc, uint32_t tx_queues, uint32_t tx_desc)
+{
+    uint32_t sz = rx_queues * rx_desc + tx_queues * tx_desc;
+    if (!tx_queues || !tx_desc)
+        sz *= 2; // double to have enough space for RX descriptors
+
+    return sz;
+}
+
+static int ConfigSetMempoolSize(DPDKIfaceConfig *iconf, const char *entry_str)
+{
+    SCEnter();
+    if (entry_str == NULL || entry_str[0] == '\0' || strcmp(entry_str, "auto") == 0) {
+        // calculate the mempool size based on the number of:
+        //   - RX / TX queues
+        //   - RX / TX descriptors
+        bool err = false;
+        if (iconf->nb_rx_queues == 0) {
+            // in IDS mode, we don't need TX queues
+            SCLogError("%s: cannot autocalculate mempool size without RX queues", iconf->iface);
+            err = true;
+        }
+
+        if (iconf->nb_rx_desc == 0) {
+            SCLogError(
+                    "%s: cannot autocalculate mempool size without RX descriptors", iconf->iface);
+            err = true;
+        }
+
+        if (err) {
+            SCReturnInt(-EINVAL);
+        }
+
+        iconf->mempool_size = MempoolSizeCalculate(
+                iconf->nb_rx_queues, iconf->nb_rx_desc, iconf->nb_tx_queues, iconf->nb_tx_desc);
+        SCReturnInt(0);
+    }
+
+    if (StringParseUint32(&iconf->mempool_size, 10, 0, entry_str) < 0) {
+        SCLogError("%s: mempool size entry contain non-numerical characters - \"%s\"", iconf->iface,
+                entry_str);
+        SCReturnInt(-EINVAL);
+    }
+
+    if (MempoolSizeCalculate(
+                iconf->nb_rx_queues, iconf->nb_rx_desc, iconf->nb_tx_queues, iconf->nb_tx_desc) >
+            iconf->mempool_size + 1) { // +1 to mask mempool size advice given in Suricata 7.0.x -
+                                       // mp_size should be n = (2^q - 1)
+        SCLogError("%s: mempool size is likely too small for the number of descriptors and queues, "
+                   "set to \"auto\" or adjust to the value of \"%" PRIu32 "\"",
+                iconf->iface,
+                MempoolSizeCalculate(iconf->nb_rx_queues, iconf->nb_rx_desc, iconf->nb_tx_queues,
+                        iconf->nb_tx_desc));
+        SCReturnInt(-ERANGE);
+    }
+
+    if (iconf->mempool_size == 0) {
+        SCLogError("%s: mempool size requires a positive integer", iconf->iface);
         SCReturnInt(-ERANGE);
     }
 
     SCReturnInt(0);
 }
 
-static int ConfigSetMempoolSize(DPDKIfaceConfig *iconf, intmax_t entry_int)
+static uint32_t MempoolCacheSizeCalculate(uint32_t mp_sz)
 {
-    SCEnter();
-    if (entry_int <= 0) {
-        SCLogError("%s: positive memory pool size is required", iconf->iface);
-        SCReturnInt(-ERANGE);
-    }
-
-    iconf->mempool_size = entry_int;
-    SCReturnInt(0);
+    // It is advised to have mempool cache size lower or equal to:
+    //   RTE_MEMPOOL_CACHE_MAX_SIZE (by default 512) and "mempool-size / 1.5"
+    // and at the same time "mempool-size modulo cache_size == 0".
+    uint32_t max_cache_size = MIN(RTE_MEMPOOL_CACHE_MAX_SIZE, (uint32_t)(mp_sz / 1.5));
+    return GreatestDivisorUpTo(mp_sz, max_cache_size);
 }
 
 static int ConfigSetMempoolCacheSize(DPDKIfaceConfig *iconf, const char *entry_str)
@@ -486,17 +608,13 @@ static int ConfigSetMempoolCacheSize(DPDKIfaceConfig *iconf, const char *entry_s
     SCEnter();
     if (entry_str == NULL || entry_str[0] == '\0' || strcmp(entry_str, "auto") == 0) {
         // calculate the mempool size based on the mempool size (it needs to be already filled in)
-        // It is advised to have mempool cache size lower or equal to:
-        //   RTE_MEMPOOL_CACHE_MAX_SIZE (by default 512) and "mempool-size / 1.5"
-        // and at the same time "mempool-size modulo cache_size == 0".
         if (iconf->mempool_size == 0) {
             SCLogError("%s: cannot calculate mempool cache size of a mempool with size %d",
                     iconf->iface, iconf->mempool_size);
             SCReturnInt(-EINVAL);
         }
 
-        uint32_t max_cache_size = MAX(RTE_MEMPOOL_CACHE_MAX_SIZE, iconf->mempool_size / 1.5);
-        iconf->mempool_cache_size = GreatestDivisorUpTo(iconf->mempool_size, max_cache_size);
+        iconf->mempool_cache_size = MempoolCacheSizeCalculate(iconf->mempool_size);
         SCReturnInt(0);
     }
 
@@ -515,27 +633,70 @@ static int ConfigSetMempoolCacheSize(DPDKIfaceConfig *iconf, const char *entry_s
     SCReturnInt(0);
 }
 
-static int ConfigSetRxDescriptors(DPDKIfaceConfig *iconf, intmax_t entry_int)
+static int ConfigSetRxDescriptors(DPDKIfaceConfig *iconf, const char *entry_str, uint16_t max_desc)
 {
     SCEnter();
-    if (entry_int <= 0) {
+    if (entry_str == NULL || entry_str[0] == '\0') {
+        SCLogInfo("%s: number of RX descriptors not found, going with: %s", iconf->iface,
+                DPDK_CONFIG_DEFAULT_RX_DESCRIPTORS);
+        entry_str = DPDK_CONFIG_DEFAULT_RX_DESCRIPTORS;
+    }
+
+    if (strcmp(entry_str, "auto") == 0) {
+        iconf->nb_rx_desc = (uint16_t)GreatestPowOf2UpTo(max_desc);
+        SCReturnInt(0);
+    }
+
+    if (StringParseUint16(&iconf->nb_rx_desc, 10, 0, entry_str) < 0) {
+        SCLogError("%s: RX descriptors entry contains non-numerical characters - \"%s\"",
+                iconf->iface, entry_str);
+        SCReturnInt(-EINVAL);
+    }
+
+    if (iconf->nb_rx_desc == 0) {
         SCLogError("%s: positive number of RX descriptors is required", iconf->iface);
+        SCReturnInt(-ERANGE);
+    } else if (iconf->nb_rx_desc > max_desc) {
+        SCLogError("%s: number of RX descriptors cannot exceed %" PRIu16, iconf->iface, max_desc);
         SCReturnInt(-ERANGE);
     }
 
-    iconf->nb_rx_desc = entry_int;
     SCReturnInt(0);
 }
 
-static int ConfigSetTxDescriptors(DPDKIfaceConfig *iconf, intmax_t entry_int)
+static int ConfigSetTxDescriptors(
+        DPDKIfaceConfig *iconf, const char *entry_str, uint16_t max_desc, bool iface_sends_pkts)
 {
     SCEnter();
-    if (entry_int <= 0) {
+    if (entry_str == NULL || entry_str[0] == '\0') {
+        SCLogInfo("%s: number of TX descriptors not found, going with: %s", iconf->iface,
+                DPDK_CONFIG_DEFAULT_TX_DESCRIPTORS);
+        entry_str = DPDK_CONFIG_DEFAULT_TX_DESCRIPTORS;
+    }
+
+    if (strcmp(entry_str, "auto") == 0) {
+        if (iface_sends_pkts) {
+            iconf->nb_tx_desc = (uint16_t)GreatestPowOf2UpTo(max_desc);
+        } else {
+            iconf->nb_tx_desc = 0;
+        }
+        SCReturnInt(0);
+    }
+
+    if (StringParseUint16(&iconf->nb_tx_desc, 10, 0, entry_str) < 0) {
+        SCLogError("%s: TX descriptors entry contains non-numerical characters - \"%s\"",
+                iconf->iface, entry_str);
+        SCReturnInt(-EINVAL);
+    }
+
+    if (iconf->nb_tx_desc == 0 && iface_sends_pkts) {
         SCLogError("%s: positive number of TX descriptors is required", iconf->iface);
+        SCReturnInt(-ERANGE);
+    } else if (iconf->nb_tx_desc > max_desc) {
+        SCLogError("%s: number of TX descriptors cannot exceed %" PRIu16, iconf->iface, max_desc);
         SCReturnInt(-ERANGE);
     }
 
-    iconf->nb_tx_desc = entry_int;
     SCReturnInt(0);
 }
 
@@ -565,7 +726,21 @@ static int ConfigSetMtu(DPDKIfaceConfig *iconf, intmax_t entry_int)
         SCReturnInt(-ERANGE);
     }
 
-    iconf->mtu = entry_int;
+    iconf->mtu = (uint16_t)entry_int;
+    SCReturnInt(0);
+}
+
+static int ConfigSetLinkupTimeout(DPDKIfaceConfig *iconf, intmax_t entry_int)
+{
+    SCEnter();
+    if (entry_int < 0 || entry_int > UINT16_MAX) {
+        SCLogError("%s: Link-up waiting timeout needs to be a positive number (up to %u) or 0 to "
+                   "disable",
+                iconf->iface, UINT16_MAX);
+        SCReturnInt(-ERANGE);
+    }
+
+    iconf->linkup_timeout = (uint16_t)entry_int;
     SCReturnInt(0);
 }
 
@@ -605,6 +780,13 @@ static int ConfigSetChecksumOffload(DPDKIfaceConfig *iconf, int entry_bool)
     SCReturnInt(0);
 }
 
+static void ConfigSetVlanStrip(DPDKIfaceConfig *iconf, int entry_bool)
+{
+    SCEnter();
+    iconf->vlan_strip_enabled = entry_bool;
+    SCReturn;
+}
+
 static int ConfigSetCopyIface(DPDKIfaceConfig *iconf, const char *entry_str)
 {
     SCEnter();
@@ -617,8 +799,8 @@ static int ConfigSetCopyIface(DPDKIfaceConfig *iconf, const char *entry_str)
 
     retval = rte_eth_dev_get_port_by_name(entry_str, &iconf->out_port_id);
     if (retval < 0) {
-        SCLogError("%s: name of the copy interface (%s) is invalid (err %s)", iconf->iface,
-                entry_str, rte_strerror(-retval));
+        SCLogError("%s: copy interface (%s) not found: %s", iconf->iface, entry_str,
+                rte_strerror(-retval));
         SCReturnInt(retval);
     }
 
@@ -685,8 +867,8 @@ static int ConfigLoad(DPDKIfaceConfig *iconf, const char *iface)
 {
     SCEnter();
     int retval;
-    ConfNode *if_root;
-    ConfNode *if_default;
+    SCConfNode *if_root;
+    SCConfNode *if_default;
     const char *entry_str = NULL;
     intmax_t entry_int = 0;
     int entry_bool = 0;
@@ -694,20 +876,27 @@ static int ConfigLoad(DPDKIfaceConfig *iconf, const char *iface)
     const char *copy_mode_str = NULL;
 
     ConfigSetIface(iconf, iface);
+    struct rte_eth_dev_info dev_info = { 0 };
+    retval = rte_eth_dev_info_get(iconf->port_id, &dev_info);
+    if (retval < 0) {
+        SCLogError("%s: getting device info failed: %s", iconf->iface, rte_strerror(-retval));
+        SCReturnInt(retval);
+    }
 
-    retval = ConfSetRootAndDefaultNodes("dpdk.interfaces", iconf->iface, &if_root, &if_default);
+    retval = SCConfSetRootAndDefaultNodes("dpdk.interfaces", iconf->iface, &if_root, &if_default);
     if (retval < 0) {
         FatalError("failed to find DPDK configuration for the interface %s", iconf->iface);
     }
 
-    retval = ConfGetChildValueWithDefault(if_root, if_default, dpdk_yaml.threads, &entry_str) != 1
+    retval = SCConfGetChildValueWithDefault(if_root, if_default, dpdk_yaml.threads, &entry_str) != 1
                      ? ConfigSetThreads(iconf, DPDK_CONFIG_DEFAULT_THREADS)
                      : ConfigSetThreads(iconf, entry_str);
     if (retval < 0)
         SCReturnInt(retval);
 
     bool irq_enable;
-    retval = ConfGetChildValueBoolWithDefault(if_root, if_default, dpdk_yaml.irq_mode, &entry_bool);
+    retval = SCConfGetChildValueBoolWithDefault(
+            if_root, if_default, dpdk_yaml.irq_mode, &entry_bool);
     if (retval != 1) {
         irq_enable = DPDK_CONFIG_DEFAULT_INTERRUPT_MODE;
     } else {
@@ -717,78 +906,95 @@ static int ConfigLoad(DPDKIfaceConfig *iconf, const char *iface)
     if (retval != true)
         SCReturnInt(-EINVAL);
 
-    // currently only mapping "1 thread == 1 RX (and 1 TX queue in IPS mode)" is supported
-    retval = ConfigSetRxQueues(iconf, (uint16_t)iconf->threads);
+    retval = SCConfGetChildValueWithDefault(
+            if_root, if_default, dpdk_yaml.copy_mode, &copy_mode_str);
+    if (retval != 1) {
+        copy_mode_str = DPDK_CONFIG_DEFAULT_COPY_MODE;
+    }
+
+    retval = SCConfGetChildValueWithDefault(
+                     if_root, if_default, dpdk_yaml.rx_descriptors, &entry_str) != 1
+                     ? ConfigSetRxDescriptors(iconf, DPDK_CONFIG_DEFAULT_RX_DESCRIPTORS,
+                               dev_info.rx_desc_lim.nb_max)
+                     : ConfigSetRxDescriptors(iconf, entry_str, dev_info.rx_desc_lim.nb_max);
+    if (retval < 0)
+        SCReturnInt(retval);
+
+    bool iface_sends_pkts = ConfigIfaceSendsPkts(copy_mode_str);
+    retval = SCConfGetChildValueWithDefault(
+                     if_root, if_default, dpdk_yaml.tx_descriptors, &entry_str) != 1
+                     ? ConfigSetTxDescriptors(iconf, DPDK_CONFIG_DEFAULT_TX_DESCRIPTORS,
+                               dev_info.tx_desc_lim.nb_max, iface_sends_pkts)
+                     : ConfigSetTxDescriptors(
+                               iconf, entry_str, dev_info.tx_desc_lim.nb_max, iface_sends_pkts);
     if (retval < 0)
         SCReturnInt(retval);
 
     // currently only mapping "1 thread == 1 RX (and 1 TX queue in IPS mode)" is supported
-    retval = ConfigSetTxQueues(iconf, (uint16_t)iconf->threads);
-    if (retval < 0)
+    retval = ConfigSetRxQueues(iconf, iconf->threads, dev_info.max_rx_queues);
+    if (retval < 0) {
+        SCLogError("%s: too many threads configured - reduce thread count to: %" PRIu16,
+                iconf->iface, dev_info.max_rx_queues);
         SCReturnInt(retval);
+    }
 
-    retval = ConfGetChildValueIntWithDefault(
-                     if_root, if_default, dpdk_yaml.mempool_size, &entry_int) != 1
+    // currently only mapping "1 thread == 1 RX (and 1 TX queue in IPS mode)" is supported
+    uint16_t tx_queues = iconf->nb_tx_desc > 0 ? iconf->threads : 0;
+    retval = ConfigSetTxQueues(iconf, tx_queues, dev_info.max_tx_queues, iface_sends_pkts);
+    if (retval < 0) {
+        SCLogError("%s: too many threads configured - reduce thread count to: %" PRIu16,
+                iconf->iface, dev_info.max_tx_queues);
+        SCReturnInt(retval);
+    }
+
+    retval = SCConfGetChildValueWithDefault(
+                     if_root, if_default, dpdk_yaml.mempool_size, &entry_str) != 1
                      ? ConfigSetMempoolSize(iconf, DPDK_CONFIG_DEFAULT_MEMPOOL_SIZE)
-                     : ConfigSetMempoolSize(iconf, entry_int);
+                     : ConfigSetMempoolSize(iconf, entry_str);
     if (retval < 0)
         SCReturnInt(retval);
 
-    retval = ConfGetChildValueWithDefault(
+    retval = SCConfGetChildValueWithDefault(
                      if_root, if_default, dpdk_yaml.mempool_cache_size, &entry_str) != 1
                      ? ConfigSetMempoolCacheSize(iconf, DPDK_CONFIG_DEFAULT_MEMPOOL_CACHE_SIZE)
                      : ConfigSetMempoolCacheSize(iconf, entry_str);
     if (retval < 0)
         SCReturnInt(retval);
 
-    retval = ConfGetChildValueIntWithDefault(
-                     if_root, if_default, dpdk_yaml.rx_descriptors, &entry_int) != 1
-                     ? ConfigSetRxDescriptors(iconf, DPDK_CONFIG_DEFAULT_RX_DESCRIPTORS)
-                     : ConfigSetRxDescriptors(iconf, entry_int);
-    if (retval < 0)
-        SCReturnInt(retval);
-
-    retval = ConfGetChildValueIntWithDefault(
-                     if_root, if_default, dpdk_yaml.tx_descriptors, &entry_int) != 1
-                     ? ConfigSetTxDescriptors(iconf, DPDK_CONFIG_DEFAULT_TX_DESCRIPTORS)
-                     : ConfigSetTxDescriptors(iconf, entry_int);
-    if (retval < 0)
-        SCReturnInt(retval);
-
-    retval = ConfGetChildValueIntWithDefault(if_root, if_default, dpdk_yaml.mtu, &entry_int) != 1
+    retval = SCConfGetChildValueIntWithDefault(if_root, if_default, dpdk_yaml.mtu, &entry_int) != 1
                      ? ConfigSetMtu(iconf, DPDK_CONFIG_DEFAULT_MTU)
                      : ConfigSetMtu(iconf, entry_int);
     if (retval < 0)
         SCReturnInt(retval);
 
-    retval = ConfGetChildValueWithDefault(if_root, if_default, dpdk_yaml.rss_hf, &entry_str) != 1
+    retval = SCConfGetChildValueWithDefault(if_root, if_default, dpdk_yaml.rss_hf, &entry_str) != 1
                      ? ConfigSetRSSHashFunctions(iconf, NULL)
                      : ConfigSetRSSHashFunctions(iconf, entry_str);
     if (retval < 0)
         SCReturnInt(retval);
 
-    retval = ConfGetChildValueBoolWithDefault(
+    retval = SCConfGetChildValueBoolWithDefault(
                      if_root, if_default, dpdk_yaml.promisc, &entry_bool) != 1
                      ? ConfigSetPromiscuousMode(iconf, DPDK_CONFIG_DEFAULT_PROMISCUOUS_MODE)
                      : ConfigSetPromiscuousMode(iconf, entry_bool);
     if (retval != true)
         SCReturnInt(-EINVAL);
 
-    retval = ConfGetChildValueBoolWithDefault(
+    retval = SCConfGetChildValueBoolWithDefault(
                      if_root, if_default, dpdk_yaml.multicast, &entry_bool) != 1
                      ? ConfigSetMulticast(iconf, DPDK_CONFIG_DEFAULT_MULTICAST_MODE)
                      : ConfigSetMulticast(iconf, entry_bool);
     if (retval != true)
         SCReturnInt(-EINVAL);
 
-    retval = ConfGetChildValueBoolWithDefault(
+    retval = SCConfGetChildValueBoolWithDefault(
                      if_root, if_default, dpdk_yaml.checksum_checks, &entry_bool) != 1
                      ? ConfigSetChecksumChecks(iconf, DPDK_CONFIG_DEFAULT_CHECKSUM_VALIDATION)
                      : ConfigSetChecksumChecks(iconf, entry_bool);
     if (retval < 0)
         SCReturnInt(retval);
 
-    retval = ConfGetChildValueBoolWithDefault(
+    retval = SCConfGetChildValueBoolWithDefault(
                      if_root, if_default, dpdk_yaml.checksum_checks_offload, &entry_bool) != 1
                      ? ConfigSetChecksumOffload(
                                iconf, DPDK_CONFIG_DEFAULT_CHECKSUM_VALIDATION_OFFLOAD)
@@ -796,18 +1002,26 @@ static int ConfigLoad(DPDKIfaceConfig *iconf, const char *iface)
     if (retval < 0)
         SCReturnInt(retval);
 
-    retval = ConfGetChildValueWithDefault(if_root, if_default, dpdk_yaml.copy_mode, &copy_mode_str);
-    if (retval != 1)
-        SCReturnInt(-ENOENT);
+    retval = SCConfGetChildValueBoolWithDefault(
+            if_root, if_default, dpdk_yaml.vlan_strip_offload, &entry_bool);
+    if (retval != 1) {
+        ConfigSetVlanStrip(iconf, DPDK_CONFIG_DEFAULT_VLAN_STRIP);
+    } else {
+        ConfigSetVlanStrip(iconf, entry_bool);
+    }
+
+    retval = SCConfGetChildValueIntWithDefault(
+                     if_root, if_default, dpdk_yaml.linkup_timeout, &entry_int) != 1
+                     ? ConfigSetLinkupTimeout(iconf, DPDK_CONFIG_DEFAULT_LINKUP_TIMEOUT)
+                     : ConfigSetLinkupTimeout(iconf, entry_int);
     if (retval < 0)
         SCReturnInt(retval);
 
-    retval = ConfGetChildValueWithDefault(
+    retval = SCConfGetChildValueWithDefault(
             if_root, if_default, dpdk_yaml.copy_iface, &copy_iface_str);
-    if (retval != 1)
-        SCReturnInt(-ENOENT);
-    if (retval < 0)
-        SCReturnInt(retval);
+    if (retval != 1) {
+        copy_iface_str = DPDK_CONFIG_DEFAULT_COPY_INTERFACE;
+    }
 
     retval = ConfigSetCopyIfaceSettings(iconf, copy_iface_str, copy_mode_str);
     if (retval < 0)
@@ -816,23 +1030,46 @@ static int ConfigLoad(DPDKIfaceConfig *iconf, const char *iface)
     SCReturnInt(0);
 }
 
-static int32_t ConfigValidateThreads(uint16_t iface_threads)
+static bool ConfigThreadsGenericIsValid(uint16_t iface_threads, ThreadsAffinityType *wtaf)
 {
     static uint32_t total_cpus = 0;
     total_cpus += iface_threads;
-    ThreadsAffinityType *wtaf = GetAffinityTypeFromName("worker-cpu-set");
     if (wtaf == NULL) {
         SCLogError("Specify worker-cpu-set list in the threading section");
-        return -1;
+        return false;
     }
     if (total_cpus > UtilAffinityGetAffinedCPUNum(wtaf)) {
-        SCLogError("Interfaces requested more cores than configured in the threading section "
-                   "(requested %d configured %d",
+        SCLogError("Interfaces requested more cores than configured in the worker-cpu-set "
+                   "threading section (requested %d configured %d",
                 total_cpus, UtilAffinityGetAffinedCPUNum(wtaf));
-        return -1;
+        return false;
     }
 
-    return 0;
+    return true;
+}
+
+static bool ConfigThreadsInterfaceIsValid(uint16_t iface_threads, ThreadsAffinityType *itaf)
+{
+    if (iface_threads > UtilAffinityGetAffinedCPUNum(itaf)) {
+        SCLogError("Interface requested more cores than configured in the interface-specific "
+                   "threading section (requested %d configured %d",
+                iface_threads, UtilAffinityGetAffinedCPUNum(itaf));
+        return false;
+    }
+
+    return true;
+}
+
+static bool ConfigIsThreadingValid(uint16_t iface_threads, const char *iface)
+{
+    ThreadsAffinityType *itaf = GetAffinityTypeForNameAndIface("worker-cpu-set", iface);
+    ThreadsAffinityType *wtaf = GetAffinityTypeForNameAndIface("worker-cpu-set", NULL);
+    if (itaf && !ConfigThreadsInterfaceIsValid(iface_threads, itaf)) {
+        return false;
+    } else if (itaf == NULL && !ConfigThreadsGenericIsValid(iface_threads, wtaf)) {
+        return false;
+    }
+    return true;
 }
 
 static DPDKIfaceConfig *ConfigParse(const char *iface)
@@ -845,7 +1082,7 @@ static DPDKIfaceConfig *ConfigParse(const char *iface)
 
     ConfigInit(&iconf);
     retval = ConfigLoad(iconf, iface);
-    if (retval < 0 || ConfigValidateThreads(iconf->threads) != 0) {
+    if (retval < 0 || !ConfigIsThreadingValid(iconf->threads, iface)) {
         iconf->DerefFunc(iconf);
         SCReturnPtr(NULL, "void *");
     }
@@ -855,11 +1092,10 @@ static DPDKIfaceConfig *ConfigParse(const char *iface)
 
 static void DeviceSetPMDSpecificRSS(struct rte_eth_rss_conf *rss_conf, const char *driver_name)
 {
-    // RSS is configured in a specific way for a driver i40e and DPDK version <= 19.xx
     if (strcmp(driver_name, "net_i40e") == 0)
         i40eDeviceSetRSSConf(rss_conf);
     if (strcmp(driver_name, "net_ice") == 0)
-        iceDeviceSetRSSHashFunction(&rss_conf->rss_hf);
+        iceDeviceSetRSSConf(rss_conf);
     if (strcmp(driver_name, "net_ixgbe") == 0)
         ixgbeDeviceSetRSSHashFunction(&rss_conf->rss_hf);
     if (strcmp(driver_name, "net_e1000_igb") == 0)
@@ -867,9 +1103,9 @@ static void DeviceSetPMDSpecificRSS(struct rte_eth_rss_conf *rss_conf, const cha
 }
 
 // Returns -1 if no bit is set
-static int GetFirstSetBitPosition(uint64_t bits)
+static int32_t GetFirstSetBitPosition(uint64_t bits)
 {
-    for (uint64_t i = 0; i < 64; i++) {
+    for (int32_t i = 0; i < 64; i++) {
         if (bits & BIT_U64(i))
             return i;
     }
@@ -1061,6 +1297,7 @@ static void DumpRXOffloadCapabilities(const uint64_t rx_offld_capa)
 
 static int DeviceValidateMTU(const DPDKIfaceConfig *iconf, const struct rte_eth_dev_info *dev_info)
 {
+    SCEnter();
     if (iconf->mtu > dev_info->max_mtu || iconf->mtu < dev_info->min_mtu) {
         SCLogError("%s: MTU out of bounds. "
                    "Min MTU: %" PRIu16 " Max MTU: %" PRIu16,
@@ -1092,53 +1329,22 @@ static void DeviceSetMTU(struct rte_eth_conf *port_conf, uint16_t mtu)
 #endif
 }
 
-/**
- * \param port_id - queried port
- * \param socket_id - socket ID of the queried port
- * \return non-negative number on success, negative on failure (errno)
- */
-static int32_t DeviceSetSocketID(uint16_t port_id, int32_t *socket_id)
+static void PortConfSetInterruptMode(const DPDKIfaceConfig *iconf, struct rte_eth_conf *port_conf)
 {
-    rte_errno = 0;
-    int retval = rte_eth_dev_socket_id(port_id);
-    *socket_id = retval;
-
-#if RTE_VERSION >= RTE_VERSION_NUM(22, 11, 0, 0) // DPDK API changed since 22.11
-    retval = -rte_errno;
-#else
-    if (retval == SOCKET_ID_ANY)
-        retval = 0; // DPDK couldn't determine socket ID of a port
-#endif
-
-    return retval;
-}
-
-static void DeviceInitPortConf(const DPDKIfaceConfig *iconf,
-        const struct rte_eth_dev_info *dev_info, struct rte_eth_conf *port_conf)
-{
-    DumpRXOffloadCapabilities(dev_info->rx_offload_capa);
-    *port_conf = (struct rte_eth_conf){
-            .rxmode = {
-                    .mq_mode = RTE_ETH_MQ_RX_NONE,
-                    .offloads = 0, // turn every offload off to prevent any packet modification
-            },
-            .txmode = {
-                    .mq_mode = RTE_ETH_MQ_TX_NONE,
-                    .offloads = 0,
-            },
-    };
-
     SCLogConfig("%s: interrupt mode is %s", iconf->iface,
             iconf->flags & DPDK_IRQ_MODE ? "enabled" : "disabled");
     if (iconf->flags & DPDK_IRQ_MODE)
         port_conf->intr_conf.rxq = 1;
+}
 
-    // configure RX offloads
+static void PortConfSetRSSConf(const DPDKIfaceConfig *iconf,
+        const struct rte_eth_dev_info *dev_info, struct rte_eth_conf *port_conf)
+{
     if (dev_info->rx_offload_capa & RTE_ETH_RX_OFFLOAD_RSS_HASH) {
         if (iconf->nb_rx_queues > 1) {
             SCLogConfig("%s: RSS enabled for %d queues", iconf->iface, iconf->nb_rx_queues);
             port_conf->rx_adv_conf.rss_conf = (struct rte_eth_rss_conf){
-                .rss_key = rss_hkey,
+                .rss_key = RSS_HKEY,
                 .rss_key_len = RSS_HKEY_LEN,
                 .rss_hf = iconf->rss_hf,
             };
@@ -1169,7 +1375,11 @@ static void DeviceInitPortConf(const DPDKIfaceConfig *iconf,
     } else {
         SCLogConfig("%s: RSS not supported", iconf->iface);
     }
+}
 
+static void PortConfSetChsumOffload(const DPDKIfaceConfig *iconf,
+        const struct rte_eth_dev_info *dev_info, struct rte_eth_conf *port_conf)
+{
     if (iconf->checksum_mode == CHECKSUM_VALIDATION_DISABLE) {
         SCLogConfig("%s: checksum validation disabled", iconf->iface);
     } else if ((dev_info->rx_offload_capa & RTE_ETH_RX_OFFLOAD_CHECKSUM) ==
@@ -1183,8 +1393,44 @@ static void DeviceInitPortConf(const DPDKIfaceConfig *iconf,
             SCLogConfig("%s: checksum validation enabled (but can be offloaded)", iconf->iface);
         }
     }
+}
 
+static void PortConfSetVlanOffload(const DPDKIfaceConfig *iconf,
+        const struct rte_eth_dev_info *dev_info, struct rte_eth_conf *port_conf)
+{
+    if (iconf->vlan_strip_enabled) {
+        if (dev_info->rx_offload_capa & RTE_ETH_RX_OFFLOAD_VLAN_STRIP) {
+            port_conf->rxmode.offloads |= RTE_ETH_RX_OFFLOAD_VLAN_STRIP;
+            SCLogConfig("%s: hardware VLAN stripping enabled", iconf->iface);
+        } else {
+            SCLogWarning("%s: hardware VLAN stripping enabled but not supported, disabling",
+                    iconf->iface);
+        }
+    }
+}
+
+static void DeviceInitPortConf(const DPDKIfaceConfig *iconf,
+        const struct rte_eth_dev_info *dev_info, struct rte_eth_conf *port_conf)
+{
+    DumpRXOffloadCapabilities(dev_info->rx_offload_capa);
+    *port_conf = (struct rte_eth_conf){
+            .rxmode = {
+                    .mq_mode = RTE_ETH_MQ_RX_NONE,
+                    .offloads = 0, // turn every offload off to prevent any packet modification
+            },
+            .txmode = {
+                    .mq_mode = RTE_ETH_MQ_TX_NONE,
+                    .offloads = 0,
+            },
+    };
+
+    PortConfSetInterruptMode(iconf, port_conf);
+
+    // configure RX offloads
+    PortConfSetRSSConf(iconf, dev_info, port_conf);
+    PortConfSetChsumOffload(iconf, dev_info, port_conf);
     DeviceSetMTU(port_conf, iconf->mtu);
+    PortConfSetVlanOffload(iconf, dev_info, port_conf);
 
     if (dev_info->tx_offload_capa & RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE) {
         port_conf->txmode.offloads |= RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
@@ -1196,26 +1442,33 @@ static int DeviceConfigureQueues(DPDKIfaceConfig *iconf, const struct rte_eth_de
 {
     SCEnter();
     int retval;
-    uint16_t mtu_size;
-    uint16_t mbuf_size;
     struct rte_eth_rxconf rxq_conf;
     struct rte_eth_txconf txq_conf;
 
-    char mempool_name[64];
-    snprintf(mempool_name, 64, "mempool_%.20s", iconf->iface);
-    // +4 for VLAN header
-    mtu_size = iconf->mtu + RTE_ETHER_CRC_LEN + RTE_ETHER_HDR_LEN + 4;
-    mbuf_size = ROUNDUP(mtu_size, 1024) + RTE_PKTMBUF_HEADROOM;
-    SCLogConfig("%s: creating packet mbuf pool %s of size %d, cache size %d, mbuf size %d",
-            iconf->iface, mempool_name, iconf->mempool_size, iconf->mempool_cache_size, mbuf_size);
+    retval = DPDKDeviceResourcesInit(&(iconf->pkt_mempools), iconf->nb_rx_queues);
+    if (retval < 0) {
+        goto cleanup;
+    }
 
-    iconf->pkt_mempool = rte_pktmbuf_pool_create(mempool_name, iconf->mempool_size,
-            iconf->mempool_cache_size, 0, mbuf_size, (int)iconf->socket_id);
-    if (iconf->pkt_mempool == NULL) {
-        retval = -rte_errno;
-        SCLogError("%s: rte_pktmbuf_pool_create failed with code %d (mempool: %s) - %s",
-                iconf->iface, rte_errno, mempool_name, rte_strerror(rte_errno));
-        SCReturnInt(retval);
+    // +4 for VLAN header
+    uint16_t mtu_size = iconf->mtu + RTE_ETHER_CRC_LEN + RTE_ETHER_HDR_LEN + 4;
+    uint16_t mbuf_size = ROUNDUP(mtu_size, 1024) + RTE_PKTMBUF_HEADROOM;
+    // ceil the div so e.g. mp_size of 262144 and 262143 both lead to 65535 on 4 rx queues
+    uint32_t q_mp_sz = (iconf->mempool_size + iconf->nb_rx_queues - 1) / iconf->nb_rx_queues - 1;
+    uint32_t q_mp_cache_sz = MempoolCacheSizeCalculate(q_mp_sz);
+    SCLogInfo("%s: creating %u packet mempools of size %u, cache size %u, mbuf size %u",
+            iconf->iface, iconf->nb_rx_queues, q_mp_sz, q_mp_cache_sz, mbuf_size);
+    for (int i = 0; i < iconf->nb_rx_queues; i++) {
+        char mempool_name[64];
+        snprintf(mempool_name, sizeof(mempool_name), "mp_%d_%.20s", i, iconf->iface);
+        iconf->pkt_mempools->pkt_mp[i] = rte_pktmbuf_pool_create(
+                mempool_name, q_mp_sz, q_mp_cache_sz, 0, mbuf_size, (int)iconf->socket_id);
+        if (iconf->pkt_mempools->pkt_mp[i] == NULL) {
+            retval = -rte_errno;
+            SCLogError("%s: rte_pktmbuf_pool_create failed with code %d (mempool: %s) - %s",
+                    iconf->iface, rte_errno, mempool_name, rte_strerror(rte_errno));
+            goto cleanup;
+        }
     }
 
     for (uint16_t queue_id = 0; queue_id < iconf->nb_rx_queues; queue_id++) {
@@ -1226,39 +1479,47 @@ static int DeviceConfigureQueues(DPDKIfaceConfig *iconf, const struct rte_eth_de
         rxq_conf.rx_thresh.wthresh = 0;
         rxq_conf.rx_free_thresh = 0;
         rxq_conf.rx_drop_en = 0;
-        SCLogConfig("%s: rx queue setup: queue:%d port:%d rx_desc:%d tx_desc:%d rx: hthresh: %d "
-                    "pthresh %d wthresh %d free_thresh %d drop_en %d offloads %lu",
-                iconf->iface, queue_id, iconf->port_id, iconf->nb_rx_desc, iconf->nb_tx_desc,
+        SCLogConfig("%s: setting up RX queue %d: rx_desc: %u offloads: 0x%" PRIx64
+                    " hthresh: %" PRIu8 " pthresh: %" PRIu8 " wthresh: %" PRIu8
+                    " free_thresh: %" PRIu16 " drop_en: %" PRIu8,
+                iconf->iface, queue_id, iconf->nb_rx_desc, rxq_conf.offloads,
                 rxq_conf.rx_thresh.hthresh, rxq_conf.rx_thresh.pthresh, rxq_conf.rx_thresh.wthresh,
-                rxq_conf.rx_free_thresh, rxq_conf.rx_drop_en, rxq_conf.offloads);
+                rxq_conf.rx_free_thresh, rxq_conf.rx_drop_en);
 
         retval = rte_eth_rx_queue_setup(iconf->port_id, queue_id, iconf->nb_rx_desc,
-                iconf->socket_id, &rxq_conf, iconf->pkt_mempool);
+                (unsigned int)iconf->socket_id, &rxq_conf, iconf->pkt_mempools->pkt_mp[queue_id]);
         if (retval < 0) {
-            rte_mempool_free(iconf->pkt_mempool);
-            SCLogError(
-                    "%s: rte_eth_rx_queue_setup failed with code %d for device queue %u of port %u",
-                    iconf->iface, retval, queue_id, iconf->port_id);
-            SCReturnInt(retval);
+            SCLogError("%s: failed to setup RX queue %u: %s", iconf->iface, queue_id,
+                    rte_strerror(-retval));
+            goto cleanup;
         }
     }
 
     for (uint16_t queue_id = 0; queue_id < iconf->nb_tx_queues; queue_id++) {
         txq_conf = dev_info->default_txconf;
         txq_conf.offloads = port_conf->txmode.offloads;
-        SCLogConfig("%s: tx queue setup: queue:%d port:%d", iconf->iface, queue_id, iconf->port_id);
-        retval = rte_eth_tx_queue_setup(
-                iconf->port_id, queue_id, iconf->nb_tx_desc, iconf->socket_id, &txq_conf);
+        SCLogConfig("%s: setting up TX queue %d: tx_desc: %" PRIu16 " tx: offloads: 0x%" PRIx64
+                    " hthresh: %" PRIu8 " pthresh: %" PRIu8 " wthresh: %" PRIu8
+                    " tx_free_thresh: %" PRIu16 " tx_rs_thresh: %" PRIu16
+                    " txq_deferred_start: %" PRIu8,
+                iconf->iface, queue_id, iconf->nb_tx_desc, txq_conf.offloads,
+                txq_conf.tx_thresh.hthresh, txq_conf.tx_thresh.pthresh, txq_conf.tx_thresh.wthresh,
+                txq_conf.tx_free_thresh, txq_conf.tx_rs_thresh, txq_conf.tx_deferred_start);
+        retval = rte_eth_tx_queue_setup(iconf->port_id, queue_id, iconf->nb_tx_desc,
+                (unsigned int)iconf->socket_id, &txq_conf);
         if (retval < 0) {
-            rte_mempool_free(iconf->pkt_mempool);
-            SCLogError(
-                    "%s: rte_eth_tx_queue_setup failed with code %d for device queue %u of port %u",
-                    iconf->iface, retval, queue_id, iconf->port_id);
-            SCReturnInt(retval);
+            SCLogError("%s: failed to setup TX queue %u: %s", iconf->iface, queue_id,
+                    rte_strerror(-retval));
+            retval = -1; // the error code explained, informing about failure
+            goto cleanup;
         }
     }
 
     SCReturnInt(0);
+
+cleanup:
+    DPDKDeviceResourcesDeinit(&iconf->pkt_mempools);
+    SCReturnInt(retval);
 }
 
 static int DeviceValidateOutIfaceConfig(DPDKIfaceConfig *iconf)
@@ -1311,26 +1572,25 @@ static int DeviceValidateOutIfaceConfig(DPDKIfaceConfig *iconf)
 static int DeviceConfigureIPS(DPDKIfaceConfig *iconf)
 {
     SCEnter();
-    int retval;
-
     if (iconf->out_iface != NULL) {
-        retval = rte_eth_dev_get_port_by_name(iconf->out_iface, &iconf->out_port_id);
-        if (retval != 0) {
-            SCLogError("%s: failed to obtain out iface %s port id (err=%d)", iconf->iface,
-                    iconf->out_iface, retval);
-            SCReturnInt(retval);
+        if (!rte_eth_dev_is_valid_port(iconf->out_port_id)) {
+            SCLogError("%s: retrieved copy interface port ID \"%d\" is invalid or the device is "
+                       "not attached ",
+                    iconf->iface, iconf->out_port_id);
+            SCReturnInt(-ENODEV);
         }
-
         int32_t out_port_socket_id;
-        retval = DeviceSetSocketID(iconf->port_id, &out_port_socket_id);
+        int retval = DPDKDeviceSetSocketID(iconf->out_port_id, &out_port_socket_id);
         if (retval < 0) {
-            SCLogError("%s: invalid socket id (err=%d)", iconf->out_iface, retval);
+            SCLogError("%s: invalid socket id: %s", iconf->out_iface, rte_strerror(-retval));
             SCReturnInt(retval);
         }
 
         if (iconf->socket_id != out_port_socket_id) {
-            SCLogWarning("%s: out iface %s is not on the same NUMA node", iconf->iface,
-                    iconf->out_iface);
+            SCLogWarning(
+                    "%s: out iface %s is not on the same NUMA node (%s - NUMA %d, %s - NUMA %d)",
+                    iconf->iface, iconf->out_iface, iconf->iface, iconf->socket_id,
+                    iconf->out_iface, out_port_socket_id);
         }
 
         retval = DeviceValidateOutIfaceConfig(iconf);
@@ -1360,10 +1620,11 @@ static int DeviceConfigureIPS(DPDKIfaceConfig *iconf)
 static int32_t DeviceVerifyPostConfigure(
         const DPDKIfaceConfig *iconf, const struct rte_eth_dev_info *dev_info)
 {
+    SCEnter();
     struct rte_eth_dev_info post_conf_dev_info = { 0 };
     int32_t ret = rte_eth_dev_info_get(iconf->port_id, &post_conf_dev_info);
     if (ret < 0) {
-        SCLogError("%s: getting device info failed (err: %s)", iconf->iface, rte_strerror(-ret));
+        SCLogError("%s: getting device info failed: %s", iconf->iface, rte_strerror(-ret));
         SCReturnInt(ret);
     }
 
@@ -1392,27 +1653,22 @@ static int32_t DeviceVerifyPostConfigure(
 static int DeviceConfigure(DPDKIfaceConfig *iconf)
 {
     SCEnter();
-    int32_t retval = rte_eth_dev_get_port_by_name(iconf->iface, &(iconf->port_id));
-    if (retval < 0) {
-        SCLogError("%s: getting port id failed (err: %s)", iconf->iface, rte_strerror(-retval));
-        SCReturnInt(retval);
-    }
-
     if (!rte_eth_dev_is_valid_port(iconf->port_id)) {
-        SCLogError("%s: specified port %d is invalid", iconf->iface, iconf->port_id);
-        SCReturnInt(retval);
+        SCLogError("%s: retrieved port ID \"%d\" is invalid or the device is not attached ",
+                iconf->iface, iconf->port_id);
+        SCReturnInt(-ENODEV);
     }
 
-    retval = DeviceSetSocketID(iconf->port_id, &iconf->socket_id);
+    int32_t retval = DPDKDeviceSetSocketID(iconf->port_id, &iconf->socket_id);
     if (retval < 0) {
-        SCLogError("%s: invalid socket id (err: %s)", iconf->iface, rte_strerror(-retval));
+        SCLogError("%s: invalid socket id: %s", iconf->iface, rte_strerror(-retval));
         SCReturnInt(retval);
     }
 
     struct rte_eth_dev_info dev_info = { 0 };
     retval = rte_eth_dev_info_get(iconf->port_id, &dev_info);
     if (retval < 0) {
-        SCLogError("%s: getting device info failed (err: %s)", iconf->iface, rte_strerror(-retval));
+        SCLogError("%s: getting device info failed: %s", iconf->iface, rte_strerror(-retval));
         SCReturnInt(retval);
     }
 
@@ -1442,8 +1698,7 @@ static int DeviceConfigure(DPDKIfaceConfig *iconf)
     retval = rte_eth_dev_configure(
             iconf->port_id, iconf->nb_rx_queues, iconf->nb_tx_queues, &port_conf);
     if (retval < 0) {
-        SCLogError("%s: failed to configure the device (port %u, err %s)", iconf->iface,
-                iconf->port_id, rte_strerror(-retval));
+        SCLogError("%s: failed to configure the device: %s", iconf->iface, rte_strerror(-retval));
         SCReturnInt(retval);
     }
 
@@ -1451,12 +1706,17 @@ static int DeviceConfigure(DPDKIfaceConfig *iconf)
     if (retval < 0)
         return retval;
 
+    uint16_t tmp_nb_rx_desc = iconf->nb_rx_desc;
+    uint16_t tmp_nb_tx_desc = iconf->nb_tx_desc;
     retval = rte_eth_dev_adjust_nb_rx_tx_desc(
             iconf->port_id, &iconf->nb_rx_desc, &iconf->nb_tx_desc);
     if (retval != 0) {
-        SCLogError("%s: failed to adjust device queue descriptors (port %u, err %d)", iconf->iface,
-                iconf->port_id, retval);
+        SCLogError("%s: failed to adjust device queue descriptors: %s", iconf->iface,
+                rte_strerror(-retval));
         SCReturnInt(retval);
+    } else if (tmp_nb_rx_desc != iconf->nb_rx_desc || tmp_nb_tx_desc != iconf->nb_tx_desc) {
+        SCLogWarning("%s: device queue descriptors adjusted (RX: from %u to %u, TX: from %u to %u)",
+                iconf->iface, tmp_nb_rx_desc, iconf->nb_rx_desc, tmp_nb_tx_desc, iconf->nb_tx_desc);
     }
 
     retval = iconf->flags & DPDK_MULTICAST ? rte_eth_allmulticast_enable(iconf->port_id)
@@ -1466,17 +1726,15 @@ static int DeviceConfigure(DPDKIfaceConfig *iconf)
         // when multicast is enabled but set to disable or vice versa
         if ((retval == 1 && !(iconf->flags & DPDK_MULTICAST)) ||
                 (retval == 0 && (iconf->flags & DPDK_MULTICAST))) {
-            SCLogError("%s: Allmulticast setting of port (%" PRIu16
-                       ") can not be configured. Set it to %s",
-                    iconf->iface, iconf->port_id, retval == 1 ? "true" : "false");
+            SCLogWarning("%s: cannot configure allmulticast, the port is %sin allmulticast mode",
+                    iconf->iface, retval == 1 ? "" : "not ");
         } else if (retval < 0) {
-            SCLogError("%s: failed to get multicast mode (port %u, err %d)", iconf->iface,
-                    iconf->port_id, retval);
+            SCLogError("%s: failed to get multicast mode: %s", iconf->iface, rte_strerror(-retval));
             SCReturnInt(retval);
         }
     } else if (retval < 0) {
-        SCLogError("%s: error when changing multicast setting (port %u err %d)", iconf->iface,
-                iconf->port_id, retval);
+        SCLogError("%s: error when changing multicast setting: %s", iconf->iface,
+                rte_strerror(-retval));
         SCReturnInt(retval);
     }
 
@@ -1486,18 +1744,17 @@ static int DeviceConfigure(DPDKIfaceConfig *iconf)
         retval = rte_eth_promiscuous_get(iconf->port_id);
         if ((retval == 1 && !(iconf->flags & DPDK_PROMISC)) ||
                 (retval == 0 && (iconf->flags & DPDK_PROMISC))) {
-            SCLogError("%s: promiscuous setting of port (%" PRIu16
-                       ") can not be configured. Set it to %s",
-                    iconf->iface, iconf->port_id, retval == 1 ? "true" : "false");
+            SCLogError("%s: cannot configure promiscuous mode, the port is in %spromiscuous mode",
+                    iconf->iface, retval == 1 ? "" : "non-");
             SCReturnInt(TM_ECODE_FAILED);
         } else if (retval < 0) {
-            SCLogError("%s: failed to get promiscuous mode (port %u, err=%d)", iconf->iface,
-                    iconf->port_id, retval);
+            SCLogError(
+                    "%s: failed to get promiscuous mode: %s", iconf->iface, rte_strerror(-retval));
             SCReturnInt(retval);
         }
     } else if (retval < 0) {
-        SCLogError("%s: error when changing promiscuous setting (port %u, err %d)", iconf->iface,
-                iconf->port_id, retval);
+        SCLogError("%s: error when changing promiscuous setting: %s", iconf->iface,
+                rte_strerror(-retval));
         SCReturnInt(TM_ECODE_FAILED);
     }
 
@@ -1505,18 +1762,17 @@ static int DeviceConfigure(DPDKIfaceConfig *iconf)
     SCLogConfig("%s: setting MTU to %d", iconf->iface, iconf->mtu);
     retval = rte_eth_dev_set_mtu(iconf->port_id, iconf->mtu);
     if (retval == -ENOTSUP) {
-        SCLogWarning("%s: changing MTU on port %u is not supported, ignoring the setting",
-                iconf->iface, iconf->port_id);
         // if it is not possible to set the MTU, retrieve it
         retval = rte_eth_dev_get_mtu(iconf->port_id, &iconf->mtu);
         if (retval < 0) {
-            SCLogError("%s: failed to retrieve MTU (port %u, err %d)", iconf->iface, iconf->port_id,
-                    retval);
+            SCLogError("%s: failed to retrieve MTU: %s", iconf->iface, rte_strerror(-retval));
             SCReturnInt(retval);
         }
+        SCLogWarning(
+                "%s: changing MTU is not supported, current MTU: %u", iconf->iface, iconf->mtu);
     } else if (retval < 0) {
-        SCLogError("%s: failed to set MTU to %u (port %u, err %d)", iconf->iface, iconf->mtu,
-                iconf->port_id, retval);
+        SCLogError(
+                "%s: failed to set MTU to %u: %s", iconf->iface, iconf->mtu, rte_strerror(-retval));
         SCReturnInt(retval);
     }
 
@@ -1550,7 +1806,7 @@ static void *ParseDpdkConfigAndConfigureDevice(const char *iface)
     if (retval < 0) { // handles both configure attempts
         iconf->DerefFunc(iconf);
         if (rte_eal_cleanup() != 0)
-            FatalError("EAL cleanup failed: %s", strerror(-retval));
+            FatalError("EAL cleanup failed: %s", rte_strerror(-retval));
 
         if (retval == -ENOMEM) {
             FatalError("%s: memory allocation failed - consider"
@@ -1566,14 +1822,21 @@ static void *ParseDpdkConfigAndConfigureDevice(const char *iface)
     (void)SC_ATOMIC_ADD(iconf->ref, iconf->threads);
     // This counter is increased by worker threads that individually pick queue IDs.
     SC_ATOMIC_RESET(iconf->queue_id);
-    SC_ATOMIC_RESET(iconf->inconsitent_numa_cnt);
+    SC_ATOMIC_RESET(iconf->inconsistent_numa_cnt);
+    iconf->workers_sync = SCCalloc(1, sizeof(*iconf->workers_sync));
+    if (iconf->workers_sync == NULL) {
+        FatalError("Failed to allocate memory for workers_sync");
+    }
+    SC_ATOMIC_RESET(iconf->workers_sync->worker_checked_in);
+    iconf->workers_sync->worker_cnt = iconf->threads;
 
     // initialize LiveDev DPDK values
     LiveDevice *ldev_instance = LiveGetDevice(iface);
     if (ldev_instance == NULL) {
         FatalError("Device %s is not registered as a live device", iface);
     }
-    ldev_instance->dpdk_vars.pkt_mp = iconf->pkt_mempool;
+    ldev_instance->dpdk_vars = iconf->pkt_mempools;
+    iconf->pkt_mempools = NULL;
     return iconf;
 }
 
@@ -1590,7 +1853,7 @@ static void *ParseDpdkConfigAndConfigureDevice(const char *iface)
  * \return a DPDKIfaceConfig corresponding to the interface name
  */
 
-static int DPDKConfigGetThreadsCount(void *conf)
+static uint16_t DPDKConfigGetThreadsCount(void *conf)
 {
     if (conf == NULL)
         FatalError("Configuration file is NULL");
@@ -1605,13 +1868,13 @@ static int DPDKRunModeIsIPS(void)
 {
     /* Find initial node */
     const char dpdk_node_query[] = "dpdk.interfaces";
-    ConfNode *dpdk_node = ConfGetNode(dpdk_node_query);
+    SCConfNode *dpdk_node = SCConfGetNode(dpdk_node_query);
     if (dpdk_node == NULL) {
         FatalError("Unable to get %s configuration node", dpdk_node_query);
     }
 
     const char default_iface[] = "default";
-    ConfNode *if_default = ConfNodeLookupKeyValue(dpdk_node, "interface", default_iface);
+    SCConfNode *if_default = SCConfNodeLookupKeyValue(dpdk_node, "interface", default_iface);
     int nlive = LiveGetDeviceCount();
     bool has_ips = false;
     bool has_ids = false;
@@ -1620,7 +1883,7 @@ static int DPDKRunModeIsIPS(void)
         if (live_dev == NULL)
             FatalError("Unable to get device id %d from LiveDevice list", ldev);
 
-        ConfNode *if_root = ConfFindDeviceConfig(dpdk_node, live_dev);
+        SCConfNode *if_root = ConfFindDeviceConfig(dpdk_node, live_dev);
         if (if_root == NULL) {
             if (if_default == NULL)
                 FatalError("Unable to get %s or %s  interface", live_dev, default_iface);
@@ -1629,7 +1892,9 @@ static int DPDKRunModeIsIPS(void)
         }
 
         const char *copymodestr = NULL;
-        if (ConfGetChildValueWithDefault(if_root, if_default, "copy-mode", &copymodestr) == 1) {
+        const char *copyifacestr = NULL;
+        if (SCConfGetChildValueWithDefault(if_root, if_default, "copy-mode", &copymodestr) == 1 &&
+                SCConfGetChildValue(if_root, "copy-iface", &copyifacestr) == 1) {
             if (strcmp(copymodestr, "ips") == 0) {
                 has_ips = true;
             } else {
@@ -1649,12 +1914,14 @@ static int DPDKRunModeIsIPS(void)
     return has_ips;
 }
 
-static void DPDKRunModeEnableIPS(void)
+static int DPDKRunModeEnableIPS(void)
 {
-    if (DPDKRunModeIsIPS()) {
+    int r = DPDKRunModeIsIPS();
+    if (r == 1) {
         SCLogInfo("Setting IPS mode");
         EngineModeSetIPS();
     }
+    return r;
 }
 
 const char *RunModeDpdkGetDefaultMode(void)

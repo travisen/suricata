@@ -66,6 +66,7 @@ void DetectDsizeRegister (void)
     sigmatch_table[DETECT_DSIZE].Match = DetectDsizeMatch;
     sigmatch_table[DETECT_DSIZE].Setup = DetectDsizeSetup;
     sigmatch_table[DETECT_DSIZE].Free  = DetectDsizeFree;
+    sigmatch_table[DETECT_DSIZE].flags = SIGMATCH_SUPPORT_FIREWALL | SIGMATCH_INFO_UINT16;
 #ifdef UNITTESTS
     sigmatch_table[DETECT_DSIZE].RegisterTests = DsizeRegisterTests;
 #endif
@@ -92,9 +93,7 @@ static int DetectDsizeMatch (DetectEngineThreadCtx *det_ctx, Packet *p,
     SCEnter();
     int ret = 0;
 
-    if (PKT_IS_PSEUDOPKT(p)) {
-        SCReturnInt(0);
-    }
+    DEBUG_VALIDATE_BUG_ON(PKT_IS_PSEUDOPKT(p));
 
     const DetectU16Data *dd = (const DetectU16Data *)ctx;
 
@@ -123,7 +122,7 @@ static int DetectDsizeSetup (DetectEngineCtx *de_ctx, Signature *s, const char *
     if (DetectGetLastSMFromLists(s, DETECT_DSIZE, -1)) {
         SCLogError("Can't use 2 or more dsizes in "
                    "the same sig.  Invalidating signature.");
-        goto error;
+        return -1;
     }
 
     SCLogDebug("\'%s\'", rawstr);
@@ -131,16 +130,16 @@ static int DetectDsizeSetup (DetectEngineCtx *de_ctx, Signature *s, const char *
     dd = DetectU16Parse(rawstr);
     if (dd == NULL) {
         SCLogError("Parsing \'%s\' failed", rawstr);
-        goto error;
+        return -1;
     }
 
     /* Okay so far so good, lets get this into a SigMatch
      * and put it in the Signature. */
-    SigMatch *sm = SigMatchAppendSMToList(
+    SigMatch *sm = SCSigMatchAppendSMToList(
             de_ctx, s, DETECT_DSIZE, (SigMatchCtx *)dd, DETECT_SM_LIST_MATCH);
     if (sm == NULL) {
-        rs_detect_u16_free(dd);
-        goto error;
+        SCDetectU16Free(dd);
+        return -1;
     }
 
     SCLogDebug("dd->arg1 %" PRIu16 ", dd->arg2 %" PRIu16 ", dd->mode %" PRIu8 "", dd->arg1,
@@ -154,9 +153,6 @@ static int DetectDsizeSetup (DetectEngineCtx *de_ctx, Signature *s, const char *
     }
 
     return 0;
-
-error:
-    return -1;
 }
 
 /**
@@ -167,7 +163,7 @@ error:
  */
 void DetectDsizeFree(DetectEngineCtx *de_ctx, void *de_ptr)
 {
-    rs_detect_u16_free(de_ptr);
+    SCDetectU16Free(de_ptr);
 }
 
 /* prefilter code */
@@ -175,10 +171,6 @@ void DetectDsizeFree(DetectEngineCtx *de_ctx, void *de_ptr)
 static void
 PrefilterPacketDsizeMatch(DetectEngineThreadCtx *det_ctx, Packet *p, const void *pectx)
 {
-    if (PKT_IS_PSEUDOPKT(p)) {
-        SCReturn;
-    }
-
     const PrefilterPacketHeaderCtx *ctx = pectx;
     if (!PrefilterPacketHeaderExtraMatch(ctx, p))
         return;
@@ -197,27 +189,20 @@ PrefilterPacketDsizeMatch(DetectEngineThreadCtx *det_ctx, Packet *p, const void 
 
 static int PrefilterSetupDsize(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
 {
-    return PrefilterSetupPacketHeader(de_ctx, sgh, DETECT_DSIZE, PrefilterPacketU16Set,
-            PrefilterPacketU16Compare, PrefilterPacketDsizeMatch);
+    return PrefilterSetupPacketHeader(de_ctx, sgh, DETECT_DSIZE, SIG_MASK_REQUIRE_REAL_PKT,
+            PrefilterPacketU16Set, PrefilterPacketU16Compare, PrefilterPacketDsizeMatch);
 }
 
 static bool PrefilterDsizeIsPrefilterable(const Signature *s)
 {
-    const SigMatch *sm;
-    for (sm = s->init_data->smlists[DETECT_SM_LIST_MATCH] ; sm != NULL; sm = sm->next) {
-        switch (sm->type) {
-            case DETECT_DSIZE:
-                return true;
-        }
-    }
-    return false;
+    return PrefilterIsPrefilterableById(s, DETECT_DSIZE);
 }
 
 /** \brief get max dsize "depth"
  *  \param s signature to get dsize value from
  *  \retval depth or negative value
  */
-int SigParseGetMaxDsize(const Signature *s)
+int SigParseGetMaxDsize(const Signature *s, uint16_t *dsize)
 {
     if (s->flags & SIG_FLAG_DSIZE && s->init_data->dsize_sm != NULL) {
         const DetectU16Data *dd = (const DetectU16Data *)s->init_data->dsize_sm->ctx;
@@ -226,9 +211,11 @@ int SigParseGetMaxDsize(const Signature *s)
             case DETECT_UINT_LT:
             case DETECT_UINT_EQ:
             case DETECT_UINT_NE:
-                return dd->arg1;
+                *dsize = dd->arg1;
+                SCReturnInt(0);
             case DETECT_UINT_RA:
-                return dd->arg2;
+                *dsize = dd->arg2;
+                SCReturnInt(0);
             case DETECT_UINT_GT:
             default:
                 SCReturnInt(-2);
@@ -302,8 +289,8 @@ int SigParseMaxRequiredDsize(const Signature *s)
         SCReturnInt(-1);
     }
 
-    const int dsize = SigParseGetMaxDsize(s);
-    if (dsize < 0) {
+    uint16_t dsize;
+    if (SigParseGetMaxDsize(s, &dsize) < 0) {
         /* nothing to do */
         SCReturnInt(-1);
     }
@@ -337,8 +324,8 @@ void SigParseApplyDsizeToContent(Signature *s)
     if (s->flags & SIG_FLAG_DSIZE) {
         SigParseSetDsizePair(s);
 
-        int dsize = SigParseGetMaxDsize(s);
-        if (dsize < 0) {
+        uint16_t dsize;
+        if (SigParseGetMaxDsize(s, &dsize) < 0) {
             /* nothing to do */
             return;
         }
@@ -594,23 +581,19 @@ static int DetectDsizeIcmpv6Test01(void)
     Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
 
-    IPV6Hdr ip6h;
-    ThreadVars tv;
     DecodeThreadVars dtv;
     ThreadVars th_v;
     DetectEngineThreadCtx *det_ctx = NULL;
 
-    memset(&tv, 0, sizeof(ThreadVars));
     memset(&dtv, 0, sizeof(DecodeThreadVars));
-    memset(&ip6h, 0, sizeof(IPV6Hdr));
     memset(&th_v, 0, sizeof(ThreadVars));
+    StatsThreadInit(&th_v.stats);
 
     FlowInitConfig(FLOW_QUIET);
     p->src.family = AF_INET6;
     p->dst.family = AF_INET6;
-    p->ip6h = &ip6h;
 
-    DecodeIPV6(&tv, &dtv, p, raw_icmpv6, sizeof(raw_icmpv6));
+    DecodeIPV6(&th_v, &dtv, p, raw_icmpv6, sizeof(raw_icmpv6));
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     FAIL_IF_NULL(de_ctx);
@@ -637,10 +620,9 @@ static int DetectDsizeIcmpv6Test01(void)
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
 
-    PacketRecycle(p);
+    PacketFree(p);
     FlowShutdown();
-    SCFree(p);
-
+    StatsThreadCleanup(&th_v.stats);
     PASS;
 }
 

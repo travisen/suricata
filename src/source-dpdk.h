@@ -21,10 +21,11 @@
  * \author Lukas Sismis <lukas.sismis@gmail.com>
  */
 
-#ifndef __SOURCE_DPDK_H__
-#define __SOURCE_DPDK_H__
+#ifndef SURICATA_SOURCE_DPDK_H
+#define SURICATA_SOURCE_DPDK_H
 
 #include "suricata-common.h"
+#include "util-dpdk.h"
 
 #ifdef HAVE_DPDK
 #include <rte_ethdev.h>
@@ -43,13 +44,18 @@ typedef enum { DPDK_COPY_MODE_NONE, DPDK_COPY_MODE_TAP, DPDK_COPY_MODE_IPS } Dpd
 #define DPDK_RX_CHECKSUM_OFFLOAD (1 << 4) /**< Enable chsum offload */
 
 void DPDKSetTimevalOfMachineStart(void);
+
+typedef struct DPDKWorkerSync_ {
+    uint16_t worker_cnt;
+    SC_ATOMIC_DECLARE(uint16_t, worker_checked_in);
+} DPDKWorkerSync;
+
 typedef struct DPDKIfaceConfig_ {
 #ifdef HAVE_DPDK
     char iface[RTE_ETH_NAME_MAX_LEN];
     uint16_t port_id;
     int32_t socket_id;
-    /* number of threads - zero means all available */
-    int threads;
+    uint16_t threads;
     /* IPS mode */
     DpdkCopyModeEnum copy_mode;
     const char *out_iface;
@@ -60,17 +66,20 @@ typedef struct DPDKIfaceConfig_ {
     uint64_t rss_hf;
     /* set maximum transmission unit of the device in bytes */
     uint16_t mtu;
+    bool vlan_strip_enabled;
     uint16_t nb_rx_queues;
     uint16_t nb_rx_desc;
     uint16_t nb_tx_queues;
     uint16_t nb_tx_desc;
     uint32_t mempool_size;
     uint32_t mempool_cache_size;
-    struct rte_mempool *pkt_mempool;
-    SC_ATOMIC_DECLARE(unsigned int, ref);
+    DPDKDeviceResources *pkt_mempools;
+    uint16_t linkup_timeout; // in seconds how long to wait for link to come up
+    SC_ATOMIC_DECLARE(uint16_t, ref);
     /* threads bind queue id one by one */
     SC_ATOMIC_DECLARE(uint16_t, queue_id);
-    SC_ATOMIC_DECLARE(uint16_t, inconsitent_numa_cnt);
+    SC_ATOMIC_DECLARE(uint16_t, inconsistent_numa_cnt);
+    DPDKWorkerSync *workers_sync;
     void (*DerefFunc)(void *);
 
     struct rte_flow *flow[100];
@@ -86,10 +95,10 @@ typedef struct DPDKPacketVars_ {
     struct rte_mbuf *mbuf;
     uint16_t out_port_id;
     uint16_t out_queue_id;
-    uint8_t copy_mode;
+    DpdkCopyModeEnum copy_mode;
 } DPDKPacketVars;
 
 void TmModuleReceiveDPDKRegister(void);
 void TmModuleDecodeDPDKRegister(void);
 
-#endif /* __SOURCE_DPDK_H__ */
+#endif /* SURICATA_SOURCE_DPDK_H */

@@ -30,6 +30,7 @@
 #include "detect.h"
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-content.h"
 #include "detect-engine-uint.h"
 
@@ -40,37 +41,38 @@
 /*prototypes*/
 static int DetectBsizeSetup (DetectEngineCtx *, Signature *, const char *);
 static void DetectBsizeFree (DetectEngineCtx *, void *);
-static int SigParseGetMaxBsize(const DetectU64Data *bsz);
+static int SigParseGetMaxBsize(const DetectU64Data *bsz, uint64_t *bsize);
 #ifdef UNITTESTS
 static void DetectBsizeRegisterTests (void);
 #endif
 
-bool DetectBsizeValidateContentCallback(Signature *s, const SignatureInitDataBuffer *b)
+bool DetectBsizeValidateContentCallback(const Signature *s, const SignatureInitDataBuffer *b)
 {
-    int bsize = -1;
+    uint64_t bsize;
+    int retval = -1;
     const DetectU64Data *bsz;
     for (const SigMatch *sm = b->head; sm != NULL; sm = sm->next) {
         if (sm->type == DETECT_BSIZE) {
             bsz = (const DetectU64Data *)sm->ctx;
-            bsize = SigParseGetMaxBsize(bsz);
+            retval = SigParseGetMaxBsize(bsz, &bsize);
             break;
         }
     }
 
-    if (bsize == -1) {
+    if (retval == -1) {
         return true;
     }
 
     uint64_t needed;
-    if (bsize >= 0) {
+    if (retval == 0) {
         int len, offset;
         SigParseRequiredContentSize(s, bsize, b->head, &len, &offset);
-        SCLogDebug("bsize: %d; len: %d; offset: %d [%s]", bsize, len, offset, s->sig_str);
+        SCLogDebug("bsize: %" PRIu64 "; len: %d; offset: %d [%s]", bsize, len, offset, s->sig_str);
         needed = len;
-        if (len > bsize) {
+        if ((uint64_t)len > bsize) {
             goto value_error;
         }
-        if ((len + offset) > bsize) {
+        if ((uint64_t)(len + offset) > bsize) {
             needed += offset;
             goto value_error;
         }
@@ -103,6 +105,7 @@ void DetectBsizeRegister(void)
     sigmatch_table[DETECT_BSIZE].Match = NULL;
     sigmatch_table[DETECT_BSIZE].Setup = DetectBsizeSetup;
     sigmatch_table[DETECT_BSIZE].Free = DetectBsizeFree;
+    sigmatch_table[DETECT_BSIZE].flags = SIGMATCH_SUPPORT_FIREWALL | SIGMATCH_INFO_UINT64;
 #ifdef UNITTESTS
     sigmatch_table[DETECT_BSIZE].RegisterTests = DetectBsizeRegisterTests;
 #endif
@@ -157,28 +160,16 @@ int DetectBsizeMatch(const SigMatchCtx *ctx, const uint64_t buffer_size, bool eo
     return 0;
 }
 
-/**
- * \brief This function is used to parse bsize options passed via bsize: keyword
- *
- * \param bsizestr Pointer to the user provided bsize options
- *
- * \retval bsized pointer to DetectU64Data on success
- * \retval NULL on failure
- */
-
-static DetectU64Data *DetectBsizeParse(const char *str)
-{
-    return DetectU64Parse(str);
-}
-
-static int SigParseGetMaxBsize(const DetectU64Data *bsz)
+static int SigParseGetMaxBsize(const DetectU64Data *bsz, uint64_t *bsize)
 {
     switch (bsz->mode) {
         case DETECT_UINT_LT:
         case DETECT_UINT_EQ:
-            return bsz->arg1;
+            *bsize = bsz->arg1;
+            SCReturnInt(0);
         case DETECT_UINT_RA:
-            return bsz->arg2;
+            *bsize = bsz->arg2;
+            SCReturnInt(0);
         case DETECT_UINT_GT:
         default:
             SCReturnInt(-2);
@@ -207,11 +198,11 @@ static int DetectBsizeSetup (DetectEngineCtx *de_ctx, Signature *s, const char *
     if (list == DETECT_SM_LIST_NOTSET)
         SCReturnInt(-1);
 
-    DetectU64Data *bsz = DetectBsizeParse(sizestr);
+    DetectU64Data *bsz = DetectU64Parse(sizestr);
     if (bsz == NULL)
-        goto error;
+        SCReturnInt(-1);
 
-    if (SigMatchAppendSMToList(de_ctx, s, DETECT_BSIZE, (SigMatchCtx *)bsz, list) == NULL) {
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_BSIZE, (SigMatchCtx *)bsz, list) == NULL) {
         goto error;
     }
 
@@ -233,7 +224,7 @@ void DetectBsizeFree(DetectEngineCtx *de_ctx, void *ptr)
         return;
 
     DetectU64Data *bsz = (DetectU64Data *)ptr;
-    rs_detect_u64_free(bsz);
+    SCDetectU64Free(bsz);
 }
 
 #ifdef UNITTESTS

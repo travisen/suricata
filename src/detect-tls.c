@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2011-2012 ANSSI
- * Copyright (C) 2022 Open Information Security Foundation
+ * Copyright (C) 2022-2025 Open Information Security Foundation
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -100,39 +100,41 @@ static int g_tls_cert_fingerprint_list_id = 0;
  */
 void DetectTlsRegister (void)
 {
-    sigmatch_table[DETECT_AL_TLS_SUBJECT].name = "tls.subject";
-    sigmatch_table[DETECT_AL_TLS_SUBJECT].desc = "match TLS/SSL certificate Subject field";
-    sigmatch_table[DETECT_AL_TLS_SUBJECT].url = "/rules/tls-keywords.html#tls-subject";
-    sigmatch_table[DETECT_AL_TLS_SUBJECT].AppLayerTxMatch = DetectTlsSubjectMatch;
-    sigmatch_table[DETECT_AL_TLS_SUBJECT].Setup = DetectTlsSubjectSetup;
-    sigmatch_table[DETECT_AL_TLS_SUBJECT].Free  = DetectTlsSubjectFree;
-    sigmatch_table[DETECT_AL_TLS_SUBJECT].flags = SIGMATCH_QUOTES_MANDATORY|SIGMATCH_HANDLE_NEGATION;
-    sigmatch_table[DETECT_AL_TLS_SUBJECT].alternative = DETECT_AL_TLS_CERT_SUBJECT;
+    sigmatch_table[DETECT_TLS_SUBJECT].name = "tls.subject";
+    sigmatch_table[DETECT_TLS_SUBJECT].desc = "match TLS/SSL certificate Subject field";
+    sigmatch_table[DETECT_TLS_SUBJECT].url = "/rules/tls-keywords.html#tls-subject";
+    sigmatch_table[DETECT_TLS_SUBJECT].AppLayerTxMatch = DetectTlsSubjectMatch;
+    sigmatch_table[DETECT_TLS_SUBJECT].Setup = DetectTlsSubjectSetup;
+    sigmatch_table[DETECT_TLS_SUBJECT].Free = DetectTlsSubjectFree;
+    sigmatch_table[DETECT_TLS_SUBJECT].flags = SIGMATCH_QUOTES_MANDATORY | SIGMATCH_HANDLE_NEGATION;
+    sigmatch_table[DETECT_TLS_SUBJECT].alternative = DETECT_TLS_CERT_SUBJECT;
 
-    sigmatch_table[DETECT_AL_TLS_ISSUERDN].name = "tls.issuerdn";
-    sigmatch_table[DETECT_AL_TLS_ISSUERDN].desc = "match TLS/SSL certificate IssuerDN field";
-    sigmatch_table[DETECT_AL_TLS_ISSUERDN].url = "/rules/tls-keywords.html#tls-issuerdn";
-    sigmatch_table[DETECT_AL_TLS_ISSUERDN].AppLayerTxMatch = DetectTlsIssuerDNMatch;
-    sigmatch_table[DETECT_AL_TLS_ISSUERDN].Setup = DetectTlsIssuerDNSetup;
-    sigmatch_table[DETECT_AL_TLS_ISSUERDN].Free  = DetectTlsIssuerDNFree;
-    sigmatch_table[DETECT_AL_TLS_ISSUERDN].flags = SIGMATCH_QUOTES_MANDATORY|SIGMATCH_HANDLE_NEGATION;
-    sigmatch_table[DETECT_AL_TLS_ISSUERDN].alternative = DETECT_AL_TLS_CERT_ISSUER;
+    sigmatch_table[DETECT_TLS_ISSUERDN].name = "tls.issuerdn";
+    sigmatch_table[DETECT_TLS_ISSUERDN].desc = "match TLS/SSL certificate IssuerDN field";
+    sigmatch_table[DETECT_TLS_ISSUERDN].url = "/rules/tls-keywords.html#tls-issuerdn";
+    sigmatch_table[DETECT_TLS_ISSUERDN].AppLayerTxMatch = DetectTlsIssuerDNMatch;
+    sigmatch_table[DETECT_TLS_ISSUERDN].Setup = DetectTlsIssuerDNSetup;
+    sigmatch_table[DETECT_TLS_ISSUERDN].Free = DetectTlsIssuerDNFree;
+    sigmatch_table[DETECT_TLS_ISSUERDN].flags =
+            SIGMATCH_QUOTES_MANDATORY | SIGMATCH_HANDLE_NEGATION;
+    sigmatch_table[DETECT_TLS_ISSUERDN].alternative = DETECT_TLS_CERT_ISSUER;
 
-    sigmatch_table[DETECT_AL_TLS_FINGERPRINT].name = "tls.fingerprint";
-    sigmatch_table[DETECT_AL_TLS_FINGERPRINT].desc = "match TLS/SSL certificate SHA1 fingerprint";
-    sigmatch_table[DETECT_AL_TLS_FINGERPRINT].url = "/rules/tls-keywords.html#tls-fingerprint";
-    sigmatch_table[DETECT_AL_TLS_FINGERPRINT].Setup = DetectTlsFingerprintSetup;
-    sigmatch_table[DETECT_AL_TLS_FINGERPRINT].Free  = DetectTlsFingerprintFree;
-    sigmatch_table[DETECT_AL_TLS_FINGERPRINT].flags = SIGMATCH_QUOTES_MANDATORY|SIGMATCH_HANDLE_NEGATION;
-    sigmatch_table[DETECT_AL_TLS_FINGERPRINT].alternative = DETECT_AL_TLS_CERT_FINGERPRINT;
+    sigmatch_table[DETECT_TLS_FINGERPRINT].name = "tls.fingerprint";
+    sigmatch_table[DETECT_TLS_FINGERPRINT].desc = "match TLS/SSL certificate SHA1 fingerprint";
+    sigmatch_table[DETECT_TLS_FINGERPRINT].url = "/rules/tls-keywords.html#tls-fingerprint";
+    sigmatch_table[DETECT_TLS_FINGERPRINT].Setup = DetectTlsFingerprintSetup;
+    sigmatch_table[DETECT_TLS_FINGERPRINT].Free = DetectTlsFingerprintFree;
+    sigmatch_table[DETECT_TLS_FINGERPRINT].flags =
+            SIGMATCH_QUOTES_MANDATORY | SIGMATCH_HANDLE_NEGATION;
+    sigmatch_table[DETECT_TLS_FINGERPRINT].alternative = DETECT_TLS_CERT_FINGERPRINT;
 
-    sigmatch_table[DETECT_AL_TLS_STORE].name = "tls_store";
-    sigmatch_table[DETECT_AL_TLS_STORE].alias = "tls.store";
-    sigmatch_table[DETECT_AL_TLS_STORE].desc = "store TLS/SSL certificate on disk";
-    sigmatch_table[DETECT_AL_TLS_STORE].url = "/rules/tls-keywords.html#tls-store";
-    sigmatch_table[DETECT_AL_TLS_STORE].Match = DetectTlsStorePostMatch;
-    sigmatch_table[DETECT_AL_TLS_STORE].Setup = DetectTlsStoreSetup;
-    sigmatch_table[DETECT_AL_TLS_STORE].flags |= SIGMATCH_NOOPT;
+    sigmatch_table[DETECT_TLS_STORE].name = "tls_store";
+    sigmatch_table[DETECT_TLS_STORE].alias = "tls.store";
+    sigmatch_table[DETECT_TLS_STORE].desc = "store TLS/SSL certificate on disk";
+    sigmatch_table[DETECT_TLS_STORE].url = "/rules/tls-keywords.html#tls-store";
+    sigmatch_table[DETECT_TLS_STORE].Match = DetectTlsStorePostMatch;
+    sigmatch_table[DETECT_TLS_STORE].Setup = DetectTlsStoreSetup;
+    sigmatch_table[DETECT_TLS_STORE].flags |= SIGMATCH_NOOPT;
 
     DetectSetupParseRegexes(PARSE_REGEX, &subject_parse_regex);
     DetectSetupParseRegexes(PARSE_REGEX, &issuerdn_parse_regex);
@@ -142,10 +144,10 @@ void DetectTlsRegister (void)
     g_tls_cert_fingerprint_list_id = DetectBufferTypeRegister("tls.cert_fingerprint");
 
     DetectAppLayerInspectEngineRegister("tls_cert", ALPROTO_TLS, SIG_FLAG_TOCLIENT,
-            TLS_STATE_CERT_READY, DetectEngineInspectGenericList, NULL);
+            TLS_STATE_SERVER_CERT_DONE, DetectEngineInspectGenericList, NULL);
 
     DetectAppLayerInspectEngineRegister("tls_cert", ALPROTO_TLS, SIG_FLAG_TOSERVER,
-            TLS_STATE_CERT_READY, DetectEngineInspectGenericList, NULL);
+            TLS_STATE_CLIENT_CERT_DONE, DetectEngineInspectGenericList, NULL);
 }
 
 /**
@@ -185,7 +187,9 @@ static int DetectTlsSubjectMatch (DetectEngineThreadCtx *det_ctx,
         SCLogDebug("TLS: Subject is [%s], looking for [%s]\n",
                    connp->cert0_subject, tls_data->subject);
 
-        if (strstr(connp->cert0_subject, tls_data->subject) != NULL) {
+        if (SpmSearch(connp->cert0_subject, connp->cert0_subject_len,
+                    (const uint8_t *)tls_data->subject,
+                    (uint16_t)strlen(tls_data->subject)) != NULL) {
             if (tls_data->flags & DETECT_CONTENT_NEGATED) {
                 ret = 0;
             } else {
@@ -299,7 +303,7 @@ static int DetectTlsSubjectSetup (DetectEngineCtx *de_ctx, Signature *s, const c
 {
     DetectTlsData *tls = NULL;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_TLS) != 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_TLS) != 0)
         return -1;
 
     tls = DetectTlsSubjectParse(de_ctx, str, s->init_data->negated);
@@ -309,8 +313,8 @@ static int DetectTlsSubjectSetup (DetectEngineCtx *de_ctx, Signature *s, const c
     /* Okay so far so good, lets get this into a SigMatch
      * and put it in the Signature. */
 
-    if (SigMatchAppendSMToList(
-                de_ctx, s, DETECT_AL_TLS_SUBJECT, (SigMatchCtx *)tls, g_tls_cert_list_id) == NULL) {
+    if (SCSigMatchAppendSMToList(
+                de_ctx, s, DETECT_TLS_SUBJECT, (SigMatchCtx *)tls, g_tls_cert_list_id) == NULL) {
         goto error;
     }
     return 0;
@@ -374,7 +378,9 @@ static int DetectTlsIssuerDNMatch (DetectEngineThreadCtx *det_ctx,
         SCLogDebug("TLS: IssuerDN is [%s], looking for [%s]\n",
                    connp->cert0_issuerdn, tls_data->issuerdn);
 
-        if (strstr(connp->cert0_issuerdn, tls_data->issuerdn) != NULL) {
+        if (SpmSearch(connp->cert0_issuerdn, connp->cert0_issuerdn_len,
+                    (const uint8_t *)tls_data->issuerdn,
+                    (uint16_t)strlen(tls_data->issuerdn)) != NULL) {
             if (tls_data->flags & DETECT_CONTENT_NEGATED) {
                 ret = 0;
             } else {
@@ -489,7 +495,7 @@ static int DetectTlsIssuerDNSetup (DetectEngineCtx *de_ctx, Signature *s, const 
 {
     DetectTlsData *tls = NULL;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_TLS) != 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_TLS) != 0)
         return -1;
 
     tls = DetectTlsIssuerDNParse(de_ctx, str, s->init_data->negated);
@@ -499,8 +505,8 @@ static int DetectTlsIssuerDNSetup (DetectEngineCtx *de_ctx, Signature *s, const 
     /* Okay so far so good, lets get this into a SigMatch
      * and put it in the Signature. */
 
-    if (SigMatchAppendSMToList(de_ctx, s, DETECT_AL_TLS_ISSUERDN, (SigMatchCtx *)tls,
-                g_tls_cert_list_id) == NULL) {
+    if (SCSigMatchAppendSMToList(
+                de_ctx, s, DETECT_TLS_ISSUERDN, (SigMatchCtx *)tls, g_tls_cert_list_id) == NULL) {
         goto error;
     }
     return 0;
@@ -551,7 +557,7 @@ static int DetectTlsFingerprintSetup (DetectEngineCtx *de_ctx, Signature *s, con
         return -1;
     }
 
-    if (DetectEngineContentModifierBufferSetup(de_ctx, s, NULL, DETECT_AL_TLS_CERT_FINGERPRINT,
+    if (DetectEngineContentModifierBufferSetup(de_ctx, s, NULL, DETECT_TLS_CERT_FINGERPRINT,
                 g_tls_cert_fingerprint_list_id, ALPROTO_TLS) < 0)
         return -1;
 
@@ -583,12 +589,12 @@ static void DetectTlsFingerprintFree(DetectEngineCtx *de_ctx, void *ptr)
 static int DetectTlsStoreSetup (DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_TLS) != 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_TLS) != 0)
         return -1;
 
     s->flags |= SIG_FLAG_TLSSTORE;
 
-    if (SigMatchAppendSMToList(de_ctx, s, DETECT_AL_TLS_STORE, NULL, DETECT_SM_LIST_POSTMATCH) ==
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_TLS_STORE, NULL, DETECT_SM_LIST_POSTMATCH) ==
             NULL) {
         return -1;
     }
@@ -612,7 +618,7 @@ static int DetectTlsStorePostMatch (DetectEngineThreadCtx *det_ctx,
 
     SSLStateConnp *connp;
 
-    if (p->flow->flags & STREAM_TOSERVER) {
+    if (PKT_IS_TOSERVER(p)) {
         connp = &ssl_state->client_connp;
     } else {
         connp = &ssl_state->server_connp;

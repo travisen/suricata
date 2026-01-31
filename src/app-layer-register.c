@@ -27,6 +27,7 @@
 #include "suricata.h"
 #include "stream.h"
 #include "conf.h"
+#include "rust.h"
 
 #include "app-layer-detect-proto.h"
 #include "app-layer-parser.h"
@@ -35,7 +36,8 @@
 
 static const char * IpProtoToString(int ip_proto);
 
-AppProto AppLayerRegisterProtocolDetection(const struct AppLayerParser *p, int enable_default)
+AppProto SCAppLayerRegisterProtocolDetection(
+        const struct AppLayerProtocolDetect *p, int enable_default)
 {
     AppProto alproto;
     const char *ip_proto_str = NULL;
@@ -65,30 +67,25 @@ AppProto AppLayerRegisterProtocolDetection(const struct AppLayerParser *p, int e
     if (RunmodeIsUnittests()) {
 
         SCLogDebug("Unittest mode, registering default configuration.");
-        AppLayerProtoDetectPPRegister(p->ip_proto, p->default_port,
-                alproto, p->min_depth, p->max_depth, STREAM_TOSERVER,
-                p->ProbeTS, p->ProbeTC);
+        SCAppLayerProtoDetectPPRegister(p->ip_proto, p->default_port, alproto, p->min_depth,
+                p->max_depth, STREAM_TOSERVER, p->ProbeTS, p->ProbeTC);
 
     }
     else {
 
-        if (!AppLayerProtoDetectPPParseConfPorts(ip_proto_str, p->ip_proto,
-                    p->name, alproto, p->min_depth, p->max_depth,
-                    p->ProbeTS, p->ProbeTC)) {
+        if (!SCAppLayerProtoDetectPPParseConfPorts(ip_proto_str, p->ip_proto, p->name, alproto,
+                    p->min_depth, p->max_depth, p->ProbeTS, p->ProbeTC)) {
             if (enable_default != 0) {
                 SCLogDebug("No %s app-layer configuration, enabling %s"
                         " detection %s detection on port %s.",
                         p->name, p->name, ip_proto_str, p->default_port);
-                AppLayerProtoDetectPPRegister(p->ip_proto,
-                        p->default_port, alproto,
-                        p->min_depth, p->max_depth, STREAM_TOSERVER,
-                        p->ProbeTS, p->ProbeTC);
+                SCAppLayerProtoDetectPPRegister(p->ip_proto, p->default_port, alproto, p->min_depth,
+                        p->max_depth, STREAM_TOSERVER, p->ProbeTS, p->ProbeTC);
             } else {
                 SCLogDebug("No %s app-layer configuration for detection port (%s).",
                         p->name, ip_proto_str);
             }
         }
-
     }
 
     return alproto;
@@ -101,7 +98,7 @@ int AppLayerRegisterParser(const struct AppLayerParser *p, AppProto alproto)
     if (p == NULL)
         FatalError("Call to %s with NULL pointer.", __FUNCTION__);
 
-    if (alproto == ALPROTO_UNKNOWN || alproto >= ALPROTO_FAILED)
+    if (!AppProtoIsValid(alproto))
         FatalError("Unknown or invalid AppProto '%s'.", p->name);
 
     BUG_ON(strcmp(p->name, AppProtoToString(alproto)) != 0);
@@ -183,19 +180,20 @@ int AppLayerRegisterParser(const struct AppLayerParser *p, AppProto alproto)
 
     }
 
-    if (p->Truncate) {
-        AppLayerParserRegisterTruncateFunc(p->ip_proto, alproto, p->Truncate);
-    }
-
     if (p->GetFrameIdByName && p->GetFrameNameById) {
         AppLayerParserRegisterGetFrameFuncs(
                 p->ip_proto, alproto, p->GetFrameIdByName, p->GetFrameNameById);
     }
 
+    if (p->GetStateIdByName && p->GetStateNameById) {
+        AppLayerParserRegisterGetStateFuncs(
+                p->ip_proto, alproto, p->GetStateIdByName, p->GetStateNameById);
+    }
+
     return 0;
 }
 
-int AppLayerRegisterParserAlias(const char *proto_name, const char *proto_alias)
+int SCAppLayerRegisterParserAlias(const char *proto_name, const char *proto_alias)
 {
     AppLayerProtoDetectRegisterAlias(proto_name, proto_alias);
 

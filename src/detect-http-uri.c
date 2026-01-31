@@ -36,6 +36,7 @@
 
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-prefilter.h"
 #include "detect-content.h"
@@ -59,9 +60,8 @@
 #ifdef UNITTESTS
 static void DetectHttpUriRegisterTests(void);
 #endif
-static void DetectHttpUriSetupCallback(const DetectEngineCtx *de_ctx,
-                                       Signature *s);
-static bool DetectHttpUriValidateCallback(const Signature *s, const char **sigerror);
+static void DetectHttpUriSetupCallback(
+        const DetectEngineCtx *de_ctx, Signature *s, const DetectBufferType *map);
 static InspectionBuffer *GetData(DetectEngineThreadCtx *det_ctx,
         const DetectEngineTransforms *transforms,
         Flow *_f, const uint8_t _flow_flags,
@@ -71,9 +71,8 @@ static InspectionBuffer *GetData2(DetectEngineThreadCtx *det_ctx,
         const int list_id);
 static int DetectHttpUriSetupSticky(DetectEngineCtx *de_ctx, Signature *s, const char *str);
 static int DetectHttpRawUriSetup(DetectEngineCtx *, Signature *, const char *);
-static void DetectHttpRawUriSetupCallback(const DetectEngineCtx *de_ctx,
-                                          Signature *s);
-static bool DetectHttpRawUriValidateCallback(const Signature *s, const char **);
+static void DetectHttpRawUriSetupCallback(
+        const DetectEngineCtx *de_ctx, Signature *s, const DetectBufferType *map);
 static InspectionBuffer *GetRawData(DetectEngineThreadCtx *det_ctx,
         const DetectEngineTransforms *transforms,
         Flow *_f, const uint8_t _flow_flags,
@@ -89,15 +88,16 @@ static int g_http_uri_buffer_id = 0;
 void DetectHttpUriRegister (void)
 {
     /* http_uri content modifier */
-    sigmatch_table[DETECT_AL_HTTP_URI].name = "http_uri";
-    sigmatch_table[DETECT_AL_HTTP_URI].desc = "content modifier to match specifically and only on the HTTP uri-buffer";
-    sigmatch_table[DETECT_AL_HTTP_URI].url = "/rules/http-keywords.html#http-uri-and-http-uri-raw";
-    sigmatch_table[DETECT_AL_HTTP_URI].Setup = DetectHttpUriSetup;
+    sigmatch_table[DETECT_HTTP_URI_CM].name = "http_uri";
+    sigmatch_table[DETECT_HTTP_URI_CM].desc =
+            "content modifier to match specifically and only on the HTTP uri-buffer";
+    sigmatch_table[DETECT_HTTP_URI_CM].url = "/rules/http-keywords.html#http-uri-and-http-uri-raw";
+    sigmatch_table[DETECT_HTTP_URI_CM].Setup = DetectHttpUriSetup;
 #ifdef UNITTESTS
-    sigmatch_table[DETECT_AL_HTTP_URI].RegisterTests = DetectHttpUriRegisterTests;
+    sigmatch_table[DETECT_HTTP_URI_CM].RegisterTests = DetectHttpUriRegisterTests;
 #endif
-    sigmatch_table[DETECT_AL_HTTP_URI].flags |= SIGMATCH_NOOPT|SIGMATCH_INFO_CONTENT_MODIFIER;
-    sigmatch_table[DETECT_AL_HTTP_URI].alternative = DETECT_HTTP_URI;
+    sigmatch_table[DETECT_HTTP_URI_CM].flags |= SIGMATCH_NOOPT | SIGMATCH_INFO_CONTENT_MODIFIER;
+    sigmatch_table[DETECT_HTTP_URI_CM].alternative = DETECT_HTTP_URI;
 
     /* http.uri sticky buffer */
     sigmatch_table[DETECT_HTTP_URI].name = "http.uri";
@@ -108,10 +108,10 @@ void DetectHttpUriRegister (void)
     sigmatch_table[DETECT_HTTP_URI].flags |= SIGMATCH_NOOPT|SIGMATCH_INFO_STICKY_BUFFER;
 
     DetectAppLayerInspectEngineRegister("http_uri", ALPROTO_HTTP1, SIG_FLAG_TOSERVER,
-            HTP_REQUEST_LINE, DetectEngineInspectBufferGeneric, GetData);
+            HTP_REQUEST_PROGRESS_LINE, DetectEngineInspectBufferGeneric, GetData);
 
     DetectAppLayerMpmRegister("http_uri", SIG_FLAG_TOSERVER, 2, PrefilterGenericMpmRegister,
-            GetData, ALPROTO_HTTP1, HTP_REQUEST_LINE);
+            GetData, ALPROTO_HTTP1, HTP_REQUEST_PROGRESS_LINE);
 
     DetectAppLayerInspectEngineRegister("http_uri", ALPROTO_HTTP2, SIG_FLAG_TOSERVER,
             HTTP2StateDataClient, DetectEngineInspectBufferGeneric, GetData2);
@@ -125,18 +125,17 @@ void DetectHttpUriRegister (void)
     DetectBufferTypeRegisterSetupCallback("http_uri",
             DetectHttpUriSetupCallback);
 
-    DetectBufferTypeRegisterValidateCallback("http_uri",
-            DetectHttpUriValidateCallback);
+    DetectBufferTypeRegisterValidateCallback("http_uri", DetectUrilenValidateContent);
 
     g_http_uri_buffer_id = DetectBufferTypeGetByName("http_uri");
 
     /* http_raw_uri content modifier */
-    sigmatch_table[DETECT_AL_HTTP_RAW_URI].name = "http_raw_uri";
-    sigmatch_table[DETECT_AL_HTTP_RAW_URI].desc = "content modifier to match on the raw HTTP uri";
-    sigmatch_table[DETECT_AL_HTTP_RAW_URI].url = "/rules/http-keywords.html#http_uri-and-http_raw-uri";
-    sigmatch_table[DETECT_AL_HTTP_RAW_URI].Setup = DetectHttpRawUriSetup;
-    sigmatch_table[DETECT_AL_HTTP_RAW_URI].flags |= SIGMATCH_NOOPT|SIGMATCH_INFO_CONTENT_MODIFIER;
-    sigmatch_table[DETECT_AL_HTTP_RAW_URI].alternative = DETECT_HTTP_URI_RAW;
+    sigmatch_table[DETECT_HTTP_RAW_URI].name = "http_raw_uri";
+    sigmatch_table[DETECT_HTTP_RAW_URI].desc = "content modifier to match on the raw HTTP uri";
+    sigmatch_table[DETECT_HTTP_RAW_URI].url = "/rules/http-keywords.html#http_uri-and-http_raw-uri";
+    sigmatch_table[DETECT_HTTP_RAW_URI].Setup = DetectHttpRawUriSetup;
+    sigmatch_table[DETECT_HTTP_RAW_URI].flags |= SIGMATCH_NOOPT | SIGMATCH_INFO_CONTENT_MODIFIER;
+    sigmatch_table[DETECT_HTTP_RAW_URI].alternative = DETECT_HTTP_URI_RAW;
 
     /* http.uri.raw sticky buffer */
     sigmatch_table[DETECT_HTTP_URI_RAW].name = "http.uri.raw";
@@ -146,10 +145,10 @@ void DetectHttpUriRegister (void)
     sigmatch_table[DETECT_HTTP_URI_RAW].flags |= SIGMATCH_NOOPT|SIGMATCH_INFO_STICKY_BUFFER;
 
     DetectAppLayerInspectEngineRegister("http_raw_uri", ALPROTO_HTTP1, SIG_FLAG_TOSERVER,
-            HTP_REQUEST_LINE, DetectEngineInspectBufferGeneric, GetRawData);
+            HTP_REQUEST_PROGRESS_LINE, DetectEngineInspectBufferGeneric, GetRawData);
 
     DetectAppLayerMpmRegister("http_raw_uri", SIG_FLAG_TOSERVER, 2, PrefilterGenericMpmRegister,
-            GetRawData, ALPROTO_HTTP1, HTP_REQUEST_LINE);
+            GetRawData, ALPROTO_HTTP1, HTP_REQUEST_PROGRESS_LINE);
 
     // no difference between raw and decoded uri for HTTP2
     DetectAppLayerInspectEngineRegister("http_raw_uri", ALPROTO_HTTP2, SIG_FLAG_TOSERVER,
@@ -164,8 +163,7 @@ void DetectHttpUriRegister (void)
     DetectBufferTypeRegisterSetupCallback("http_raw_uri",
             DetectHttpRawUriSetupCallback);
 
-    DetectBufferTypeRegisterValidateCallback("http_raw_uri",
-            DetectHttpRawUriValidateCallback);
+    DetectBufferTypeRegisterValidateCallback("http_raw_uri", DetectUrilenValidateContent);
 
     g_http_raw_uri_buffer_id = DetectBufferTypeGetByName("http_raw_uri");
 }
@@ -184,16 +182,11 @@ void DetectHttpUriRegister (void)
 int DetectHttpUriSetup(DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
     return DetectEngineContentModifierBufferSetup(
-            de_ctx, s, str, DETECT_AL_HTTP_URI, g_http_uri_buffer_id, ALPROTO_HTTP1);
+            de_ctx, s, str, DETECT_HTTP_URI_CM, g_http_uri_buffer_id, ALPROTO_HTTP1);
 }
 
-static bool DetectHttpUriValidateCallback(const Signature *s, const char **sigerror)
-{
-    return DetectUrilenValidateContent(s, g_http_uri_buffer_id, sigerror);
-}
-
-static void DetectHttpUriSetupCallback(const DetectEngineCtx *de_ctx,
-                                       Signature *s)
+static void DetectHttpUriSetupCallback(
+        const DetectEngineCtx *de_ctx, Signature *s, const DetectBufferType *map)
 {
     SCLogDebug("callback invoked by %u", s->id);
     DetectUrilenApplyToContent(s, g_http_uri_buffer_id);
@@ -210,9 +203,9 @@ static void DetectHttpUriSetupCallback(const DetectEngineCtx *de_ctx,
  */
 static int DetectHttpUriSetupSticky(DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
-    if (DetectBufferSetActiveList(de_ctx, s, g_http_uri_buffer_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_http_uri_buffer_id) < 0)
         return -1;
-    if (DetectSignatureSetAppProto(s, ALPROTO_HTTP) < 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_HTTP) < 0)
         return -1;
     return 0;
 }
@@ -226,18 +219,15 @@ static InspectionBuffer *GetData(DetectEngineThreadCtx *det_ctx,
     InspectionBuffer *buffer = InspectionBufferGet(det_ctx, list_id);
     if (!buffer->initialized) {
         htp_tx_t *tx = (htp_tx_t *)txv;
-        HtpTxUserData *tx_ud = htp_tx_get_user_data(tx);
-
-        if (tx_ud == NULL || tx_ud->request_uri_normalized == NULL) {
-            SCLogDebug("no tx_id or uri");
+        bstr *request_uri_normalized = (bstr *)htp_tx_normalized_uri(tx);
+        if (request_uri_normalized == NULL)
             return NULL;
-        }
 
-        const uint32_t data_len = bstr_len(tx_ud->request_uri_normalized);
-        const uint8_t *data = bstr_ptr(tx_ud->request_uri_normalized);
+        const uint32_t data_len = (uint32_t)bstr_len(request_uri_normalized);
+        const uint8_t *data = bstr_ptr(request_uri_normalized);
 
-        InspectionBufferSetup(det_ctx, list_id, buffer, data, data_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(
+                det_ctx, list_id, buffer, data, data_len, transforms);
     }
 
     return buffer;
@@ -254,13 +244,12 @@ static InspectionBuffer *GetData2(DetectEngineThreadCtx *det_ctx,
         uint32_t b_len = 0;
         const uint8_t *b = NULL;
 
-        if (rs_http2_tx_get_uri(txv, &b, &b_len) != 1)
+        if (SCHttp2TxGetUri(txv, &b, &b_len) != 1)
             return NULL;
         if (b == NULL || b_len == 0)
             return NULL;
 
-        InspectionBufferSetup(det_ctx, list_id, buffer, b, b_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(det_ctx, list_id, buffer, b, b_len, transforms);
     }
 
     return buffer;
@@ -279,16 +268,11 @@ static InspectionBuffer *GetData2(DetectEngineThreadCtx *det_ctx,
 static int DetectHttpRawUriSetup(DetectEngineCtx *de_ctx, Signature *s, const char *arg)
 {
     return DetectEngineContentModifierBufferSetup(
-            de_ctx, s, arg, DETECT_AL_HTTP_RAW_URI, g_http_raw_uri_buffer_id, ALPROTO_HTTP1);
+            de_ctx, s, arg, DETECT_HTTP_RAW_URI, g_http_raw_uri_buffer_id, ALPROTO_HTTP1);
 }
 
-static bool DetectHttpRawUriValidateCallback(const Signature *s, const char **sigerror)
-{
-    return DetectUrilenValidateContent(s, g_http_raw_uri_buffer_id, sigerror);
-}
-
-static void DetectHttpRawUriSetupCallback(const DetectEngineCtx *de_ctx,
-                                          Signature *s)
+static void DetectHttpRawUriSetupCallback(
+        const DetectEngineCtx *de_ctx, Signature *s, const DetectBufferType *map)
 {
     SCLogDebug("callback invoked by %u", s->id);
     DetectUrilenApplyToContent(s, g_http_raw_uri_buffer_id);
@@ -305,9 +289,9 @@ static void DetectHttpRawUriSetupCallback(const DetectEngineCtx *de_ctx,
  */
 static int DetectHttpRawUriSetupSticky(DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
-    if (DetectBufferSetActiveList(de_ctx, s, g_http_raw_uri_buffer_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_http_raw_uri_buffer_id) < 0)
         return -1;
-    if (DetectSignatureSetAppProto(s, ALPROTO_HTTP) < 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_HTTP) < 0)
         return -1;
     return 0;
 }
@@ -321,14 +305,14 @@ static InspectionBuffer *GetRawData(DetectEngineThreadCtx *det_ctx,
     InspectionBuffer *buffer = InspectionBufferGet(det_ctx, list_id);
     if (!buffer->initialized) {
         htp_tx_t *tx = (htp_tx_t *)txv;
-        if (unlikely(tx->request_uri == NULL)) {
+        if (unlikely(htp_tx_request_uri(tx) == NULL)) {
             return NULL;
         }
-        const uint32_t data_len = bstr_len(tx->request_uri);
-        const uint8_t *data = bstr_ptr(tx->request_uri);
+        const uint32_t data_len = (uint32_t)bstr_len(htp_tx_request_uri(tx));
+        const uint8_t *data = bstr_ptr(htp_tx_request_uri(tx));
 
-        InspectionBufferSetup(det_ctx, list_id, buffer, data, data_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(
+                det_ctx, list_id, buffer, data, data_len, transforms);
     }
 
     return buffer;

@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2013 Open Information Security Foundation
+/* Copyright (C) 2007-2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -25,6 +25,7 @@
 
 #include "suricata-common.h"
 #include "detect.h"
+#include "detect-engine-threshold.h"
 
 #include "util-var.h"
 
@@ -33,7 +34,7 @@
 #include "pkt-var.h"
 #include "host-bit.h"
 #include "ippair-bit.h"
-
+#include "util-validate.h"
 #include "util-debug.h"
 
 void XBitFree(XBit *fb)
@@ -44,7 +45,7 @@ void XBitFree(XBit *fb)
     SCFree(fb);
 }
 
-void GenericVarFree(GenericVar *gv)
+void SCGenericVarFree(GenericVar *gv)
 {
     if (gv == NULL)
         return;
@@ -56,15 +57,19 @@ void GenericVarFree(GenericVar *gv)
         case DETECT_FLOWBITS:
         {
             FlowBit *fb = (FlowBit *)gv;
-            //printf("GenericVarFree: fb %p, removing\n", fb);
+            // printf("SCGenericVarFree: fb %p, removing\n", fb);
             FlowBitFree(fb);
             break;
         }
         case DETECT_XBITS:
         {
             XBit *fb = (XBit *)gv;
-            //printf("GenericVarFree: fb %p, removing\n", fb);
+            // printf("SCGenericVarFree: fb %p, removing\n", fb);
             XBitFree(fb);
+            break;
+        }
+        case DETECT_THRESHOLD: {
+            FlowThresholdVarFree(gv);
             break;
         }
         case DETECT_FLOWVAR:
@@ -81,12 +86,13 @@ void GenericVarFree(GenericVar *gv)
         }
         default:
         {
-            printf("ERROR: GenericVarFree unknown type %" PRIu32 "\n", gv->type);
+            SCLogDebug("SCGenericVarFree unknown type %" PRIu32, gv->type);
+            DEBUG_VALIDATE_BUG_ON(1);
             break;
         }
     }
 
-    GenericVarFree(next_gv);
+    SCGenericVarFree(next_gv);
 }
 
 void GenericVarAppend(GenericVar **list, GenericVar *gv)

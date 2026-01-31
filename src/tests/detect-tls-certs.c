@@ -265,6 +265,7 @@ static int DetectTlsCertsTest02(void)
     AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
 
     memset(&tv, 0, sizeof(ThreadVars));
+    StatsThreadInit(&tv.stats);
     memset(&f, 0, sizeof(Flow));
     memset(&ssn, 0, sizeof(TcpSession));
 
@@ -285,25 +286,24 @@ static int DetectTlsCertsTest02(void)
     p1->flags |= PKT_HAS_FLOW | PKT_STREAM_EST;
     p1->flowflags |= FLOW_PKT_TOSERVER;
     p1->flowflags |= FLOW_PKT_ESTABLISHED;
-    p1->pcap_cnt = 1;
+    PcapPacketCntSet(p1, 1);
 
     p2->flow = &f;
     p2->flags |= PKT_HAS_FLOW | PKT_STREAM_EST;
     p2->flowflags |= FLOW_PKT_TOCLIENT;
     p2->flowflags |= FLOW_PKT_ESTABLISHED;
-    p2->pcap_cnt = 2;
+    PcapPacketCntSet(p2, 2);
 
     p3->flow = &f;
     p3->flags |= PKT_HAS_FLOW | PKT_STREAM_EST;
     p3->flowflags |= FLOW_PKT_TOCLIENT;
     p3->flowflags |= FLOW_PKT_ESTABLISHED;
-    p3->pcap_cnt = 3;
+    PcapPacketCntSet(p3, 3);
 
     StreamTcpInitConfig(true);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     FAIL_IF_NULL(de_ctx);
-
     de_ctx->mpm_matcher = mpm_default_matcher;
     de_ctx->flags |= DE_QUIET;
 
@@ -325,35 +325,32 @@ static int DetectTlsCertsTest02(void)
     FAIL_IF_NULL(ssl_state);
 
     SigMatchSignatures(&tv, de_ctx, det_ctx, p1);
-
     FAIL_IF(PacketAlertCheck(p1, 1));
 
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOCLIENT,
-                            server_hello, sizeof(server_hello));
-
+    r = AppLayerParserParse(
+            NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOCLIENT, server_hello, sizeof(server_hello));
     FAIL_IF(r != 0);
 
     SigMatchSignatures(&tv, de_ctx, det_ctx, p2);
-
     FAIL_IF(PacketAlertCheck(p2, 1));
 
-    r = AppLayerParserParse(NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOCLIENT,
-                            certificate, sizeof(certificate));
-
+    r = AppLayerParserParse(
+            NULL, alp_tctx, &f, ALPROTO_TLS, STREAM_TOCLIENT, certificate, sizeof(certificate));
     FAIL_IF(r != 0);
 
     SigMatchSignatures(&tv, de_ctx, det_ctx, p3);
-
     FAIL_IF_NOT(PacketAlertCheck(p3, 1));
+
+    UTHFreePacket(p1);
+    UTHFreePacket(p2);
+    UTHFreePacket(p3);
+    FLOW_DESTROY(&f);
+
     AppLayerParserThreadCtxFree(alp_tctx);
     DetectEngineThreadCtxDeinit(&tv, det_ctx);
     DetectEngineCtxFree(de_ctx);
     StreamTcpFreeConfig(true);
-    FLOW_DESTROY(&f);
-    UTHFreePacket(p1);
-    UTHFreePacket(p2);
-    UTHFreePacket(p3);
-
+    StatsThreadCleanup(&tv.stats);
     PASS;
 }
 

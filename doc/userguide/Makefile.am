@@ -1,18 +1,24 @@
 EXTRA_DIST = \
+	_generated \
 	_static \
 	3rd-party-integration \
 	acknowledgements.rst \
+	appendix \
 	capture-hardware \
 	command-line-options.rst \
 	conf.py \
 	configuration \
 	devguide \
 	file-extraction \
+	firewall \
+	generate-evedoc.sh \
 	index.rst \
 	upgrade \
 	upgrade.rst \
 	initscripts.rst \
 	install.rst \
+	install \
+	ips \
 	licenses \
 	lua \
 	make-sense-alerts.rst \
@@ -20,18 +26,18 @@ EXTRA_DIST = \
 	output \
 	partials \
 	performance \
+	plugins \
+	protocols \
 	public-data-sets.rst \
 	quickstart.rst \
 	reputation \
 	rule-management \
 	rules \
 	security.rst \
-	setting-up-ipsinline-for-linux \
-	setting-up-ipsinline-for-linux.rst \
-	setting-up-ipsinline-for-windows.rst \
 	support-status.rst \
 	unix-socket.rst \
-	what-is-suricata.rst
+	what-is-suricata.rst \
+	verifying-source-files.rst
 
 if HAVE_SURICATA_MAN
 dist_man1_MANS = suricata.1 suricatasc.1 suricatactl.1 suricatactl-filestore.1
@@ -46,14 +52,14 @@ endif
 
 SPHINX_BUILD = sphinx-build -q
 
-html:
+html: _generated
 	sysconfdir=$(sysconfdir) \
 	localstatedir=$(localstatedir) \
 	version=$(PACKAGE_VERSION) \
 		$(SPHINX_BUILD) -W -b html -d _build/doctrees \
 		$(top_srcdir)/doc/userguide _build/html
 
-_build/latex/Suricata.pdf:
+_build/latex/Suricata.pdf: _generated
 	sysconfdir=$(sysconfdir) \
 	localstatedir=$(localstatedir) \
 	version=$(PACKAGE_VERSION) \
@@ -73,7 +79,8 @@ userguide.pdf: _build/latex/Suricata.pdf
 
 pdf: userguide.pdf
 
-_build/man: manpages/suricata.rst manpages/suricatasc.rst manpages/suricatactl.rst manpages/suricatactl-filestore.rst
+_build/man: _generated manpages/suricata.rst manpages/suricatasc.rst manpages/suricatactl.rst manpages/suricatactl-filestore.rst
+	RELEASE_DATE=$(RELEASE_DATE) \
 	sysconfdir=$(sysconfdir) \
 	localstatedir=$(localstatedir) \
 	version=$(PACKAGE_VERSION) \
@@ -93,3 +100,6 @@ clean-local:
 	rm -f $(top_builddir)/doc/userguide/userguide.pdf
 
 endif # SPHINX_BUILD
+
+_generated:
+	./generate-evedoc.sh

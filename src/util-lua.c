@@ -34,7 +34,6 @@
 
 #include "util-print.h"
 #include "util-unittest.h"
-#include "util-luajit.h"
 
 #include "util-debug.h"
 
@@ -48,22 +47,17 @@
 #include "util-logopenfile.h"
 #include "util-time.h"
 
-#ifdef HAVE_LUA
-
-#include <lua.h>
-#include <lualib.h>
-#include <lauxlib.h>
+#include "lua.h"
+#include "lualib.h"
+#include "lauxlib.h"
 
 #include "util-lua.h"
+#include "util-lua-sandbox.h"
 
 lua_State *LuaGetState(void)
 {
     lua_State *s = NULL;
-#ifdef HAVE_LUAJIT
-    s = LuajitGetState();
-#else
     s = luaL_newstate();
-#endif
     return s;
 }
 
@@ -74,11 +68,7 @@ void LuaReturnState(lua_State *s)
         while (lua_gettop(s) > 0) {
             lua_pop(s, 1);
         }
-#ifdef HAVE_LUAJIT
-        LuajitReturnState(s);
-#else
         lua_close(s);
-#endif
     }
 }
 
@@ -328,22 +318,7 @@ void LuaPrintStack(lua_State *state) {
 
 int LuaPushStringBuffer(lua_State *luastate, const uint8_t *input, size_t input_len)
 {
-    if (input_len % 4 != 0) {
-        /* we're using a buffer sized at a multiple of 4 as lua_pushlstring generates
-         * invalid read errors in valgrind otherwise. Adding in a nul to be sure.
-         *
-         * Buffer size = len + 1 (for nul) + whatever makes it a multiple of 4 */
-        size_t buflen = input_len + 1 + ((input_len + 1) % 4);
-        uint8_t buf[buflen];
-        memset(buf, 0x00, buflen);
-        memcpy(buf, input, input_len);
-        buf[input_len] = '\0';
-
-        /* return value through luastate, as a luastring */
-        lua_pushlstring(luastate, (char *)buf, input_len);
-    } else {
-        lua_pushlstring(luastate, (char *)input, input_len);
-    }
+    lua_pushlstring(luastate, (char *)input, input_len);
     return 1;
 }
 
@@ -352,5 +327,3 @@ int LuaPushInteger(lua_State *luastate, lua_Integer n)
     lua_pushinteger(luastate, n);
     return 1;
 }
-
-#endif /* HAVE_LUA */

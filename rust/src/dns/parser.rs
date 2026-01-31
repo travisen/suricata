@@ -17,23 +17,58 @@
 
 //! Nom parsers for DNS.
 
+use crate::detect::EnumString;
 use crate::dns::dns::*;
-use nom7::combinator::{complete, rest};
-use nom7::error::ErrorKind;
-use nom7::multi::{count, length_data, many_m_n};
-use nom7::number::streaming::{be_u16, be_u32, be_u8};
-use nom7::{error_position, Err, IResult};
+use nom8::combinator::rest;
+use nom8::error::ErrorKind;
+use nom8::multi::{count, length_data};
+use nom8::number::streaming::{be_u16, be_u32, be_u8};
+use nom8::{error_position, Err, IResult, Parser};
+
+// Set a maximum assembled hostname length of 1025, this value was
+// chosen as its what DNSMasq uses, a popular DNS server, even if most
+// tooling limits names to 256 chars without special options.
+static MAX_NAME_LEN: usize = 1025;
 
 /// Parse a DNS name.
+///
+/// Names are parsed with the following restrictions:
+///
+/// - Only 255 segments will be processed, if more the parser may
+///   error out. This is also our safeguard against an infinite loop. If
+///   a pointer had been followed a truncated name will be
+///   returned. However if pointer has been processed we error out as we
+///   don't know where the next data point starts without more
+///   iterations.
+///
+/// - The maximum name parsed in representation format is MAX_NAME_LEN
+///   characters. Once larger, the truncated name will be returned with
+///   a flag specifying the name was truncated. Note that parsing
+///   continues if no pointer has been used as we still need to find the
+///   start of the next protocol unit.
+///
+/// As some error in parsing the name are recoverable, a DNSName
+/// object is returned with flags signifying a recoverable
+/// error. These errors include:
+///
+/// - infinite loop: as we know the end of the name in the input
+///   stream, we can return what we've parsed with the remain data.
+///
+/// - maximum number of segments/labels parsed
+///
+/// - truncation of name when too long
 ///
 /// Parameters:
 ///   start: the start of the name
 ///   message: the complete message that start is a part of with the DNS header
-pub fn dns_parse_name<'b>(start: &'b [u8], message: &'b [u8]) -> IResult<&'b [u8], Vec<u8>> {
+fn dns_parse_name<'b>(
+    start: &'b [u8], message: &'b [u8], parse_flags: &mut DNSNameFlags,
+) -> IResult<&'b [u8], DNSName> {
     let mut pos = start;
     let mut pivot = start;
     let mut name: Vec<u8> = Vec::with_capacity(32);
     let mut count = 0;
+    let mut flags = DNSNameFlags::default();
 
     loop {
         if pos.is_empty() {
@@ -46,11 +81,13 @@ pub fn dns_parse_name<'b>(start: &'b [u8], message: &'b [u8]) -> IResult<&'b [u8
             pos = &pos[1..];
             break;
         } else if len & 0b1100_0000 == 0 {
-            let (rem, label) = length_data(be_u8)(pos)?;
-            if !name.is_empty() {
-                name.push(b'.');
+            let (rem, label) = length_data(be_u8).parse(pos)?;
+            if !flags.contains(DNSNameFlags::TRUNCATED) {
+                if !name.is_empty() {
+                    name.push(b'.');
+                }
+                name.extend(label);
             }
-            name.extend(label);
             pos = rem;
         } else if len & 0b1100_0000 == 0b1100_0000 {
             let (rem, leader) = be_u16(pos)?;
@@ -58,6 +95,21 @@ pub fn dns_parse_name<'b>(start: &'b [u8], message: &'b [u8]) -> IResult<&'b [u8
             if offset > message.len() {
                 return Err(Err::Error(error_position!(pos, ErrorKind::OctDigit)));
             }
+
+            if &message[offset..] == pos {
+                // Self reference, immedate infinite loop.
+                flags.insert(DNSNameFlags::INFINITE_LOOP);
+
+                // If we have followed a pointer, we can just break as
+                // we've already found the end of the input. But if we
+                // have not followed a pointer yet return a parse
+                // error.
+                if pivot != start {
+                    break;
+                }
+                return Err(Err::Error(error_position!(pos, ErrorKind::OctDigit)));
+            }
+
             pos = &message[offset..];
             if pivot == start {
                 pivot = rem;
@@ -68,19 +120,45 @@ pub fn dns_parse_name<'b>(start: &'b [u8], message: &'b [u8]) -> IResult<&'b [u8
 
         // Return error if we've looped a certain number of times.
         count += 1;
+
         if count > 255 {
+            flags.insert(DNSNameFlags::LABEL_LIMIT);
+
+            // Our segment limit has been reached, if we have hit a
+            // pointer we can just return the truncated name. If we
+            // have not hit a pointer, we need to bail with an error.
+            if pivot != start {
+                flags.insert(DNSNameFlags::TRUNCATED);
+                break;
+            }
             return Err(Err::Error(error_position!(pos, ErrorKind::OctDigit)));
         }
+
+        if name.len() > MAX_NAME_LEN {
+            name.truncate(MAX_NAME_LEN);
+            flags.insert(DNSNameFlags::TRUNCATED);
+
+            // If we have pivoted due to a pointer we know where the
+            // end of the data is, so we can break early. Otherwise
+            // we'll keep parsing in hopes to find the end of the name
+            // so parsing can continue.
+            if pivot != start {
+                break;
+            }
+        }
     }
+
+    parse_flags.insert(flags);
 
     // If we followed a pointer we return the position after the first
     // pointer followed. Is there a better way to see if these slices
     // diverged from each other?  A straight up comparison would
     // actually check the contents.
-    if pivot.len() != start.len() {
-        return Ok((pivot, name));
+    if pivot != start {
+        Ok((pivot, DNSName { value: name, flags }))
+    } else {
+        Ok((pos, DNSName { value: name, flags }))
     }
-    return Ok((pos, name));
 }
 
 /// Parse answer entries.
@@ -94,25 +172,27 @@ pub fn dns_parse_name<'b>(start: &'b [u8], message: &'b [u8]) -> IResult<&'b [u8
 /// multi-string TXT entry as a single quote string, similar to the
 /// output of dig. Something to consider for a future version.
 fn dns_parse_answer<'a>(
-    slice: &'a [u8], message: &'a [u8], count: usize,
+    slice: &'a [u8], message: &'a [u8], count: usize, flags: &mut DNSNameFlags,
 ) -> IResult<&'a [u8], Vec<DNSAnswerEntry>> {
     let mut answers = Vec::new();
     let mut input = slice;
 
     struct Answer<'a> {
-        name: Vec<u8>,
+        name: DNSName,
         rrtype: u16,
         rrclass: u16,
         ttl: u32,
         data: &'a [u8],
     }
 
-    fn subparser<'a>(i: &'a [u8], message: &'a [u8]) -> IResult<&'a [u8], Answer<'a>> {
-        let (i, name) = dns_parse_name(i, message)?;
+    fn subparser<'a>(
+        i: &'a [u8], message: &'a [u8], flags: &mut DNSNameFlags,
+    ) -> IResult<&'a [u8], Answer<'a>> {
+        let (i, name) = dns_parse_name(i, message, flags)?;
         let (i, rrtype) = be_u16(i)?;
         let (i, rrclass) = be_u16(i)?;
         let (i, ttl) = be_u32(i)?;
-        let (i, data) = length_data(be_u16)(i)?;
+        let (i, data) = length_data(be_u16).parse(i)?;
         let answer = Answer {
             name,
             rrtype,
@@ -124,41 +204,29 @@ fn dns_parse_answer<'a>(
     }
 
     for _ in 0..count {
-        match subparser(input, message) {
+        match subparser(input, message, flags) {
             Ok((rem, val)) => {
-                let n = match val.rrtype {
-                    DNS_RECORD_TYPE_TXT => {
-                        // For TXT records we need to run the parser
-                        // multiple times. Set n high, to the maximum
-                        // value based on a max txt side of 65535, but
-                        // taking into considering that strings need
-                        // to be quoted, so half that.
-                        32767
-                    }
-                    _ => {
-                        // For all other types we only want to run the
-                        // parser once, so set n to 1.
-                        1
-                    }
-                };
-                let result: IResult<&'a [u8], Vec<DNSRData>> =
-                    many_m_n(1, n, complete(|b| dns_parse_rdata(b, message, val.rrtype)))(val.data);
-                match result {
-                    Ok((_, rdatas)) => {
-                        for rdata in rdatas {
-                            answers.push(DNSAnswerEntry {
-                                name: val.name.clone(),
-                                rrtype: val.rrtype,
-                                rrclass: val.rrclass,
-                                ttl: val.ttl,
-                                data: rdata,
-                            });
-                        }
-                    }
-                    Err(e) => {
-                        return Err(e);
-                    }
+                // edge case for additional section of type=OPT
+                // with empty data (data length = 0x0000)
+                if val.data.is_empty() && val.rrtype == DNSRecordType::OPT as u16 {
+                    answers.push(DNSAnswerEntry {
+                        name: val.name.clone(),
+                        rrtype: val.rrtype,
+                        rrclass: val.rrclass,
+                        ttl: val.ttl,
+                        data: DNSRData::OPT(Vec::new()),
+                    });
+                    input = rem;
+                    continue;
                 }
+                let (_, rdata) = dns_parse_rdata(val.data, message, val.rrtype, flags)?;
+                answers.push(DNSAnswerEntry {
+                    name: val.name.clone(),
+                    rrtype: val.rrtype,
+                    rrclass: val.rrclass,
+                    ttl: val.ttl,
+                    data: rdata,
+                });
                 input = rem;
             }
             Err(e) => {
@@ -175,9 +243,11 @@ fn dns_parse_answer<'a>(
 /// Arguments are suitable for using with call!:
 ///
 ///    call!(complete_dns_message_buffer)
-pub fn dns_parse_query<'a>(input: &'a [u8], message: &'a [u8]) -> IResult<&'a [u8], DNSQueryEntry> {
+fn dns_parse_query<'a>(
+    input: &'a [u8], message: &'a [u8], flags: &mut DNSNameFlags,
+) -> IResult<&'a [u8], DNSQueryEntry> {
     let i = input;
-    let (i, name) = dns_parse_name(i, message)?;
+    let (i, name) = dns_parse_name(i, message, flags)?;
     let (i, rrtype) = be_u16(i)?;
     let (i, rrclass) = be_u16(i)?;
     Ok((
@@ -198,22 +268,30 @@ fn dns_parse_rdata_aaaa(input: &[u8]) -> IResult<&[u8], DNSRData> {
     rest(input).map(|(input, data)| (input, DNSRData::AAAA(data.to_vec())))
 }
 
-fn dns_parse_rdata_cname<'a>(input: &'a [u8], message: &'a [u8]) -> IResult<&'a [u8], DNSRData> {
-    dns_parse_name(input, message).map(|(input, name)| (input, DNSRData::CNAME(name)))
+fn dns_parse_rdata_cname<'a>(
+    input: &'a [u8], message: &'a [u8], flags: &mut DNSNameFlags,
+) -> IResult<&'a [u8], DNSRData> {
+    dns_parse_name(input, message, flags).map(|(input, name)| (input, DNSRData::CNAME(name)))
 }
 
-fn dns_parse_rdata_ns<'a>(input: &'a [u8], message: &'a [u8]) -> IResult<&'a [u8], DNSRData> {
-    dns_parse_name(input, message).map(|(input, name)| (input, DNSRData::NS(name)))
+fn dns_parse_rdata_ns<'a>(
+    input: &'a [u8], message: &'a [u8], flags: &mut DNSNameFlags,
+) -> IResult<&'a [u8], DNSRData> {
+    dns_parse_name(input, message, flags).map(|(input, name)| (input, DNSRData::NS(name)))
 }
 
-fn dns_parse_rdata_ptr<'a>(input: &'a [u8], message: &'a [u8]) -> IResult<&'a [u8], DNSRData> {
-    dns_parse_name(input, message).map(|(input, name)| (input, DNSRData::PTR(name)))
+fn dns_parse_rdata_ptr<'a>(
+    input: &'a [u8], message: &'a [u8], flags: &mut DNSNameFlags,
+) -> IResult<&'a [u8], DNSRData> {
+    dns_parse_name(input, message, flags).map(|(input, name)| (input, DNSRData::PTR(name)))
 }
 
-fn dns_parse_rdata_soa<'a>(input: &'a [u8], message: &'a [u8]) -> IResult<&'a [u8], DNSRData> {
+fn dns_parse_rdata_soa<'a>(
+    input: &'a [u8], message: &'a [u8], flags: &mut DNSNameFlags,
+) -> IResult<&'a [u8], DNSRData> {
     let i = input;
-    let (i, mname) = dns_parse_name(i, message)?;
-    let (i, rname) = dns_parse_name(i, message)?;
+    let (i, mname) = dns_parse_name(i, message, flags)?;
+    let (i, rname) = dns_parse_name(i, message, flags)?;
     let (i, serial) = be_u32(i)?;
     let (i, refresh) = be_u32(i)?;
     let (i, retry) = be_u32(i)?;
@@ -233,20 +311,24 @@ fn dns_parse_rdata_soa<'a>(input: &'a [u8], message: &'a [u8]) -> IResult<&'a [u
     ))
 }
 
-fn dns_parse_rdata_mx<'a>(input: &'a [u8], message: &'a [u8]) -> IResult<&'a [u8], DNSRData> {
+fn dns_parse_rdata_mx<'a>(
+    input: &'a [u8], message: &'a [u8], flags: &mut DNSNameFlags,
+) -> IResult<&'a [u8], DNSRData> {
     // For MX we skip over the preference field before
     // parsing out the name.
     let (i, _) = be_u16(input)?;
-    let (i, name) = dns_parse_name(i, message)?;
+    let (i, name) = dns_parse_name(i, message, flags)?;
     Ok((i, DNSRData::MX(name)))
 }
 
-fn dns_parse_rdata_srv<'a>(input: &'a [u8], message: &'a [u8]) -> IResult<&'a [u8], DNSRData> {
+fn dns_parse_rdata_srv<'a>(
+    input: &'a [u8], message: &'a [u8], flags: &mut DNSNameFlags,
+) -> IResult<&'a [u8], DNSRData> {
     let i = input;
     let (i, priority) = be_u16(i)?;
     let (i, weight) = be_u16(i)?;
     let (i, port) = be_u16(i)?;
-    let (i, target) = dns_parse_name(i, message)?;
+    let (i, target) = dns_parse_name(i, message, flags)?;
     Ok((
         i,
         DNSRData::SRV(DNSRDataSRV {
@@ -259,8 +341,16 @@ fn dns_parse_rdata_srv<'a>(input: &'a [u8], message: &'a [u8]) -> IResult<&'a [u
 }
 
 fn dns_parse_rdata_txt(input: &[u8]) -> IResult<&[u8], DNSRData> {
-    let (i, txt) = length_data(be_u8)(input)?;
-    Ok((i, DNSRData::TXT(txt.to_vec())))
+    let mut txt_strings = Vec::new();
+    let mut i = input;
+
+    while !i.is_empty() {
+        let (j, txt) = length_data(be_u8).parse(i)?;
+        txt_strings.push(txt.to_vec());
+        i = j;
+    }
+
+    Ok((i, DNSRData::TXT(txt_strings)))
 }
 
 fn dns_parse_rdata_null(input: &[u8]) -> IResult<&[u8], DNSRData> {
@@ -282,25 +372,42 @@ fn dns_parse_rdata_sshfp(input: &[u8]) -> IResult<&[u8], DNSRData> {
     ))
 }
 
+fn dns_parse_rdata_opt(input: &[u8]) -> IResult<&[u8], DNSRData> {
+    let mut dns_rdata_opt_vec = Vec::new();
+    let mut i = input;
+
+    while !i.is_empty() {
+        let (j, code) = be_u16(i)?;
+        let (j, data) = length_data(be_u16).parse(j)?;
+        i = j;
+        dns_rdata_opt_vec.push(DNSRDataOPT {
+            code,
+            data: data.to_vec(),
+        });
+    }
+    Ok((i, DNSRData::OPT(dns_rdata_opt_vec)))
+}
+
 fn dns_parse_rdata_unknown(input: &[u8]) -> IResult<&[u8], DNSRData> {
     rest(input).map(|(input, data)| (input, DNSRData::Unknown(data.to_vec())))
 }
 
-pub fn dns_parse_rdata<'a>(
-    input: &'a [u8], message: &'a [u8], rrtype: u16,
+fn dns_parse_rdata<'a>(
+    input: &'a [u8], message: &'a [u8], rrtype: u16, flags: &mut DNSNameFlags,
 ) -> IResult<&'a [u8], DNSRData> {
-    match rrtype {
-        DNS_RECORD_TYPE_A => dns_parse_rdata_a(input),
-        DNS_RECORD_TYPE_AAAA => dns_parse_rdata_aaaa(input),
-        DNS_RECORD_TYPE_CNAME => dns_parse_rdata_cname(input, message),
-        DNS_RECORD_TYPE_PTR => dns_parse_rdata_ptr(input, message),
-        DNS_RECORD_TYPE_SOA => dns_parse_rdata_soa(input, message),
-        DNS_RECORD_TYPE_MX => dns_parse_rdata_mx(input, message),
-        DNS_RECORD_TYPE_NS => dns_parse_rdata_ns(input, message),
-        DNS_RECORD_TYPE_TXT => dns_parse_rdata_txt(input),
-        DNS_RECORD_TYPE_NULL => dns_parse_rdata_null(input),
-        DNS_RECORD_TYPE_SSHFP => dns_parse_rdata_sshfp(input),
-        DNS_RECORD_TYPE_SRV => dns_parse_rdata_srv(input, message),
+    match DNSRecordType::from_u(rrtype) {
+        Some(DNSRecordType::A) => dns_parse_rdata_a(input),
+        Some(DNSRecordType::AAAA) => dns_parse_rdata_aaaa(input),
+        Some(DNSRecordType::CNAME) => dns_parse_rdata_cname(input, message, flags),
+        Some(DNSRecordType::PTR) => dns_parse_rdata_ptr(input, message, flags),
+        Some(DNSRecordType::SOA) => dns_parse_rdata_soa(input, message, flags),
+        Some(DNSRecordType::MX) => dns_parse_rdata_mx(input, message, flags),
+        Some(DNSRecordType::NS) => dns_parse_rdata_ns(input, message, flags),
+        Some(DNSRecordType::TXT) => dns_parse_rdata_txt(input),
+        Some(DNSRecordType::NULL) => dns_parse_rdata_null(input),
+        Some(DNSRecordType::SSHFP) => dns_parse_rdata_sshfp(input),
+        Some(DNSRecordType::SRV) => dns_parse_rdata_srv(input, message, flags),
+        Some(DNSRecordType::OPT) => dns_parse_rdata_opt(input),
         _ => dns_parse_rdata_unknown(input),
     }
 }
@@ -328,18 +435,51 @@ pub fn dns_parse_header(i: &[u8]) -> IResult<&[u8], DNSHeader> {
 
 pub fn dns_parse_body<'a>(
     i: &'a [u8], message: &'a [u8], header: DNSHeader,
-) -> IResult<&'a [u8], DNSMessage> {
-    let (i, queries) = count(|b| dns_parse_query(b, message), header.questions as usize)(i)?;
-    let (i, answers) = dns_parse_answer(i, message, header.answer_rr as usize)?;
-    let (i, authorities) = dns_parse_answer(i, message, header.authority_rr as usize)?;
+) -> IResult<&'a [u8], (DNSMessage, DNSNameFlags)> {
+    let mut flags = DNSNameFlags::default();
+    let (i, queries) = count(
+        |b| dns_parse_query(b, message, &mut flags),
+        header.questions as usize,
+    ).parse(i)?;
+    let (i, answers) = dns_parse_answer(i, message, header.answer_rr as usize, &mut flags)?;
+
+    let mut invalid_authorities = false;
+    let mut authorities = Vec::new();
+    let mut i_next = i;
+    let authorities_parsed = dns_parse_answer(i, message, header.authority_rr as usize, &mut flags);
+    if let Ok((i, authorities_ok)) = authorities_parsed {
+        authorities = authorities_ok;
+        i_next = i;
+    } else {
+        invalid_authorities = true;
+    }
+
+    let mut invalid_additionals = false;
+    let mut additionals = Vec::new();
+    if !invalid_authorities {
+        let additionals_parsed =
+            dns_parse_answer(i_next, message, header.additional_rr as usize, &mut flags);
+        if let Ok((i, additionals_ok)) = additionals_parsed {
+            additionals = additionals_ok;
+            i_next = i;
+        } else {
+            invalid_additionals = true;
+        }
+    }
     Ok((
-        i,
-        DNSMessage {
-            header,
-            queries,
-            answers,
-            authorities,
-        },
+        i_next,
+        (
+            DNSMessage {
+                header,
+                queries,
+                answers,
+                authorities,
+                invalid_authorities,
+                additionals,
+                invalid_additionals,
+            },
+            flags,
+        ),
     ))
 }
 
@@ -359,8 +499,9 @@ mod tests {
             0x03, 0x63, 0x6f, 0x6d, 0x00, 0x00, 0x01, 0x00, /* .com.... */
         ];
         let expected_remainder: &[u8] = &[0x00, 0x01, 0x00];
-        let (remainder, name) = dns_parse_name(buf, buf).unwrap();
-        assert_eq!("client-cf.dropbox.com".as_bytes(), &name[..]);
+        let mut flags = DNSNameFlags::default();
+        let (remainder, name) = dns_parse_name(buf, buf, &mut flags).unwrap();
+        assert_eq!("client-cf.dropbox.com".as_bytes(), &name.value[..]);
         assert_eq!(remainder, expected_remainder);
     }
 
@@ -393,37 +534,65 @@ mod tests {
 
         // The name at offset 54 is the complete name.
         let start1 = &buf[54..];
-        let res1 = dns_parse_name(start1, message);
+        let mut flags = DNSNameFlags::default();
+        let res1 = dns_parse_name(start1, message, &mut flags);
         assert_eq!(
             res1,
-            Ok((&start1[22..], "www.suricata-ids.org".as_bytes().to_vec()))
+            Ok((
+                &start1[22..],
+                DNSName {
+                    value: "www.suricata-ids.org".as_bytes().to_vec(),
+                    flags: DNSNameFlags::default(),
+                }
+            ))
         );
 
         // The second name starts at offset 80, but is just a pointer
         // to the first.
         let start2 = &buf[80..];
-        let res2 = dns_parse_name(start2, message);
+        let mut flags = DNSNameFlags::default();
+        let res2 = dns_parse_name(start2, message, &mut flags);
         assert_eq!(
             res2,
-            Ok((&start2[2..], "www.suricata-ids.org".as_bytes().to_vec()))
+            Ok((
+                &start2[2..],
+                DNSName {
+                    value: "www.suricata-ids.org".as_bytes().to_vec(),
+                    flags: DNSNameFlags::default()
+                }
+            ))
         );
 
         // The third name starts at offset 94, but is a pointer to a
         // portion of the first.
         let start3 = &buf[94..];
-        let res3 = dns_parse_name(start3, message);
+        let mut flags = DNSNameFlags::default();
+        let res3 = dns_parse_name(start3, message, &mut flags);
         assert_eq!(
             res3,
-            Ok((&start3[2..], "suricata-ids.org".as_bytes().to_vec()))
+            Ok((
+                &start3[2..],
+                DNSName {
+                    value: "suricata-ids.org".as_bytes().to_vec(),
+                    flags: DNSNameFlags::default()
+                }
+            ))
         );
 
         // The fourth name starts at offset 110, but is a pointer to a
         // portion of the first.
         let start4 = &buf[110..];
-        let res4 = dns_parse_name(start4, message);
+        let mut flags = DNSNameFlags::default();
+        let res4 = dns_parse_name(start4, message, &mut flags);
         assert_eq!(
             res4,
-            Ok((&start4[2..], "suricata-ids.org".as_bytes().to_vec()))
+            Ok((
+                &start4[2..],
+                DNSName {
+                    value: "suricata-ids.org".as_bytes().to_vec(),
+                    flags: DNSNameFlags::default()
+                }
+            ))
         );
     }
 
@@ -455,10 +624,17 @@ mod tests {
         // packet).
         let start: &[u8] = &buf[100..];
 
-        let res = dns_parse_name(start, message);
+        let mut flags = DNSNameFlags::default();
+        let res = dns_parse_name(start, message, &mut flags);
         assert_eq!(
             res,
-            Ok((&start[2..], "block.g1.dropbox.com".as_bytes().to_vec()))
+            Ok((
+                &start[2..],
+                DNSName {
+                    value: "block.g1.dropbox.com".as_bytes().to_vec(),
+                    flags: DNSNameFlags::default()
+                }
+            ))
         );
     }
 
@@ -477,10 +653,9 @@ mod tests {
 
         let (body, header) = dns_parse_header(pkt).unwrap();
         let res = dns_parse_body(body, pkt, header);
-        let (rem, request) = res.unwrap();
-        // For now we have some remainder data as there is an
-        // additional record type we don't parse yet.
-        assert!(!rem.is_empty());
+        let (rem, (request, _flags)) = res.unwrap();
+        // The request should be fully parsed.
+        assert!(rem.is_empty());
 
         assert_eq!(
             request.header,
@@ -497,13 +672,102 @@ mod tests {
         assert_eq!(request.queries.len(), 1);
 
         let query = &request.queries[0];
-        assert_eq!(query.name, "www.suricata-ids.org".as_bytes().to_vec());
+        assert_eq!(query.name.value, "www.suricata-ids.org".as_bytes().to_vec());
         assert_eq!(query.rrtype, 1);
         assert_eq!(query.rrclass, 1);
+
+        // verify additional section
+        assert_eq!(request.additionals.len(), 1);
+
+        let additional = &request.additionals[0];
+        assert_eq!(
+            additional,
+            &DNSAnswerEntry {
+                name: DNSName {
+                    value: vec![],
+                    flags: DNSNameFlags::default()
+                },
+                rrtype: DNSRecordType::OPT as u16,
+                rrclass: 0x1000,             // for OPT this is UDP payload size
+                ttl: 0,                      // for OPT this is extended RCODE and flags
+                data: DNSRData::OPT(vec![]), // empty rdata
+            }
+        );
+    }
+
+    #[test]
+    fn test_dns_parse_request_multi_opt() {
+        let pkt: &[u8] = &[
+            0x8d, 0x32, 0x01, 0x20, 0x00, 0x01, /* ...2. .. */
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x03, 0x77, /* .......w */
+            0x77, 0x77, 0x0c, 0x73, 0x75, 0x72, 0x69, 0x63, /* ww.suric */
+            0x61, 0x74, 0x61, 0x2d, 0x69, 0x64, 0x73, 0x03, /* ata-ids. */
+            0x6f, 0x72, 0x67, 0x00, 0x00, 0x01, 0x00, 0x01, /* org..... */
+            0x00, 0x00, 0x29, 0x10, 0x00, 0x00, 0x00, 0x00, /* ..)..... */
+            0x00, 0x00, 0x10, /* total rdata len: 16 */
+            /* Option Cookie */
+            0x00, 0x0a, /* Code: 10 */
+            0x00, 0x08, /* Option len: 8 */
+            0x7f, 0x86, 0xcf, 0x8b, 0x81, 0xf6, 0xf9, 0x55, /* Option NSID */
+            0x00, 0x03, /* Code: 3 */
+            0x00, 0x00, /* option len: 0 */
+        ];
+
+        let (body, header) = dns_parse_header(pkt).unwrap();
+        let res = dns_parse_body(body, pkt, header);
+        let (rem, (request, _flags)) = res.unwrap();
+
+        assert!(rem.is_empty());
+        assert_eq!(
+            request.header,
+            DNSHeader {
+                tx_id: 0x8d32,
+                flags: 0x0120,
+                questions: 1,
+                answer_rr: 0,
+                authority_rr: 0,
+                additional_rr: 1,
+            }
+        );
+
+        assert_eq!(request.queries.len(), 1);
+
+        let query = &request.queries[0];
+        assert_eq!(query.name.value, "www.suricata-ids.org".as_bytes().to_vec());
+        assert_eq!(query.rrtype, 1);
+        assert_eq!(query.rrclass, 1);
+
+        // verify additional section
+        assert_eq!(request.additionals.len(), 1);
+
+        let additional = &request.additionals[0];
+        assert_eq!(
+            additional,
+            &DNSAnswerEntry {
+                name: DNSName {
+                    value: vec![],
+                    flags: DNSNameFlags::default()
+                },
+                rrtype: DNSRecordType::OPT as u16,
+                rrclass: 0x1000, // for OPT this is requestor's UDP payload size
+                ttl: 0,          // for OPT this is extended RCODE and flags
+                // verify two options
+                data: DNSRData::OPT(vec![
+                    DNSRDataOPT {
+                        code: 0x000a,
+                        data: vec![0x7f, 0x86, 0xcf, 0x8b, 0x81, 0xf6, 0xf9, 0x55]
+                    },
+                    DNSRDataOPT {
+                        code: 0x0003,
+                        data: vec![]
+                    },
+                ])
+            }
+        );
     }
 
     /// Parse a DNS response.
-    fn dns_parse_response(message: &[u8]) -> IResult<&[u8], DNSMessage> {
+    fn dns_parse_response(message: &[u8]) -> IResult<&[u8], (DNSMessage, DNSNameFlags)> {
         let i = message;
         let (i, header) = dns_parse_header(i)?;
         dns_parse_body(i, message, header)
@@ -528,7 +792,7 @@ mod tests {
             0x00, 0x04, 0xc0, 0x00, 0x4e, 0x19, /* ....N. */
         ];
 
-        let (rem, response) = dns_parse_response(pkt).unwrap();
+        let (rem, (response, _flags)) = dns_parse_response(pkt).unwrap();
         // The response should be full parsed.
         assert_eq!(rem.len(), 0);
 
@@ -547,20 +811,29 @@ mod tests {
         assert_eq!(response.answers.len(), 3);
 
         let answer1 = &response.answers[0];
-        assert_eq!(answer1.name, "www.suricata-ids.org".as_bytes().to_vec());
+        assert_eq!(
+            answer1.name.value,
+            "www.suricata-ids.org".as_bytes().to_vec()
+        );
         assert_eq!(answer1.rrtype, 5);
         assert_eq!(answer1.rrclass, 1);
         assert_eq!(answer1.ttl, 3544);
         assert_eq!(
             answer1.data,
-            DNSRData::CNAME("suricata-ids.org".as_bytes().to_vec())
+            DNSRData::CNAME(DNSName {
+                value: "suricata-ids.org".as_bytes().to_vec(),
+                flags: DNSNameFlags::default()
+            })
         );
 
         let answer2 = &response.answers[1];
         assert_eq!(
             answer2,
             &DNSAnswerEntry {
-                name: "suricata-ids.org".as_bytes().to_vec(),
+                name: DNSName {
+                    value: "suricata-ids.org".as_bytes().to_vec(),
+                    flags: DNSNameFlags::default()
+                },
                 rrtype: 1,
                 rrclass: 1,
                 ttl: 244,
@@ -572,7 +845,10 @@ mod tests {
         assert_eq!(
             answer3,
             &DNSAnswerEntry {
-                name: "suricata-ids.org".as_bytes().to_vec(),
+                name: DNSName {
+                    value: "suricata-ids.org".as_bytes().to_vec(),
+                    flags: DNSNameFlags::default()
+                },
                 rrtype: 1,
                 rrclass: 1,
                 ttl: 244,
@@ -604,10 +880,9 @@ mod tests {
             0x00, 0x00, 0x00, 0x00, /* .... */
         ];
 
-        let (rem, response) = dns_parse_response(pkt).unwrap();
-        // For now we have some remainder data as there is an
-        // additional record type we don't parse yet.
-        assert!(!rem.is_empty());
+        let (rem, (response, _flags)) = dns_parse_response(pkt).unwrap();
+        // The response should be fully parsed.
+        assert!(rem.is_empty());
 
         assert_eq!(
             response.header,
@@ -624,21 +899,45 @@ mod tests {
         assert_eq!(response.authorities.len(), 1);
 
         let authority = &response.authorities[0];
-        assert_eq!(authority.name, "oisf.net".as_bytes().to_vec());
+        assert_eq!(authority.name.value, "oisf.net".as_bytes().to_vec());
         assert_eq!(authority.rrtype, 6);
         assert_eq!(authority.rrclass, 1);
         assert_eq!(authority.ttl, 899);
         assert_eq!(
             authority.data,
             DNSRData::SOA(DNSRDataSOA {
-                mname: "ns-110.awsdns-13.com".as_bytes().to_vec(),
-                rname: "awsdns-hostmaster.amazon.com".as_bytes().to_vec(),
+                mname: DNSName {
+                    value: "ns-110.awsdns-13.com".as_bytes().to_vec(),
+                    flags: DNSNameFlags::default()
+                },
+                rname: DNSName {
+                    value: "awsdns-hostmaster.amazon.com".as_bytes().to_vec(),
+                    flags: DNSNameFlags::default()
+                },
                 serial: 1,
                 refresh: 7200,
                 retry: 900,
                 expire: 1209600,
                 minimum: 86400,
             })
+        );
+
+        // verify additional section
+        assert_eq!(response.additionals.len(), 1);
+
+        let additional = &response.additionals[0];
+        assert_eq!(
+            additional,
+            &DNSAnswerEntry {
+                name: DNSName {
+                    value: vec![],
+                    flags: DNSNameFlags::default()
+                },
+                rrtype: DNSRecordType::OPT as u16,
+                rrclass: 0x0200,             // for OPT this is UDP payload size
+                ttl: 0,                      // for OPT this is extended RCODE and flags
+                data: DNSRData::OPT(vec![]), // no rdata
+            }
         );
     }
 
@@ -658,7 +957,7 @@ mod tests {
             0x44, 0x03, 0xc5, 0xe9, 0x01, /* D.... */
         ];
 
-        let (rem, response) = dns_parse_response(pkt).unwrap();
+        let (rem, (response, _flags)) = dns_parse_response(pkt).unwrap();
         // The response should be fully parsed.
         assert_eq!(rem.len(), 0);
 
@@ -676,15 +975,21 @@ mod tests {
 
         assert_eq!(response.queries.len(), 1);
         let query = &response.queries[0];
-        assert_eq!(query.name, "vaaaakardli.pirate.sea".as_bytes().to_vec());
-        assert_eq!(query.rrtype, DNS_RECORD_TYPE_NULL);
+        assert_eq!(
+            query.name.value,
+            "vaaaakardli.pirate.sea".as_bytes().to_vec()
+        );
+        assert_eq!(query.rrtype, DNSRecordType::NULL as u16);
         assert_eq!(query.rrclass, 1);
 
         assert_eq!(response.answers.len(), 1);
 
         let answer = &response.answers[0];
-        assert_eq!(answer.name, "vaaaakardli.pirate.sea".as_bytes().to_vec());
-        assert_eq!(answer.rrtype, DNS_RECORD_TYPE_NULL);
+        assert_eq!(
+            answer.name.value,
+            "vaaaakardli.pirate.sea".as_bytes().to_vec()
+        );
+        assert_eq!(answer.rrtype, DNSRecordType::NULL as u16);
         assert_eq!(answer.rrclass, 1);
         assert_eq!(answer.ttl, 0);
         assert_eq!(
@@ -740,7 +1045,7 @@ mod tests {
         ;; MSG SIZE  rcvd: 191   */
 
         let pkt: &[u8] = &[
-            0xeb, 0x56, 0x81, 0x80, 0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x04, 0x5f,
+            0xeb, 0x56, 0x81, 0x80, 0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x04, 0x5f,
             0x73, 0x69, 0x70, 0x04, 0x5f, 0x75, 0x64, 0x70, 0x03, 0x73, 0x69, 0x70, 0x05, 0x76,
             0x6f, 0x69, 0x63, 0x65, 0x06, 0x67, 0x6f, 0x6f, 0x67, 0x6c, 0x65, 0x03, 0x63, 0x6f,
             0x6d, 0x00, 0x00, 0x21, 0x00, 0x01, 0xc0, 0x0c, 0x00, 0x21, 0x00, 0x01, 0x00, 0x00,
@@ -753,7 +1058,7 @@ mod tests {
             0x67, 0x6c, 0x65, 0x03, 0x63, 0x6f, 0x6d, 0x00,
         ];
 
-        let (rem, response) = dns_parse_response(pkt).unwrap();
+        let (rem, (response, _flags)) = dns_parse_response(pkt).unwrap();
         // The data should be fully parsed.
         assert_eq!(rem.len(), 0);
 
@@ -765,7 +1070,7 @@ mod tests {
             assert_eq!(srv.weight, 1);
             assert_eq!(srv.port, 5060);
             assert_eq!(
-                srv.target,
+                srv.target.value,
                 "sip-anycast-2.voice.google.com".as_bytes().to_vec()
             );
         } else {
@@ -777,11 +1082,74 @@ mod tests {
             assert_eq!(srv.weight, 1);
             assert_eq!(srv.port, 5060);
             assert_eq!(
-                srv.target,
+                srv.target.value,
                 "sip-anycast-1.voice.google.com".as_bytes().to_vec()
             );
         } else {
             panic!("Expected DNSRData::SRV");
         }
+    }
+
+    #[test]
+    fn test_dns_parse_name_truncated() {
+        // Generate a non-compressed hostname over our maximum of 1024.
+        let mut buf: Vec<u8> = vec![];
+
+        for i in 1..18 {
+            buf.push(0b0011_1111);
+            buf.resize(i * 64, b'a');
+        }
+
+        let mut flags = DNSNameFlags::default();
+        let (rem, name) = dns_parse_name(&buf, &buf, &mut flags).unwrap();
+        assert_eq!(name.value.len(), MAX_NAME_LEN);
+        assert!(name.flags.contains(DNSNameFlags::TRUNCATED));
+        assert!(rem.is_empty());
+    }
+
+    #[test]
+    fn test_dns_parse_name_truncated_max_segments_no_pointer() {
+        let mut buf: Vec<u8> = vec![];
+        for _ in 0..256 {
+            buf.push(0b0000_0001);
+            buf.push(b'a');
+        }
+
+        // This should fail as we've hit the segment limit without a
+        // pointer, we'd need to keep parsing more segments to figure
+        // out where the next data point lies.
+        let mut flags = DNSNameFlags::default();
+        assert!(dns_parse_name(&buf, &buf, &mut flags).is_err());
+    }
+
+    #[test]
+    fn test_dns_parse_name_truncated_max_segments_with_pointer() {
+        #[rustfmt::skip]
+        let buf: Vec<u8> = vec![
+            // "a" at the beginning of the buffer.
+            0b0000_0001,
+            b'a',
+
+            // Followed by a pointer back to the beginning.
+            0b1100_0000,
+            0b0000_0000,
+
+            // The start of the name, which is pointer to the beginning of
+            // the buffer.
+            0b1100_0000,
+            0b000_0000
+        ];
+
+        let mut flags = DNSNameFlags::default();
+        let (_rem, name) = dns_parse_name(&buf[4..], &buf, &mut flags).unwrap();
+        assert_eq!(name.value.len(), 255);
+        assert!(name.flags.contains(DNSNameFlags::TRUNCATED));
+    }
+
+    #[test]
+    fn test_dns_parse_name_self_reference() {
+        let buf = vec![0b1100_0000, 0b0000_0000];
+        let mut flags = DNSNameFlags::default();
+        assert!(dns_parse_name(&buf, &buf, &mut flags).is_err());
     }
 }

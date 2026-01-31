@@ -24,6 +24,7 @@
 
 #include "suricata-common.h"
 #include "util-ioctl.h"
+#include "util-device-private.h"
 #include "conf.h"
 #include "decode.h"
 #include "decode-sll.h"
@@ -126,13 +127,16 @@ int GetIfaceMaxPacketSize(LiveDevice *ld)
     if ((dev == NULL) || strlen(dev) == 0)
         return 0;
 
-    int mtu = GetIfaceMTU(dev);
-    switch (mtu) {
-        case 0:
-        case -1:
-            return 0;
+    int mtu = ld->mtu;
+    if (ld->mtu == 0) {
+        mtu = GetIfaceMTU(dev);
+        switch (mtu) {
+            case 0:
+            case -1:
+                return 0;
+        }
+        ld->mtu = mtu;
     }
-    ld->mtu = mtu;
     int ll_header = GetIfaceMaxHWHeaderLength(dev);
     return ll_header + mtu;
 }

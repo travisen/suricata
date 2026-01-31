@@ -15,15 +15,10 @@
  * 02110-1301, USA.
  */
 
-#ifndef __DETECT_WINDOW_H__
-#define __DETECT_WINDOW_H__
-
-typedef struct DetectWindowData_ {
-    uint8_t negated;	/** negated? 1=True : 0=False */
-    uint16_t size;     /** window size to match */
-} DetectWindowData;
+#ifndef SURICATA_DETECT_WINDOW_H
+#define SURICATA_DETECT_WINDOW_H
 
 /* prototypes */
 void DetectWindowRegister (void);
 
-#endif /* __DETECT_WINDOW_H__ */
+#endif /* SURICATA_DETECT_WINDOW_H */

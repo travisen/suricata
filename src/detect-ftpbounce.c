@@ -67,10 +67,7 @@ void DetectFtpbounceRegister(void)
     sigmatch_table[DETECT_FTPBOUNCE].url = "/rules/ftp-keywords.html#ftpbounce";
     sigmatch_table[DETECT_FTPBOUNCE].flags = SIGMATCH_NOOPT;
 
-    g_ftp_request_list_id = DetectBufferTypeRegister("ftp_request");
-
-    DetectAppLayerInspectEngineRegister(
-            "ftp_request", ALPROTO_FTP, SIG_FLAG_TOSERVER, 0, DetectEngineInspectGenericList, NULL);
+    g_ftp_request_list_id = DetectBufferTypeGetByName("ftp:request_complete:generic");
 }
 
 /**
@@ -207,7 +204,7 @@ int DetectFtpbounceSetup(DetectEngineCtx *de_ctx, Signature *s, const char *ftpb
 {
     SCEnter();
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_FTP) != 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_FTP) != 0)
         return -1;
 
     /* We don't need to allocate any data for ftpbounce here.
@@ -220,7 +217,8 @@ int DetectFtpbounceSetup(DetectEngineCtx *de_ctx, Signature *s, const char *ftpb
      * with a flow flag set lookup in the Match function.
      */
 
-    if (SigMatchAppendSMToList(de_ctx, s, DETECT_FTPBOUNCE, NULL, g_ftp_request_list_id) == NULL) {
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_FTPBOUNCE, NULL, g_ftp_request_list_id) ==
+            NULL) {
         return -1;
     }
     SCReturnInt(0);

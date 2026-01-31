@@ -44,17 +44,17 @@ static void LogTcpDataLogDeInitCtx(OutputCtx *);
 int LogTcpDataLogger(ThreadVars *tv, void *thread_data, const Flow *f, const uint8_t *data, uint32_t data_len, uint64_t tx_id, uint8_t flags);
 
 void LogTcpDataLogRegister (void) {
-    OutputRegisterStreamingModule(LOGGER_TCP_DATA, MODULE_NAME, "tcp-data",
-        LogTcpDataLogInitCtx, LogTcpDataLogger, STREAMING_TCP_DATA,
-        LogTcpDataLogThreadInit, LogTcpDataLogThreadDeinit, NULL);
+    OutputRegisterStreamingModule(LOGGER_TCP_DATA, MODULE_NAME, "tcp-data", LogTcpDataLogInitCtx,
+            LogTcpDataLogger, STREAMING_TCP_DATA, LogTcpDataLogThreadInit,
+            LogTcpDataLogThreadDeinit);
     OutputRegisterStreamingModule(LOGGER_TCP_DATA, MODULE_NAME, "http-body-data",
-        LogTcpDataLogInitCtx, LogTcpDataLogger, STREAMING_HTTP_BODIES,
-        LogTcpDataLogThreadInit, LogTcpDataLogThreadDeinit, NULL);
+            LogTcpDataLogInitCtx, LogTcpDataLogger, STREAMING_HTTP_BODIES, LogTcpDataLogThreadInit,
+            LogTcpDataLogThreadDeinit);
 }
 
 typedef struct LogTcpDataFileCtx_ {
     LogFileCtx *file_ctx;
-    enum OutputStreamingType type;
+    enum SCOutputStreamingType type;
     const char *log_dir;
     int file;
     int dir;
@@ -208,7 +208,7 @@ TmEcode LogTcpDataLogThreadDeinit(ThreadVars *t, void *data)
  *  \param conf Pointer to ConfNode containing this loggers configuration.
  *  \return NULL if failure, LogFileCtx* to the file_ctx if succesful
  * */
-OutputInitResult LogTcpDataLogInitCtx(ConfNode *conf)
+OutputInitResult LogTcpDataLogInitCtx(SCConfNode *conf)
 {
     OutputInitResult result = { NULL, false };
     char filename[PATH_MAX] = "";
@@ -242,7 +242,7 @@ OutputInitResult LogTcpDataLogInitCtx(ConfNode *conf)
             }
         }
 
-        const char *logtype = ConfNodeLookupChildValue(conf, "type");
+        const char *logtype = SCConfNodeLookupChildValue(conf, "type");
         if (logtype == NULL)
             logtype = "file";
 
@@ -269,7 +269,7 @@ OutputInitResult LogTcpDataLogInitCtx(ConfNode *conf)
     }
 
     if (tcpdatalog_ctx->dir == 1) {
-        tcpdatalog_ctx->log_dir = ConfigGetLogDirectory();
+        tcpdatalog_ctx->log_dir = SCConfigGetLogDirectory();
         char dirfull[PATH_MAX];
 
         /* create the filename to use */

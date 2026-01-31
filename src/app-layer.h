@@ -24,8 +24,8 @@
  *  Application layer handling and protocols implementation
  */
 
-#ifndef __APP_LAYER_H__
-#define __APP_LAYER_H__
+#ifndef SURICATA_APP_LAYER_H
+#define SURICATA_APP_LAYER_H
 
 #include "threadvars.h"
 #include "decode.h"
@@ -63,7 +63,7 @@ int AppLayerHandleUdp(ThreadVars *tv, AppLayerThreadCtx *app_tctx,
  *
  * \param The internal protocol id.
  */
-AppProto AppLayerGetProtoByName(char *alproto_name);
+AppProto AppLayerGetProtoByName(const char *alproto_name);
 
 /**
  * \brief Given the internal protocol id, returns a string representation
@@ -102,7 +102,7 @@ int AppLayerDeSetup(void);
  * \retval Pointer to the newly create thread context, on success;
  *         NULL, on failure.
  */
-AppLayerThreadCtx *AppLayerGetCtxThread(ThreadVars *tv);
+AppLayerThreadCtx *AppLayerGetCtxThread(void);
 
 /**
  * \brief Destroys the context created by AppLayerGetCtxThread().
@@ -121,21 +121,15 @@ void AppLayerRegisterThreadCounters(ThreadVars *tv);
 
 void AppLayerProfilingResetInternal(AppLayerThreadCtx *app_tctx);
 
-static inline void AppLayerProfilingReset(AppLayerThreadCtx *app_tctx)
-{
-#ifdef PROFILING
-    AppLayerProfilingResetInternal(app_tctx);
-#endif
-}
-
 void AppLayerProfilingStoreInternal(AppLayerThreadCtx *app_tctx, Packet *p);
 
-static inline void AppLayerProfilingStore(AppLayerThreadCtx *app_tctx, Packet *p)
-{
 #ifdef PROFILING
-    AppLayerProfilingStoreInternal(app_tctx, p);
+#define AppLayerProfilingReset(app_tctx)    AppLayerProfilingResetInternal(app_tctx)
+#define AppLayerProfilingStore(app_tctx, p) AppLayerProfilingStoreInternal(app_tctx, p)
+#else
+#define AppLayerProfilingReset(app_tctx)
+#define AppLayerProfilingStore(app_tctx, p)
 #endif
-}
 
 void AppLayerRegisterGlobalCounters(void);
 
@@ -145,7 +139,7 @@ void AppLayerRegisterGlobalCounters(void);
 void AppLayerUnittestsRegister(void);
 #endif
 
-void AppLayerIncTxCounter(ThreadVars *tv, Flow *f, uint64_t step);
+void AppLayerIncTxCounter(ThreadVars *tv, Flow *f, int64_t step);
 void AppLayerIncGapErrorCounter(ThreadVars *tv, Flow *f);
 void AppLayerIncAllocErrorCounter(ThreadVars *tv, Flow *f);
 void AppLayerIncParserErrorCounter(ThreadVars *tv, Flow *f);

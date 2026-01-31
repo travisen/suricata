@@ -85,82 +85,86 @@ static int g_droplog_flows_start = 1;
  *
  * \return return TM_ECODE_OK on success
  */
-static int DropLogJSON (JsonDropLogThread *aft, const Packet *p)
+static int DropLogJSON(ThreadVars *tv, JsonDropLogThread *aft, const Packet *p)
 {
     JsonDropOutputCtx *drop_ctx = aft->drop_ctx;
 
     JsonAddrInfo addr = json_addr_info_zero;
     JsonAddrInfoInit(p, LOG_DIR_PACKET, &addr);
 
-    JsonBuilder *js = CreateEveHeader(p, LOG_DIR_PACKET, "drop", &addr, drop_ctx->eve_ctx);
+    SCJsonBuilder *js = CreateEveHeader(p, LOG_DIR_PACKET, "drop", &addr, drop_ctx->eve_ctx);
     if (unlikely(js == NULL))
         return TM_ECODE_OK;
 
     if (p->flow != NULL) {
         if (p->flowflags & FLOW_PKT_TOSERVER) {
-            jb_set_string(js, "direction", "to_server");
+            SCJbSetString(js, "direction", "to_server");
         } else {
-            jb_set_string(js, "direction", "to_client");
+            SCJbSetString(js, "direction", "to_client");
         }
     }
 
-    jb_open_object(js, "drop");
+    SCJbOpenObject(js, "drop");
 
     uint16_t proto = 0;
-    if (PKT_IS_IPV4(p)) {
-        jb_set_uint(js, "len", IPV4_GET_IPLEN(p));
-        jb_set_uint(js, "tos", IPV4_GET_IPTOS(p));
-        jb_set_uint(js, "ttl", IPV4_GET_IPTTL(p));
-        jb_set_uint(js, "ipid", IPV4_GET_IPID(p));
-        proto = IPV4_GET_IPPROTO(p);
-    } else if (PKT_IS_IPV6(p)) {
-        jb_set_uint(js, "len", IPV6_GET_PLEN(p));
-        jb_set_uint(js, "tc", IPV6_GET_CLASS(p));
-        jb_set_uint(js, "hoplimit", IPV6_GET_HLIM(p));
-        jb_set_uint(js, "flowlbl", IPV6_GET_FLOW(p));
+    if (PacketIsIPv4(p)) {
+        const IPV4Hdr *ip4h = PacketGetIPv4(p);
+        SCJbSetUint(js, "len", IPV4_GET_RAW_IPLEN(ip4h));
+        SCJbSetUint(js, "tos", IPV4_GET_RAW_IPTOS(ip4h));
+        SCJbSetUint(js, "ttl", IPV4_GET_RAW_IPTTL(ip4h));
+        SCJbSetUint(js, "ipid", IPV4_GET_RAW_IPID(ip4h));
+        proto = IPV4_GET_RAW_IPPROTO(ip4h);
+    } else if (PacketIsIPv6(p)) {
+        const IPV6Hdr *ip6h = PacketGetIPv6(p);
+        SCJbSetUint(js, "len", IPV6_GET_RAW_PLEN(ip6h));
+        SCJbSetUint(js, "tc", IPV6_GET_RAW_CLASS(ip6h));
+        SCJbSetUint(js, "hoplimit", IPV6_GET_RAW_HLIM(ip6h));
+        SCJbSetUint(js, "flowlbl", IPV6_GET_RAW_FLOW(ip6h));
         proto = IPV6_GET_L4PROTO(p);
     }
     switch (proto) {
         case IPPROTO_TCP:
-            if (PKT_IS_TCP(p)) {
-                jb_set_uint(js, "tcpseq", TCP_GET_SEQ(p));
-                jb_set_uint(js, "tcpack", TCP_GET_ACK(p));
-                jb_set_uint(js, "tcpwin", TCP_GET_WINDOW(p));
-                jb_set_bool(js, "syn", TCP_ISSET_FLAG_SYN(p) ? true : false);
-                jb_set_bool(js, "ack", TCP_ISSET_FLAG_ACK(p) ? true : false);
-                jb_set_bool(js, "psh", TCP_ISSET_FLAG_PUSH(p) ? true : false);
-                jb_set_bool(js, "rst", TCP_ISSET_FLAG_RST(p) ? true : false);
-                jb_set_bool(js, "urg", TCP_ISSET_FLAG_URG(p) ? true : false);
-                jb_set_bool(js, "fin", TCP_ISSET_FLAG_FIN(p) ? true : false);
-                jb_set_uint(js, "tcpres",  TCP_GET_RAW_X2(p->tcph));
-                jb_set_uint(js, "tcpurgp", TCP_GET_URG_POINTER(p));
+            if (PacketIsTCP(p)) {
+                const TCPHdr *tcph = PacketGetTCP(p);
+                SCJbSetUint(js, "tcpseq", TCP_GET_RAW_SEQ(tcph));
+                SCJbSetUint(js, "tcpack", TCP_GET_RAW_ACK(tcph));
+                SCJbSetUint(js, "tcpwin", TCP_GET_RAW_WINDOW(tcph));
+                SCJbSetBool(js, "syn", TCP_ISSET_FLAG_RAW_SYN(tcph) ? true : false);
+                SCJbSetBool(js, "ack", TCP_ISSET_FLAG_RAW_ACK(tcph) ? true : false);
+                SCJbSetBool(js, "psh", TCP_ISSET_FLAG_RAW_PUSH(tcph) ? true : false);
+                SCJbSetBool(js, "rst", TCP_ISSET_FLAG_RAW_RST(tcph) ? true : false);
+                SCJbSetBool(js, "urg", TCP_ISSET_FLAG_RAW_URG(tcph) ? true : false);
+                SCJbSetBool(js, "fin", TCP_ISSET_FLAG_RAW_FIN(tcph) ? true : false);
+                SCJbSetUint(js, "tcpres", TCP_GET_RAW_X2(tcph));
+                SCJbSetUint(js, "tcpurgp", TCP_GET_RAW_URG_POINTER(tcph));
             }
             break;
         case IPPROTO_UDP:
-            if (PKT_IS_UDP(p)) {
-                jb_set_uint(js, "udplen", UDP_GET_LEN(p));
+            if (PacketIsUDP(p)) {
+                const UDPHdr *udph = PacketGetUDP(p);
+                SCJbSetUint(js, "udplen", UDP_GET_RAW_LEN(udph));
             }
             break;
         case IPPROTO_ICMP:
-            if (PKT_IS_ICMPV4(p)) {
-                jb_set_uint(js, "icmp_id", ICMPV4_GET_ID(p));
-                jb_set_uint(js, "icmp_seq", ICMPV4_GET_SEQ(p));
-            } else if(PKT_IS_ICMPV6(p)) {
-                jb_set_uint(js, "icmp_id", ICMPV6_GET_ID(p));
-                jb_set_uint(js, "icmp_seq", ICMPV6_GET_SEQ(p));
+            if (PacketIsICMPv4(p)) {
+                SCJbSetUint(js, "icmp_id", ICMPV4_GET_ID(p));
+                SCJbSetUint(js, "icmp_seq", ICMPV4_GET_SEQ(p));
+            } else if (PacketIsICMPv6(p)) {
+                SCJbSetUint(js, "icmp_id", ICMPV6_GET_ID(p));
+                SCJbSetUint(js, "icmp_seq", ICMPV6_GET_SEQ(p));
             }
             break;
     }
     if (p->drop_reason != 0) {
         const char *str = PacketDropReasonToString(p->drop_reason);
-        jb_set_string(js, "reason", str);
+        SCJbSetString(js, "reason", str);
     }
 
     /* Close drop. */
-    jb_close(js);
+    SCJbClose(js);
 
     if (aft->drop_ctx->flags & LOG_DROP_VERDICT) {
-        EveAddVerdict(js, p);
+        EveAddVerdict(js, p, 0);
     }
 
     if (aft->drop_ctx->flags & LOG_DROP_ALERTS) {
@@ -174,7 +178,7 @@ static int DropLogJSON (JsonDropLogThread *aft, const Packet *p)
             if ((pa->action & (ACTION_REJECT|ACTION_REJECT_DST|ACTION_REJECT_BOTH)) ||
                ((pa->action & ACTION_DROP) && EngineModeIsIPS()))
             {
-                AlertJsonHeader(NULL, p, pa, js, 0, &addr, NULL);
+                AlertJsonHeader(p, pa, js, 0, &addr, NULL);
                 logged = 1;
                 break;
             }
@@ -182,13 +186,13 @@ static int DropLogJSON (JsonDropLogThread *aft, const Packet *p)
         if (logged == 0) {
             if (p->alerts.drop.action != 0) {
                 const PacketAlert *pa = &p->alerts.drop;
-                AlertJsonHeader(NULL, p, pa, js, 0, &addr, NULL);
+                AlertJsonHeader(p, pa, js, 0, &addr, NULL);
             }
         }
     }
 
-    OutputJsonBuilderBuffer(js, aft->ctx);
-    jb_free(js);
+    OutputJsonBuilderBuffer(tv, p, p->flow, js, aft->ctx);
+    SCJbFree(js);
 
     return TM_ECODE_OK;
 }
@@ -253,7 +257,7 @@ static void JsonDropLogDeInitCtxSub(OutputCtx *output_ctx)
     SCFree(output_ctx);
 }
 
-static OutputInitResult JsonDropLogInitCtxSub(ConfNode *conf, OutputCtx *parent_ctx)
+static OutputInitResult JsonDropLogInitCtxSub(SCConfNode *conf, OutputCtx *parent_ctx)
 {
     OutputInitResult result = { NULL, false };
     if (OutputDropLoggerEnable() != 0) {
@@ -275,13 +279,13 @@ static OutputInitResult JsonDropLogInitCtxSub(ConfNode *conf, OutputCtx *parent_
     }
 
     if (conf) {
-        const char *extended = ConfNodeLookupChildValue(conf, "alerts");
+        const char *extended = SCConfNodeLookupChildValue(conf, "alerts");
         if (extended != NULL) {
-            if (ConfValIsTrue(extended)) {
+            if (SCConfValIsTrue(extended)) {
                 drop_ctx->flags |= LOG_DROP_ALERTS;
             }
         }
-        extended = ConfNodeLookupChildValue(conf, "flows");
+        extended = SCConfNodeLookupChildValue(conf, "flows");
         if (extended != NULL) {
             if (strcasecmp(extended, "start") == 0) {
                 g_droplog_flows_start = 1;
@@ -292,9 +296,9 @@ static OutputInitResult JsonDropLogInitCtxSub(ConfNode *conf, OutputCtx *parent_
                              "'flow' are 'start' and 'all'");
             }
         }
-        extended = ConfNodeLookupChildValue(conf, "verdict");
+        extended = SCConfNodeLookupChildValue(conf, "verdict");
         if (extended != NULL) {
-            if (ConfValIsTrue(extended)) {
+            if (SCConfValIsTrue(extended)) {
                 drop_ctx->flags |= LOG_DROP_VERDICT;
             }
         }
@@ -322,7 +326,7 @@ static OutputInitResult JsonDropLogInitCtxSub(ConfNode *conf, OutputCtx *parent_
 static int JsonDropLogger(ThreadVars *tv, void *thread_data, const Packet *p)
 {
     JsonDropLogThread *td = thread_data;
-    int r = DropLogJSON(td, p);
+    int r = DropLogJSON(tv, td, p);
     if (r < 0)
         return -1;
 
@@ -386,8 +390,15 @@ static bool JsonDropLogCondition(ThreadVars *tv, void *data, const Packet *p)
 
 void JsonDropLogRegister (void)
 {
-    OutputRegisterPacketSubModule(LOGGER_JSON_DROP, "eve-log", MODULE_NAME,
-        "eve-log.drop", JsonDropLogInitCtxSub, JsonDropLogger,
-        JsonDropLogCondition, JsonDropLogThreadInit, JsonDropLogThreadDeinit,
-        NULL);
+    OutputPacketLoggerFunctions output_logger_functions = {
+        .LogFunc = JsonDropLogger,
+        .FlushFunc = OutputJsonLogFlush,
+        .ConditionFunc = JsonDropLogCondition,
+        .ThreadInitFunc = JsonDropLogThreadInit,
+        .ThreadDeinitFunc = JsonDropLogThreadDeinit,
+        .ThreadExitPrintStatsFunc = NULL,
+    };
+
+    OutputRegisterPacketSubModule(LOGGER_JSON_DROP, "eve-log", MODULE_NAME, "eve-log.drop",
+            JsonDropLogInitCtxSub, &output_logger_functions);
 }

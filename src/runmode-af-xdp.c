@@ -29,7 +29,6 @@
  * AF_XDP socket runmode
  *
  */
-#define PCAP_DONT_INCLUDE_PCAP_BPF_H 1
 #define SC_PCAP_DONT_INCLUDE_PCAP_H  1
 #include "suricata-common.h"
 #include "tm-threads.h"
@@ -50,7 +49,7 @@
 #include "util-time.h"
 #include "util-cpu.h"
 #include "util-affinity.h"
-#include "util-device.h"
+#include "util-device-private.h"
 #include "util-runmodes.h"
 #include "util-ioctl.h"
 #include "util-ebpf.h"
@@ -77,8 +76,6 @@ void RunModeIdsAFXDPRegister(void)
             "Workers af-xdp mode, each thread does all"
             " tasks from acquisition to logging",
             RunModeIdsAFXDPWorkers, NULL);
-
-    return;
 }
 
 #ifdef HAVE_AF_XDP
@@ -126,14 +123,9 @@ static TmEcode ConfigSetThreads(AFXDPIfaceConfig *aconf, const char *entry_str)
         SCReturnInt(TM_ECODE_OK);
     }
 
-    if (StringParseInt32(&aconf->threads, 10, 0, entry_str) < 0) {
+    if (StringParseUint16(&aconf->threads, 10, 0, entry_str) < 0) {
         SCLogError("Threads entry for interface %s contain non-numerical characters - \"%s\"",
                 aconf->iface, entry_str);
-        SCReturnInt(TM_ECODE_FAILED);
-    }
-
-    if (aconf->threads < 0) {
-        SCLogError("Interface %s has a negative number of threads", aconf->iface);
         SCReturnInt(TM_ECODE_FAILED);
     }
 
@@ -159,12 +151,12 @@ static TmEcode ConfigSetThreads(AFXDPIfaceConfig *aconf, const char *entry_str)
 static void *ParseAFXDPConfig(const char *iface)
 {
     const char *confstr = NULL;
-    ConfNode *if_root;
-    ConfNode *if_default = NULL;
-    ConfNode *af_xdp_node = NULL;
+    SCConfNode *if_root;
+    SCConfNode *if_default = NULL;
+    SCConfNode *af_xdp_node = NULL;
     int conf_val = 0;
     intmax_t conf_val_int = 0;
-    bool boolval = false;
+    int boolval = 0;
 
     if (iface == NULL) {
         return NULL;
@@ -189,7 +181,7 @@ static void *ParseAFXDPConfig(const char *iface)
     aconf->mem_alignment = XSK_UMEM__DEFAULT_FLAGS;
 
     /* Find initial node */
-    af_xdp_node = ConfGetNode("af-xdp");
+    af_xdp_node = SCConfGetNode("af-xdp");
     if (af_xdp_node == NULL) {
         SCLogInfo("unable to find af-xdp config using default values");
         goto finalize;
@@ -213,7 +205,7 @@ static void *ParseAFXDPConfig(const char *iface)
 
     /* Threading */
     confstr = "auto";
-    (void)ConfGetChildValueWithDefault(if_root, if_default, "threads", &confstr);
+    (void)SCConfGetChildValueWithDefault(if_root, if_default, "threads", &confstr);
     if (ConfigSetThreads(aconf, confstr) != TM_ECODE_OK) {
         aconf->DerefFunc(aconf);
         return NULL;
@@ -223,7 +215,7 @@ static void *ParseAFXDPConfig(const char *iface)
     (void)SC_ATOMIC_ADD(aconf->ref, aconf->threads);
 
     /* Promisc Mode */
-    (void)ConfGetChildValueBoolWithDefault(if_root, if_default, "disable-promisc", (int *)&boolval);
+    (void)SCConfGetChildValueBoolWithDefault(if_root, if_default, "disable-promisc", &boolval);
     if (boolval) {
         SCLogConfig("Disabling promiscuous mode on iface %s", aconf->iface);
         aconf->promisc = 0;
@@ -231,7 +223,7 @@ static void *ParseAFXDPConfig(const char *iface)
 
 #ifdef HAVE_AF_XDP
     /* AF_XDP socket mode options */
-    if (ConfGetChildValueWithDefault(if_root, if_default, "force-xdp-mode", &confstr) == 1) {
+    if (SCConfGetChildValueWithDefault(if_root, if_default, "force-xdp-mode", &confstr) == 1) {
         if (strncasecmp(confstr, "drv", 3) == 0) {
             aconf->mode |= XDP_FLAGS_DRV_MODE;
         } else if (strncasecmp(confstr, "skb", 3) == 0) {
@@ -243,7 +235,7 @@ static void *ParseAFXDPConfig(const char *iface)
     }
 
     /* copy and zerocopy binding options */
-    if (ConfGetChildValueWithDefault(if_root, if_default, "force-bind-mode", &confstr) == 1) {
+    if (SCConfGetChildValueWithDefault(if_root, if_default, "force-bind-mode", &confstr) == 1) {
         if (strncasecmp(confstr, "zero", 4) == 0) {
             aconf->bind_flags |= XDP_ZEROCOPY;
         } else if (strncasecmp(confstr, "copy", 4) == 0) {
@@ -255,28 +247,29 @@ static void *ParseAFXDPConfig(const char *iface)
     }
 
     /* memory alignment mode selection */
-    if (ConfGetChildValueWithDefault(if_root, if_default, "mem-unaligned", &confstr) == 1) {
+    if (SCConfGetChildValueWithDefault(if_root, if_default, "mem-unaligned", &confstr) == 1) {
         if (strncasecmp(confstr, "yes", 3) == 0) {
             aconf->mem_alignment = XDP_UMEM_UNALIGNED_CHUNK_FLAG;
         }
     }
 
     /* Busy polling options */
-    if (ConfGetChildValueBoolWithDefault(if_root, if_default, "enable-busy-poll", &conf_val) == 1) {
+    if (SCConfGetChildValueBoolWithDefault(if_root, if_default, "enable-busy-poll", &conf_val) ==
+            1) {
         if (conf_val == 0) {
             aconf->enable_busy_poll = false;
         }
     }
 
     if (aconf->enable_busy_poll) {
-        if (ConfGetChildValueIntWithDefault(if_root, if_default, "busy-poll-time", &conf_val_int) ==
-                1) {
+        if (SCConfGetChildValueIntWithDefault(
+                    if_root, if_default, "busy-poll-time", &conf_val_int) == 1) {
             if (conf_val_int) {
                 aconf->busy_poll_time = conf_val_int;
             }
         }
 
-        if (ConfGetChildValueIntWithDefault(
+        if (SCConfGetChildValueIntWithDefault(
                     if_root, if_default, "busy-poll-budget", &conf_val_int) == 1) {
             if (conf_val_int) {
                 aconf->busy_poll_budget = conf_val_int;
@@ -284,12 +277,12 @@ static void *ParseAFXDPConfig(const char *iface)
         }
 
         /* 0 value is valid for these Linux tunable's */
-        if (ConfGetChildValueIntWithDefault(
+        if (SCConfGetChildValueIntWithDefault(
                     if_root, if_default, "gro-flush-timeout", &conf_val_int) == 1) {
             aconf->gro_flush_timeout = conf_val_int;
         }
 
-        if (ConfGetChildValueIntWithDefault(
+        if (SCConfGetChildValueIntWithDefault(
                     if_root, if_default, "napi-defer-hard-irq", &conf_val_int) == 1) {
             aconf->napi_defer_hard_irqs = conf_val_int;
         }
@@ -308,7 +301,7 @@ finalize:
     return aconf;
 }
 
-static int AFXDPConfigGetThreadsCount(void *conf)
+static uint16_t AFXDPConfigGetThreadsCount(void *conf)
 {
     if (conf == NULL)
         FatalError("Configuration file is NULL");
@@ -332,7 +325,7 @@ int RunModeIdsAFXDPSingle(void)
 
     TimeModeSetLive();
 
-    (void)ConfGet("af-xdp.live-interface", &live_dev);
+    (void)SCConfGet("af-xdp.live-interface", &live_dev);
 
     if (AFXDPQueueProtectionInit() != TM_ECODE_OK) {
         FatalError("Unable to init AF_XDP queue protection.");
@@ -366,7 +359,7 @@ int RunModeIdsAFXDPWorkers(void)
 
     TimeModeSetLive();
 
-    (void)ConfGet("af-xdp.live-interface", &live_dev);
+    (void)SCConfGet("af-xdp.live-interface", &live_dev);
 
     if (AFXDPQueueProtectionInit() != TM_ECODE_OK) {
         FatalError("Unable to init AF_XDP queue protection.");

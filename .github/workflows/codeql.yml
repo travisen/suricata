@@ -1,17 +1,25 @@
-name: "CodeQL"
+name: "CodeQL (Rust/C)"
 
 on:
   push:
-    branches: [ master ]
+    branches: [ main ]
     paths-ignore:
       - "doc/**"
+      - "etc/schema.json"
   pull_request:
     # The branches below must be a subset of the branches above
-    branches: [ master ]
+    branches: [ main ]
     paths-ignore:
       - "doc/**"
+      - "etc/schema.json"
   schedule:
     - cron: '18 21 * * 1'
+
+permissions: read-all
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   analyze:
@@ -27,17 +35,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [ 'cpp', 'python' ]
-        # CodeQL supports [ 'cpp', 'csharp', 'go', 'java', 'javascript', 'python', 'ruby' ]
+        language: [ 'cpp', 'rust' ]
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v3.5.3
+      uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
 
     # Initializes the CodeQL tools for scanning.
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@v2
+      uses: github/codeql-action/init@v4.31.6
       with:
         languages: ${{ matrix.language }}
+        queries: security-extended
 
     - run: |
        sudo apt-get update
@@ -47,12 +55,11 @@ jobs:
        sudo apt-get install libjansson-dev
        sudo apt-get install libpcap-dev
        sudo apt-get install libnuma-dev
-       git clone --depth 1 https://github.com/OISF/libhtp.git
        cargo install cbindgen
        export PATH=/opt/work/.cargo/bin:$PATH
         chmod +x autogen.sh
        ./autogen.sh
-       ./configure
+       ./configure --enable-warnings --enable-unittests
        make
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v2
+      uses: github/codeql-action/analyze@v4.31.6

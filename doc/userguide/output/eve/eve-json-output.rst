@@ -15,7 +15,38 @@ Each alert, http log, etc will go into this one file: 'eve.json'. This file
 can then be processed by 3rd party tools like Logstash (ELK) or jq.
 
 If ``ethernet`` is set to yes, then ethernet headers will be added to events
-if available.
+if available. If the ``pkt_src`` value is ``stream (flow timeout)``, then the
+``ethernet`` value will be populated with mac addresses from the flow's first
+packet with ethernet header.
+
+If ``suricata-version`` is set to yes, then Suricata version, with its git
+revision if available, will be added to events as ``suricata_version``.
+
+Output Buffering
+~~~~~~~~~~~~~~~~
+
+Output flushing is controlled by values in the configuration section ``heartbeat``. By default, Suricata's
+output is synchronous with little possibility that written data will not be persisted. However, if ``output.buffer-size``
+has a non-zero value, then some data may be written for the output, but not actually flushed. ``buffer-size`` bytes
+may be held in memory and written a short time later opening the possibility -- but limited -- for output data
+loss.
+
+Hence, a heartbeat mechanism is introduced to limit the amount of time buffered data may exist before being
+flushed.  Control is provided to instruct Suricata's detection threads to flush their EVE output. With default
+values, there is no change in output buffering and flushing behavior. ``output-flush-interval`` controls
+how often Suricata's detect threads will flush output in a heartbeat fashion. A value of ``0`` means
+"never"; non-zero values must be in ``[1-60]`` seconds.
+
+Flushing should be considered when ``outputs.buffer-size`` is greater than 0 to limit the amount and
+age of buffered, but not persisted, output data.  Flushing is never needed when ``buffer-size`` is ``0``.
+
+
+::
+
+   heartbeat:
+     #output-flush-interval: 0
+
+
 
 Output types
 ~~~~~~~~~~~~
@@ -30,6 +61,10 @@ Output types::
       # Enable for multi-threaded eve.json output; output files are amended
       # with an identifier, e.g., eve.9.json. Default: off
       #threaded: off
+      # Specify the amount of buffering, in bytes, for
+      # this output type. The default value 0 means "no
+      # buffering".
+      #buffer-size: 0
       #prefix: "@cee: " # prefix to prepend to each log entry
       # the following are valid when type: syslog above
       #identity: "suricata"
@@ -37,14 +72,23 @@ Output types::
       #level: Info ## possible levels: Emergency, Alert, Critical,
                    ## Error, Warning, Notice, Info, Debug
       #ethernet: no # log ethernet header in events when available
+      #suricata-version: no # include suricata version. Default no.
       #redis:
       #  server: 127.0.0.1
       #  port: 6379
       #  async: true ## if redis replies are read asynchronously
-      #  mode: list ## possible values: list|lpush (default), rpush, channel|publish
+      #  mode: list ## possible values: list|lpush (default), rpush, channel|publish, xadd|stream
       #             ## lpush and rpush are using a Redis list. "list" is an alias for lpush
       #             ## publish is using a Redis channel. "channel" is an alias for publish
-      #  key: suricata ## key or channel to use (default to suricata)
+      #             ## xadd is using a Redis stream. "stream" is an alias for xadd
+      #  key: suricata ## string denoting the key/channel/stream to use (default to suricata)
+      #  stream-maxlen: 100000        ## Automatically trims the stream length to at most
+                                      ## this number of events. Set to 0 to disable trimming.
+                                      ## Only used when mode is set to xadd/stream.
+      #  stream-trim-exact: false     ## Trim exactly to the maximum stream length above.
+                                      ## Default: use inexact trimming (inexact by a few
+                                      ## tens of items)
+                                      ## Only used when mode is set to xadd/stream.
       # Redis pipelining set up. This will enable to only do a query every
       # 'batch-size' events. This should lower the latency induced by network
       # connection at the cost of some memory. There is no flushing implemented
@@ -62,12 +106,28 @@ Alerts are event records for rule matches. They can be amended with
 metadata, such as the application layer record (HTTP, DNS, etc) an
 alert was generated for, and elements of the rule.
 
+The alert is amended with application layer metadata for signatures
+using application layer keywords. It is also the case for protocols
+over UDP as each single packet is expected to contain a PDU.
+
+For other signatures, the option ``guess-applayer-tx``
+can be used to force the detect engine to tie a transaction
+to an alert.
+This transaction is not guaranteed to be the relevant one,
+depending on your use case and how you define relevant here.
+**WARNING: If there are multiple live transactions, none will get
+picked up.** This is to reduce the chances of logging unrelated data, and may
+lead to alerts being logged without metadata, in some cases.
+The alert event will have ``tx_guessed: true`` to recognize
+such alerts.
+
 Metadata::
 
         - alert:
             #payload: yes             # enable dumping payload in Base64
             #payload-buffer-size: 4kb # max size of payload buffer to output in eve-log
             #payload-printable: yes   # enable dumping payload in printable (lossy) format
+            #payload-length: yes      # enable dumping payload length, including the gaps
             #packet: yes              # enable dumping of packet (without stream segments)
             #http-body: yes           # Requires metadata; enable dumping of http body in Base64
             #http-body-printable: yes # Requires metadata; enable dumping of http body in printable format
@@ -87,6 +147,9 @@ Metadata::
 
                 # Log the raw rule text.
                 #raw: false
+
+                # Include the rule reference information
+                #reference: false
 
 Anomaly
 ~~~~~~~
@@ -218,7 +281,11 @@ In the ``custom`` option values from both columns can be used. The
 DNS
 ~~~
 
-.. note:: As of Suricata 7.0 the v1 EVE DNS format has been removed.
+.. note::
+
+   As of Suricata 7.0 the v1 EVE DNS format has been removed.
+
+   Version 2 EVE DNS will be removed in Suricata 9.
 
 DNS records are logged as one entry for the request, and one entry for
 the response.
@@ -226,7 +293,7 @@ the response.
 YAML::
 
         - dns:
-            #version: 2
+            #version: 3
 
             # Enable/disable this logger. Default: enabled.
             #enabled: yes
@@ -259,12 +326,67 @@ YAML::
             extended: yes     # enable this for extended logging information
             # custom allows to control which tls fields that are included
             # in eve-log
-            #custom: [subject, issuer, serial, fingerprint, sni, version, not_before, not_after, certificate, chain, ja3, ja3s]
+            #custom: [subject, issuer, serial, fingerprint, sni, version, not_before, not_after, certificate, chain, ja3, ja3s, ja4]
 
 The default is to log certificate subject and issuer. If ``extended`` is
 enabled, then the log gets more verbose.
 
 By using ``custom`` it is possible to select which TLS fields to log.
+**Note that this will disable ``extended`` logging.**
+
+ARP
+~~~
+
+ARP records are logged as one entry for the request, and one entry for
+the response.
+
+YAML::
+
+        - arp:
+            enabled: no
+
+The logger is disabled by default since ARP can generate a large
+number of events.
+
+Netflow
+~~~~~~~
+
+Netflow records closely relate to flow records except that they are unidirectional while flow records
+are bidirectional. This means that there will be twice as many netflow records as there are flow records.
+
+Netflow records are disabled by default.
+
+YAML::
+
+      #- netflow
+
+To enable netflow, change this to::
+
+      - netflow:
+          enabled: yes
+
+MQTT
+~~~~
+
+EVE-JSON output for MQTT consists of one object per MQTT transaction, with some common and various type-specific fields.
+Two aspects can be configured:
+
+YAML::
+
+        - mqtt:
+            # passwords: yes           # enable output of passwords
+            # string-log-limit: 1kb    # limit size of logged strings in bytes.
+                                       # Can be specified in kb, mb, gb. Just a number
+                                       # is parsed as bytes. Default is 1KB.
+                                       # Use a value of 0 to disable limiting.
+                                       # Note that the size is also bounded by
+                                       # the maximum parsed message size (see
+                                       # app-layer configuration)
+
+The default is to output passwords in cleartext and not to limit the size of
+message payloads. Depending on the kind of context the parser is used in (public
+output, frequent binary transmissions, ...) this can be configured for regular
+``mqtt`` events.
 
 Drops
 ~~~~~
@@ -281,6 +403,27 @@ Config::
         # (will show more information in case of a drop caused by 'reject')
         verdict: yes
 
+.. _eve-json-output-stats:
+
+Stats
+~~~~~
+
+Zero-valued Counters
+""""""""""""""""""""
+
+While the human-friendly `stats.log` output will only log out non-zeroed
+counters, by default EVE Stats logs output all enabled counters, which may lead
+to fairly verbose logs.
+
+To reduce log file size, one may set `null-values` to false. Do note
+that this may impact on the visibility of information for which a stats counter
+as zero is relevant.
+
+Config::
+
+    - stats:
+        # Don't log stats counters that are zero. Default: true
+        #null-values: false    # False will NOT log stats counters: 0
 
 Date modifiers in filename
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -474,8 +617,8 @@ Options
 The output can be enabled per instance of the EVE logger.
 
 The ``community-id`` option is boolean. If set to ``true`` it is enabled.
-The ``community-id-seed`` option specifies a unsigned 16 bit value that
-is used a seed to the hash that is calculated for the ``community-id``
+The ``community-id-seed`` option specifies an unsigned 16 bit value that
+is used to seed the hash that is calculated for the ``community-id``
 output. This must be set to the same value on all tools that output this
 record.
 

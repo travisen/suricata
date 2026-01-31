@@ -10,7 +10,7 @@ Essentially, these are:
 #. Agree to and sign our :ref:`Contribution Agreement<contribution-agreement>`
 #. Communicate early, and use the :ref:`preferred channels <communication-channels>`
 #. :ref:`claim-ticket`
-#. :ref:`Fork from master <what-branch-to-work-on>`
+#. :ref:`Fork from main <what-branch-to-work-on>`
 #. Follow our :ref:`Coding Style`
 #. Use our :ref:`documentation-style`
 #. Stick to our :ref:`commit guidelines<commits>`
@@ -53,9 +53,37 @@ org/projects/suricata/issues>`_. Tickets help us keep track of the work done,
 indicate when changes need backports etc.
 
 They are also important if you would like to see your new feature officially
-added to our tool: the ticket documents your ideas so  we can analyze how do they
+added to our tool: the ticket documents your ideas so we can analyze how do they
 fit in our plans for Suricata, and, if the feature is accepted, we can properly
 track progress etc.
+
+The ticket should clearly reflect the intention as per the tracker.
+For example, if the ticket is a "Bug", the title should only say what the
+bug is.
+
+**Good ticket title examples**
+
+1. **Ticket:**
+[Bug #00000] stream: segfault in case of increasing gaps
+
+**Why is it good?**
+It shows subsystem affected and exactly what the bug is.
+
+2. **Ticket:**
+[Bug #19999] dcerpc: memleak in case of invalid data
+
+**Why is it good?**
+It talks about the bug itself as the Tracker indicates.
+
+3. **Ticket:**
+[Bug #44444] stream: excess memuse in `TcpTracking`
+
+**Why is it good?**
+Title is to the point and conveys what the issue is.
+
+.. note:: The ticket titles are used to auto generate ChangeLog with each
+    release. If the ticket titles are unclear, the ChangeLog does not properly
+    convey what issues were fixed with a release.
 
 .. note:: If you want to add new functionalities (e.g. a new application layer
     protocol), please ask us first whether we see that being merged into
@@ -121,7 +149,7 @@ The team and/or community members can then consider offering help. It is best
 to indicate this prior to doing the actual work, because we will reject features
 if no one steps up.
 
-It is also important to note that *community supported* features  will be
+It is also important to note that *community supported* features will be
 disabled by default, and if it brings in new dependencies (libraries or Rust
 crates) those will also be optional and disabled by default.
 
@@ -153,18 +181,18 @@ What branch to work on
 
 There are usually 2 or 3 active branches:
 
-    * master-x.x.x (e.g. master-6.0.x)
     * main-x.x.x (e.g. main-7.0.x)
-    * master
+    * main-x.x.x (e.g. main-8.0.x)
+    * main
 
-The ones with version numbers are stable branches. **master** is the development branch.
+The ones with version numbers are stable branches. **main** is the development branch.
 
 The stable branch should only be worked on for important bug fixes or other
 needed :doc:`backports<backports-guide>`. Those are mainly expected from more
 experienced contributors.
 
 Development of new features or large scale redesign is done in the development
-branch. New development and new contributors should work with *master* except
+branch. New development and new contributors should work with *main* except
 in very special cases - which should and would be discussed with us first.
 
 If in doubt, please reach out to us via :ref:`Redmine, Discord or
@@ -196,8 +224,16 @@ We have a :ref:`Coding Style` that must be followed.
 Documentation Style
 ===================
 
-For documenting *code*, please follow Rust documentation and/or Doxygen
-guidelines, according to what your contribution is using (Rust or C).
+For documenting *code*, please follow Rust documentation and/or
+Doxygen guidelines, according to what your contribution is using (Rust
+or C). The rest of this section refers to the user and developer
+documentation.
+
+The user and developer guide documentation (what you are reading now)
+is written in *reStructuredText* and rendered with `Sphinx
+<https://www.sphinx-doc.org/en/master/usage/restructuredtext/basics.html>`_. For
+a primer *reStucturedText* please see the `reStrucutredText Primer
+<https://www.sphinx-doc.org/en/master/usage/restructuredtext/basics.html>`_.
 
 When writing or updating *documentation pages*, please:
 
@@ -207,6 +243,32 @@ When writing or updating *documentation pages*, please:
 * bear in mind that our documentation is published on `Read the Docs <https:/
   /docs.suricata.io/en/latest/#suricata-user-guide>`_ and can also be
   built to pdf, so it is important that it looks good in such formats.
+
+Headings
+--------
+
+reStructuredText allows for flexible header order, for consistency
+please use the following order:
+
+* ``#``: for h1
+* ``*``: for h2
+* ``=``: for h3
+* ``-``: for h4
+* ``~``: for h5
+* ``^``: for h6
+
+For example, in a new documentation page:
+
+.. code-block:: rst
+
+  Page Title
+  ##########
+
+  Section
+  *******
+
+  Sub-Section
+  ===========
 
 Rule examples
 -------------
@@ -236,7 +298,7 @@ When using these, indicate the portion to be highlighted by surrounding it with
 
 It is only necessary to invoke the role once per document. One can see these
 being invoked in our introduction to the rule language (see `Rules intro
-<https://raw.githubusercontent.com/OISF/suricata/master/doc/userguide/rules/intro.rst>`_).
+<https://raw.githubusercontent.com/OISF/suricata/main/doc/userguide/rules/intro.rst>`_).
 
 A rule example like::
 

@@ -15,9 +15,10 @@ Suricata Rules
    http-keywords
    file-keywords
    dns-keywords
+   mdns-keywords
    tls-keywords
    ssh-keywords
-   ja3-keywords
+   ja-keywords
    modbus-keyword
    dcerpc-keywords
    dhcp-keywords
@@ -29,6 +30,7 @@ Suricata Rules
    snmp-keywords
    base64-keywords
    sip-keywords
+   sdp-keywords
    rfb-keywords
    mqtt-keywords
    ike-keywords
@@ -36,8 +38,11 @@ Suricata Rules
    quic-keywords
    nfs-keywords
    smtp-keywords
+   websocket-keywords
    app-layer
+   decode-layer
    xbits
+   noalert
    thresholding
    ip-reputation-rules
    ipaddr
@@ -47,3 +52,9 @@ Suricata Rules
    differences-from-snort
    multi-buffer-matching
    tag
+   vlan-keywords
+   ldap-keywords
+   pgsql-keywords
+   email-keywords
+   rule-types
+   rules-internals

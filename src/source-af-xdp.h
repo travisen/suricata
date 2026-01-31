@@ -21,15 +21,15 @@
  * \author Richard McConnell <richard_mcconnell@rapid7.com>
  */
 
-#ifndef __SOURCE_AFXDP_H__
-#define __SOURCE_AFXDP_H__
+#ifndef SURICATA_SOURCE_AFXDP_H
+#define SURICATA_SOURCE_AFXDP_H
 
 #define AFXDP_IFACE_NAME_LENGTH 48
 
 typedef struct AFXDPIfaceConfig {
     char iface[AFXDP_IFACE_NAME_LENGTH];
     /* number of threads */
-    int threads;
+    uint16_t threads;
     int promisc;
 
     /* misc use flags */
@@ -64,6 +64,5 @@ void TmModuleReceiveAFXDPRegister(void);
 void TmModuleDecodeAFXDPRegister(void);
 
 TmEcode AFXDPQueueProtectionInit(void);
-void AFXDPMutexClean(void);
 
-#endif /* __SOURCE_AFXDP_H__ */
+#endif /* SURICATA_SOURCE_AFXDP_H */

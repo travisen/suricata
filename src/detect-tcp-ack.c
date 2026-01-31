@@ -34,6 +34,7 @@
 #include "detect-engine-prefilter.h"
 #include "detect-engine-prefilter-common.h"
 #include "detect-engine-build.h"
+#include "detect-engine-uint.h"
 
 #include "detect-tcp-ack.h"
 
@@ -62,6 +63,7 @@ void DetectAckRegister(void)
     sigmatch_table[DETECT_ACK].Match = DetectAckMatch;
     sigmatch_table[DETECT_ACK].Setup = DetectAckSetup;
     sigmatch_table[DETECT_ACK].Free = DetectAckFree;
+    sigmatch_table[DETECT_ACK].flags = SIGMATCH_INFO_UINT32;
 
     sigmatch_table[DETECT_ACK].SupportsPrefilter = PrefilterTcpAckIsPrefilterable;
     sigmatch_table[DETECT_ACK].SetupPrefilter = PrefilterSetupTcpAck;
@@ -85,14 +87,15 @@ void DetectAckRegister(void)
 static int DetectAckMatch(DetectEngineThreadCtx *det_ctx,
                           Packet *p, const Signature *s, const SigMatchCtx *ctx)
 {
-    const DetectAckData *data = (const DetectAckData *)ctx;
+    DEBUG_VALIDATE_BUG_ON(PKT_IS_PSEUDOPKT(p));
+    const DetectU32Data *data = (const DetectU32Data *)ctx;
 
     /* This is only needed on TCP packets */
-    if (!(PKT_IS_TCP(p)) || PKT_IS_PSEUDOPKT(p)) {
+    if (!(PacketIsTCP(p))) {
         return 0;
     }
 
-    return (data->ack == TCP_GET_ACK(p)) ? 1 : 0;
+    return DetectU32Match(TCP_GET_RAW_ACK(PacketGetTCP(p)), data);
 }
 
 /**
@@ -109,29 +112,17 @@ static int DetectAckMatch(DetectEngineThreadCtx *det_ctx,
  */
 static int DetectAckSetup(DetectEngineCtx *de_ctx, Signature *s, const char *optstr)
 {
-    DetectAckData *data = NULL;
+    DetectU32Data *data = SCDetectU32Parse(optstr);
+    if (data == NULL)
+        return -1;
 
-    data = SCMalloc(sizeof(DetectAckData));
-    if (unlikely(data == NULL))
-        goto error;
-
-    if (StringParseUint32(&data->ack, 10, 0, optstr) < 0) {
-        goto error;
-    }
-
-    if (SigMatchAppendSMToList(de_ctx, s, DETECT_ACK, (SigMatchCtx *)data, DETECT_SM_LIST_MATCH) ==
-            NULL) {
-        goto error;
+    if (SCSigMatchAppendSMToList(
+                de_ctx, s, DETECT_ACK, (SigMatchCtx *)data, DETECT_SM_LIST_MATCH) == NULL) {
+        DetectAckFree(de_ctx, data);
+        return -1;
     }
     s->flags |= SIG_FLAG_REQUIRE_PACKET;
-
     return 0;
-
-error:
-    if (data)
-        SCFree(data);
-    return -1;
-
 }
 
 /**
@@ -142,8 +133,7 @@ error:
  */
 static void DetectAckFree(DetectEngineCtx *de_ctx, void *ptr)
 {
-    DetectAckData *data = (DetectAckData *)ptr;
-    SCFree(data);
+    SCDetectU32Free(ptr);
 }
 
 /* prefilter code */
@@ -151,53 +141,33 @@ static void DetectAckFree(DetectEngineCtx *de_ctx, void *ptr)
 static void
 PrefilterPacketAckMatch(DetectEngineThreadCtx *det_ctx, Packet *p, const void *pectx)
 {
+    DEBUG_VALIDATE_BUG_ON(PKT_IS_PSEUDOPKT(p));
     const PrefilterPacketHeaderCtx *ctx = pectx;
 
     if (!PrefilterPacketHeaderExtraMatch(ctx, p))
         return;
 
-    if ((p->proto) == IPPROTO_TCP && !(PKT_IS_PSEUDOPKT(p)) &&
-        (p->tcph != NULL) && (TCP_GET_ACK(p) == ctx->v1.u32[0]))
-    {
-        SCLogDebug("packet matches TCP ack %u", ctx->v1.u32[0]);
-        PrefilterAddSids(&det_ctx->pmq, ctx->sigs_array, ctx->sigs_cnt);
+    if (p->proto == IPPROTO_TCP && PacketIsTCP(p)) {
+        DetectU32Data du32;
+        du32.mode = ctx->v1.u8[0];
+        du32.arg1 = ctx->v1.u32[1];
+        du32.arg2 = ctx->v1.u32[2];
+        if (DetectU32Match(TCP_GET_RAW_ACK(PacketGetTCP(p)), &du32)) {
+            SCLogDebug("packet matches TCP ack %u", ctx->v1.u32[0]);
+            PrefilterAddSids(&det_ctx->pmq, ctx->sigs_array, ctx->sigs_cnt);
+        }
     }
-}
-
-static void
-PrefilterPacketAckSet(PrefilterPacketHeaderValue *v, void *smctx)
-{
-    const DetectAckData *a = smctx;
-    v->u32[0] = a->ack;
-}
-
-static bool
-PrefilterPacketAckCompare(PrefilterPacketHeaderValue v, void *smctx)
-{
-    const DetectAckData *a = smctx;
-    if (v.u32[0] == a->ack)
-        return true;
-    return false;
 }
 
 static int PrefilterSetupTcpAck(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
 {
-    return PrefilterSetupPacketHeader(de_ctx, sgh, DETECT_ACK,
-        PrefilterPacketAckSet,
-        PrefilterPacketAckCompare,
-        PrefilterPacketAckMatch);
+    return PrefilterSetupPacketHeader(de_ctx, sgh, DETECT_ACK, SIG_MASK_REQUIRE_REAL_PKT,
+            PrefilterPacketU32Set, PrefilterPacketU32Compare, PrefilterPacketAckMatch);
 }
 
 static bool PrefilterTcpAckIsPrefilterable(const Signature *s)
 {
-    const SigMatch *sm;
-    for (sm = s->init_data->smlists[DETECT_SM_LIST_MATCH] ; sm != NULL; sm = sm->next) {
-        switch (sm->type) {
-            case DETECT_ACK:
-                return true;
-        }
-    }
-    return false;
+    return PrefilterIsPrefilterableById(s, DETECT_ACK);
 }
 
 #ifdef UNITTESTS
@@ -208,116 +178,67 @@ static bool PrefilterTcpAckIsPrefilterable(const Signature *s)
  */
 static int DetectAckSigTest01(void)
 {
-    Packet *p1 = NULL;
-    Packet *p2 = NULL;
-    Packet *p3 = NULL;
     ThreadVars th_v;
-    DetectEngineThreadCtx *det_ctx;
-    int result = 0;
-
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
+    DetectEngineThreadCtx *det_ctx = NULL;
 
     /* TCP w/ack=42 */
-    p1 = UTHBuildPacket(NULL, 0, IPPROTO_TCP);
-    p1->tcph->th_ack = htonl(42);
+    Packet *p1 = UTHBuildPacket(NULL, 0, IPPROTO_TCP);
+    p1->l4.hdrs.tcph->th_ack = htonl(42);
 
     /* TCP w/ack=100 */
-    p2 = UTHBuildPacket(NULL, 0, IPPROTO_TCP);
-    p2->tcph->th_ack = htonl(100);
+    Packet *p2 = UTHBuildPacket(NULL, 0, IPPROTO_TCP);
+    p2->l4.hdrs.tcph->th_ack = htonl(100);
 
     /* ICMP */
-    p3 = UTHBuildPacket(NULL, 0, IPPROTO_ICMP);
+    Packet *p3 = UTHBuildPacket(NULL, 0, IPPROTO_ICMP);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    if (de_ctx == NULL) {
-        goto end;
-    }
-
+    FAIL_IF_NULL(de_ctx);
     de_ctx->flags |= DE_QUIET;
 
     /* These three are crammed in here as there is no Parse */
-    if (SigInit(de_ctx,
-                "alert tcp any any -> any any "
-                "(msg:\"Testing ack\";ack:foo;sid:1;)") != NULL)
-    {
-        printf("invalid ack accepted: ");
-        goto cleanup_engine;
-    }
-    if (SigInit(de_ctx,
-                "alert tcp any any -> any any "
-                "(msg:\"Testing ack\";ack:9999999999;sid:1;)") != NULL)
-    {
-        printf("overflowing ack accepted: ");
-        goto cleanup_engine;
-    }
-    if (SigInit(de_ctx,
-                "alert tcp any any -> any any "
-                "(msg:\"Testing ack\";ack:-100;sid:1;)") != NULL)
-    {
-        printf("negative ack accepted: ");
-        goto cleanup_engine;
-    }
+    Signature *s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                                 "(msg:\"Testing ack\";ack:foo;sid:1;)");
+    FAIL_IF_NOT_NULL(s);
+    s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                      "(msg:\"Testing ack\";ack:9999999999;sid:1;)");
+    FAIL_IF_NOT_NULL(s);
+    s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                      "(msg:\"Testing ack\";ack:-100;sid:1;)");
+    FAIL_IF_NOT_NULL(s);
 
-    de_ctx->sig_list = SigInit(de_ctx,
-                               "alert tcp any any -> any any "
-                               "(msg:\"Testing ack\";ack:41;sid:1;)");
-    if (de_ctx->sig_list == NULL) {
-        goto cleanup_engine;
-    }
-
-    de_ctx->sig_list->next = SigInit(de_ctx,
-                                     "alert tcp any any -> any any "
-                                     "(msg:\"Testing ack\";ack:42;sid:2;)");
-    if (de_ctx->sig_list->next == NULL) {
-        goto cleanup_engine;
-    }
+    s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                      "(msg:\"Testing ack\";ack:41;sid:1;)");
+    FAIL_IF_NULL(s);
+    s = DetectEngineAppendSig(de_ctx, "alert tcp any any -> any any "
+                                      "(msg:\"Testing ack\";ack:42;sid:2;)");
+    FAIL_IF_NULL(s);
 
     SigGroupBuild(de_ctx);
     DetectEngineThreadCtxInit(&th_v, (void *)de_ctx, (void *)&det_ctx);
 
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p1);
-    if (PacketAlertCheck(p1, 1) != 0) {
-        printf("sid 1 alerted, but should not have: ");
-        goto cleanup;
-    }
-    if (PacketAlertCheck(p1, 2) == 0) {
-        printf("sid 2 did not alert, but should have: ");
-        goto cleanup;
-    }
+    FAIL_IF(PacketAlertCheck(p1, 1));
+    FAIL_IF_NOT(PacketAlertCheck(p1, 2));
 
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p2);
-    if (PacketAlertCheck(p2, 1) != 0) {
-        printf("sid 1 alerted, but should not have: ");
-        goto cleanup;
-    }
-    if (PacketAlertCheck(p2, 2) != 0) {
-        printf("sid 2 alerted, but should not have: ");
-        goto cleanup;
-    }
+    FAIL_IF(PacketAlertCheck(p2, 1));
+    FAIL_IF(PacketAlertCheck(p2, 2));
 
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p3);
-    if (PacketAlertCheck(p3, 1) != 0) {
-        printf("sid 1 alerted, but should not have: ");
-        goto cleanup;
-    }
-    if (PacketAlertCheck(p3, 2) != 0) {
-        printf("sid 2 alerted, but should not have: ");
-        goto cleanup;
-    }
+    FAIL_IF(PacketAlertCheck(p3, 1));
+    FAIL_IF(PacketAlertCheck(p3, 2));
 
-    result = 1;
-
-cleanup:
-    SigGroupCleanup(de_ctx);
-    SigCleanSignatures(de_ctx);
+    UTHFreePacket(p1);
+    UTHFreePacket(p2);
+    UTHFreePacket(p3);
 
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
-
-cleanup_engine:
     DetectEngineCtxFree(de_ctx);
-
-end:
-    return result;
+    StatsThreadCleanup(&th_v.stats);
+    PASS;
 }
 
 /**

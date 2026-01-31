@@ -22,16 +22,18 @@
 #include "util-profiling.h"
 #include "util-validate.h"
 #include "action-globals.h"
+#include "rust.h"
+#include "app-layer-events.h"
 
 /** \brief issue drop action
  *
  *  Set drop (+reject) flags in both current and root packet.
  *
- *  \param action action bit flags. Must be limited to ACTION_DROP_REJECT
+ *  \param action action bit flags. Must be limited to ACTION_DROP_REJECT|ACTION_ALERT
  */
 void PacketDrop(Packet *p, const uint8_t action, enum PacketDropReason r)
 {
-    DEBUG_VALIDATE_BUG_ON((action & ~ACTION_DROP_REJECT) != 0);
+    DEBUG_VALIDATE_BUG_ON((action & ~(ACTION_DROP_REJECT | ACTION_ALERT)) != 0);
 
     if (p->drop_reason == PKT_DROP_REASON_NOT_SET)
         p->drop_reason = (uint8_t)r;
@@ -56,6 +58,15 @@ bool PacketCheckAction(const Packet *p, const uint8_t a)
     }
 }
 
+uint8_t PacketGetAction(const Packet *p)
+{
+    if (likely(p->root == NULL)) {
+        return p->action;
+    } else {
+        return p->action | p->root->action;
+    }
+}
+
 /**
  *  \brief Initialize a packet structure for use.
  */
@@ -63,7 +74,6 @@ void PacketInit(Packet *p)
 {
     SCSpinInit(&p->persistent.tunnel_lock, 0);
     p->alerts.alerts = PacketAlertCreate();
-    PACKET_RESET_CHECKSUMS(p);
     p->livedev = NULL;
 }
 
@@ -97,12 +107,16 @@ void PacketReinit(Packet *p)
     p->recursion_level = 0;
     PACKET_FREE_EXTDATA(p);
     p->app_update_direction = 0;
+    p->sig_mask = 0;
+    p->pkt_hooks = 0;
+    const uint32_t pflags = p->flags;
     p->flags = 0;
     p->flowflags = 0;
     p->pkt_src = 0;
     p->vlan_id[0] = 0;
     p->vlan_id[1] = 0;
     p->vlan_idx = 0;
+    p->ttype = PacketTunnelNone;
     SCTIME_INIT(p->ts);
     p->datalink = 0;
     p->drop_reason = 0;
@@ -112,54 +126,31 @@ void PacketReinit(Packet *p)
         PktVarFree(p->pktvar);
         p->pktvar = NULL;
     }
-    p->ethh = NULL;
-    if (p->ip4h != NULL) {
-        CLEAR_IPV4_PACKET(p);
-    }
-    if (p->ip6h != NULL) {
-        CLEAR_IPV6_PACKET(p);
-    }
-    if (p->tcph != NULL) {
-        CLEAR_TCP_PACKET(p);
-    }
-    if (p->udph != NULL) {
-        CLEAR_UDP_PACKET(p);
-    }
-    if (p->sctph != NULL) {
-        CLEAR_SCTP_PACKET(p);
-    }
-    if (p->esph != NULL) {
-        CLEAR_ESP_PACKET(p);
-    }
-    if (p->icmpv4h != NULL) {
-        CLEAR_ICMPV4_PACKET(p);
-    }
-    if (p->icmpv6h != NULL) {
-        CLEAR_ICMPV6_PACKET(p);
-    }
-    p->ppph = NULL;
-    p->pppoesh = NULL;
-    p->pppoedh = NULL;
-    p->greh = NULL;
+    PacketClearL2(p);
+    PacketClearL3(p);
+    PacketClearL4(p);
     p->payload = NULL;
     p->payload_len = 0;
     p->BypassPacketsFlow = NULL;
 #define RESET_PKT_LEN(p) ((p)->pktlen = 0)
     RESET_PKT_LEN(p);
-    p->alerts.cnt = 0;
     p->alerts.discarded = 0;
     p->alerts.suppressed = 0;
     p->alerts.drop.action = 0;
-    p->pcap_cnt = 0;
+    if (p->alerts.cnt > 0) {
+        if (pflags & PKT_ALERT_CTX_USED)
+            PacketAlertRecycle(p->alerts.alerts, p->alerts.cnt);
+        p->alerts.cnt = 0;
+    }
     p->tunnel_rtv_cnt = 0;
     p->tunnel_tpr_cnt = 0;
     p->events.cnt = 0;
     AppLayerDecoderEventsResetEvents(p->app_layer_events);
     p->next = NULL;
     p->prev = NULL;
+    p->tunnel_verdicted = false;
     p->root = NULL;
     p->livedev = NULL;
-    PACKET_RESET_CHECKSUMS(p);
     PACKET_PROFILING_RESET(p);
     p->tenant_id = 0;
     p->nb_decoded_layers = 0;
@@ -183,6 +174,31 @@ void PacketDestructor(Packet *p)
     PacketAlertFree(p->alerts.alerts);
     PACKET_FREE_EXTDATA(p);
     SCSpinDestroy(&p->persistent.tunnel_lock);
-    AppLayerDecoderEventsFreeEvents(&p->app_layer_events);
+    SCAppLayerDecoderEventsFreeEvents(&p->app_layer_events);
     PACKET_PROFILING_RESET(p);
+}
+
+inline void SCPacketSetReleasePacket(Packet *p, void (*ReleasePacket)(Packet *p))
+{
+    p->ReleasePacket = ReleasePacket;
+}
+
+inline void SCPacketSetLiveDevice(Packet *p, LiveDevice *device)
+{
+    p->livedev = device;
+}
+
+inline void SCPacketSetDatalink(Packet *p, int datalink)
+{
+    p->datalink = datalink;
+}
+
+inline void SCPacketSetTime(Packet *p, SCTime_t ts)
+{
+    p->ts = ts;
+}
+
+inline void SCPacketSetSource(Packet *p, enum PktSrcEnum source)
+{
+    p->pkt_src = (uint8_t)source;
 }

@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2021 Open Information Security Foundation
+/* Copyright (C) 2007-2025 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -51,13 +51,14 @@
  * \brief Different kinds of qualifier that can be used to modify the behaviour
  *        of the counter to be registered
  */
-enum {
+enum StatsType {
     STATS_TYPE_NORMAL = 1,
     STATS_TYPE_AVERAGE = 2,
     STATS_TYPE_MAXIMUM = 3,
     STATS_TYPE_FUNC = 4,
+    STATS_TYPE_DERIVE_DIV = 5,
 
-    STATS_TYPE_MAX = 5,
+    STATS_TYPE_MAX = 6,
 };
 
 /**
@@ -68,9 +69,6 @@ typedef struct StatsThreadStore_ {
     const char *name;
 
     StatsPublicThreadContext *ctx;
-
-    StatsPublicThreadContext **head;
-    uint32_t size;
 
     struct StatsThreadStore_ *next;
 } StatsThreadStore;
@@ -105,7 +103,8 @@ bool stats_stream_events = false;
 
 static int StatsOutput(ThreadVars *tv);
 static int StatsThreadRegister(const char *thread_name, StatsPublicThreadContext *);
-void StatsReleaseCounters(StatsCounter *head);
+static void StatsReleaseCounters(StatsCounter *head);
+static int StatsUpdateCounterArray(StatsPrivateThreadContext *pca, StatsPublicThreadContext *pctx);
 
 /** stats table is filled each interval and passed to the
  *  loggers. Initialized at first use. */
@@ -122,18 +121,20 @@ bool StatsEnabled(void)
 
 static void StatsPublicThreadContextInit(StatsPublicThreadContext *t)
 {
-    SCMutexInit(&t->m, NULL);
+    SCSpinInit(&t->lock, 0);
 }
 
 static void StatsPublicThreadContextCleanup(StatsPublicThreadContext *t)
 {
-    SCMutexLock(&t->m);
+    SCSpinLock(&t->lock);
+    SCFree(t->copy_of_private);
+    SCFree(t->pc_array);
     StatsReleaseCounters(t->head);
     t->head = NULL;
     SC_ATOMIC_SET(t->sync_now, false);
     t->curr_id = 0;
-    SCMutexUnlock(&t->m);
-    SCMutexDestroy(&t->m);
+    SCSpinUnlock(&t->lock);
+    SCSpinDestroy(&t->lock);
 }
 
 /**
@@ -143,19 +144,17 @@ static void StatsPublicThreadContextCleanup(StatsPublicThreadContext *t)
  * \param pca Counter array that holds the local counter for this TM
  * \param x   Value to add to this local counter
  */
-void StatsAddUI64(ThreadVars *tv, uint16_t id, uint64_t x)
+void StatsCounterAddI64(StatsThreadContext *stats, StatsCounterId id, int64_t x)
 {
-    StatsPrivateThreadContext *pca = &tv->perf_private_ctx;
+    StatsPrivateThreadContext *pca = &stats->priv;
 #if defined (UNITTESTS) || defined (FUZZ)
     if (pca->initialized == 0)
         return;
 #endif
 #ifdef DEBUG
-    BUG_ON ((id < 1) || (id > pca->size));
+    BUG_ON((id.id < 1) || (id.id > pca->size));
 #endif
-    pca->head[id].value += x;
-    pca->head[id].updates++;
-    return;
+    pca->head[id.id].v += x;
 }
 
 /**
@@ -164,78 +163,104 @@ void StatsAddUI64(ThreadVars *tv, uint16_t id, uint64_t x)
  * \param id  Index of the counter in the counter array
  * \param pca Counter array that holds the local counters for this TM
  */
-void StatsIncr(ThreadVars *tv, uint16_t id)
+void StatsCounterIncr(StatsThreadContext *stats, StatsCounterId id)
 {
-    StatsPrivateThreadContext *pca = &tv->perf_private_ctx;
+    StatsPrivateThreadContext *pca = &stats->priv;
 #if defined (UNITTESTS) || defined (FUZZ)
     if (pca->initialized == 0)
         return;
 #endif
 #ifdef DEBUG
-    BUG_ON ((id < 1) || (id > pca->size));
+    BUG_ON((id.id < 1) || (id.id > pca->size));
 #endif
-    pca->head[id].value++;
-    pca->head[id].updates++;
-    return;
+    pca->head[id.id].v++;
 }
 
 /**
  * \brief Decrements the local counter
  *
+ * \param stats per thread counter structure
  * \param id  Index of the counter in the counter array
- * \param pca Counter array that holds the local counters for this TM
  */
-void StatsDecr(ThreadVars *tv, uint16_t id)
+void StatsCounterDecr(StatsThreadContext *stats, StatsCounterId id)
 {
-    StatsPrivateThreadContext *pca = &tv->perf_private_ctx;
+    StatsPrivateThreadContext *pca = &stats->priv;
 #if defined(UNITTESTS) || defined(FUZZ)
     if (pca->initialized == 0)
         return;
 #endif
 #ifdef DEBUG
-    BUG_ON((id < 1) || (id > pca->size));
+    BUG_ON((id.id < 1) || (id.id > pca->size));
 #endif
-    pca->head[id].value--;
-    pca->head[id].updates++;
-    return;
+    pca->head[id.id].v--;
 }
 
 /**
- * \brief Sets a value of type double to the local counter
+ * \brief set, so overwrite, the value of the local counter
  *
+ * \param stats per thread counter structure
  * \param id  Index of the local counter in the counter array
- * \param pca Pointer to the StatsPrivateThreadContext
  * \param x   The value to set for the counter
  */
-void StatsSetUI64(ThreadVars *tv, uint16_t id, uint64_t x)
+void StatsCounterSetI64(StatsThreadContext *stats, StatsCounterId id, int64_t x)
 {
-    StatsPrivateThreadContext *pca = &tv->perf_private_ctx;
+    StatsPrivateThreadContext *pca = &stats->priv;
 #if defined (UNITTESTS) || defined (FUZZ)
     if (pca->initialized == 0)
         return;
 #endif
 #ifdef DEBUG
-    BUG_ON ((id < 1) || (id > pca->size));
+    BUG_ON((id.id < 1) || (id.id > pca->size));
 #endif
-
-    if ((pca->head[id].pc->type == STATS_TYPE_MAXIMUM) && ((int64_t)x > pca->head[id].value)) {
-        pca->head[id].value = x;
-    } else if (pca->head[id].pc->type == STATS_TYPE_NORMAL) {
-        pca->head[id].value = x;
-    }
-
-    pca->head[id].updates++;
-
-    return;
+    pca->head[id.id].v = x;
 }
 
-static ConfNode *GetConfig(void) {
-    ConfNode *stats = ConfGetNode("stats");
+/**
+ * \brief update the value of the localmax counter
+ *
+ * \param stats per thread counter structure
+ * \param id  Index of the local counter in the counter array
+ * \param x   The value to set for the counter
+ */
+void StatsCounterMaxUpdateI64(StatsThreadContext *stats, StatsCounterMaxId id, int64_t x)
+{
+    StatsPrivateThreadContext *pca = &stats->priv;
+#if defined(UNITTESTS) || defined(FUZZ)
+    if (pca->initialized == 0)
+        return;
+#endif
+#ifdef DEBUG
+    BUG_ON((id.id < 1) || (id.id > pca->size));
+#endif
+
+    if ((int64_t)x > pca->head[id.id].v) {
+        pca->head[id.id].v = x;
+    }
+}
+
+void StatsCounterAvgAddI64(StatsThreadContext *stats, StatsCounterAvgId id, int64_t x)
+{
+    StatsPrivateThreadContext *pca = &stats->priv;
+#if defined(UNITTESTS) || defined(FUZZ)
+    if (pca->initialized == 0)
+        return;
+#endif
+#ifdef DEBUG
+    BUG_ON((id.id < 1) || (id.id > pca->size));
+#endif
+
+    pca->head[id.id].v += x;
+    pca->head[id.id + 1].v++;
+}
+
+static SCConfNode *GetConfig(void)
+{
+    SCConfNode *stats = SCConfGetNode("stats");
     if (stats != NULL)
         return stats;
 
-    ConfNode *root = ConfGetNode("outputs");
-    ConfNode *node = NULL;
+    SCConfNode *root = SCConfGetNode("outputs");
+    SCConfNode *node = NULL;
     if (root != NULL) {
         TAILQ_FOREACH(node, &root->head, next) {
             if (strcmp(node->val, "stats") == 0) {
@@ -252,16 +277,16 @@ static ConfNode *GetConfig(void) {
 static void StatsInitCtxPreOutput(void)
 {
     SCEnter();
-    ConfNode *stats = GetConfig();
+    SCConfNode *stats = GetConfig();
     if (stats != NULL) {
-        const char *enabled = ConfNodeLookupChildValue(stats, "enabled");
-        if (enabled != NULL && ConfValIsFalse(enabled)) {
+        const char *enabled = SCConfNodeLookupChildValue(stats, "enabled");
+        if (enabled != NULL && SCConfValIsFalse(enabled)) {
             stats_enabled = false;
             SCLogDebug("Stats module has been disabled");
             SCReturn;
         }
         /* warn if we are using legacy config to enable stats */
-        ConfNode *gstats = ConfGetNode("stats");
+        SCConfNode *gstats = SCConfGetNode("stats");
         if (gstats == NULL) {
             SCLogWarning("global stats config is missing. "
                          "Stats enabled through legacy stats.log. "
@@ -269,7 +294,7 @@ static void StatsInitCtxPreOutput(void)
                     GetDocURL());
         }
 
-        const char *interval = ConfNodeLookupChildValue(stats, "interval");
+        const char *interval = SCConfNodeLookupChildValue(stats, "interval");
         if (interval != NULL)
             if (StringParseUint32(&stats_tts, 10, 0, interval) < 0) {
                 SCLogWarning("Invalid value for "
@@ -279,17 +304,17 @@ static void StatsInitCtxPreOutput(void)
             }
 
         int b;
-        int ret = ConfGetChildValueBool(stats, "decoder-events", &b);
+        int ret = SCConfGetChildValueBool(stats, "decoder-events", &b);
         if (ret) {
             stats_decoder_events = (b == 1);
         }
-        ret = ConfGetChildValueBool(stats, "stream-events", &b);
+        ret = SCConfGetChildValueBool(stats, "stream-events", &b);
         if (ret) {
             stats_stream_events = (b == 1);
         }
 
         const char *prefix = NULL;
-        if (ConfGet("stats.decoder-events-prefix", &prefix) != 1) {
+        if (SCConfGet("stats.decoder-events-prefix", &prefix) != 1) {
             prefix = "decoder.event";
         }
         stats_decoder_events_prefix = prefix;
@@ -339,9 +364,6 @@ static void StatsReleaseCtx(void)
     sts = stats_ctx->sts;
 
     while (sts != NULL) {
-        if (sts->head != NULL)
-            SCFree(sts->head);
-
         temp = sts->next;
         SCFree(sts);
         sts = temp;
@@ -370,8 +392,6 @@ static void StatsReleaseCtx(void)
     }
     memset(&stats_table, 0, sizeof(stats_table));
     SCMutexUnlock(&stats_table_mutex);
-
-    return;
 }
 
 /**
@@ -413,13 +433,8 @@ static void *StatsMgmtThread(void *arg)
     SCLogDebug("stats_thread_data %p", &stats_thread_data);
 
     TmThreadsSetFlag(tv_local, THV_INIT_DONE | THV_RUNNING);
-    while (1) {
-        if (TmThreadsCheckFlag(tv_local, THV_PAUSE)) {
-            TmThreadsSetFlag(tv_local, THV_PAUSED);
-            TmThreadTestThreadUnPaused(tv_local);
-            TmThreadsUnsetFlag(tv_local, THV_PAUSED);
-        }
-
+    bool run = TmThreadsWaitForUnpause(tv_local);
+    while (run) {
         struct timeval cur_timev;
         gettimeofday(&cur_timev, NULL);
         struct timespec cond_time = FROM_TIMEVAL(cur_timev);
@@ -428,7 +443,15 @@ static void *StatsMgmtThread(void *arg)
         /* wait for the set time, or until we are woken up by
          * the shutdown procedure */
         SCCtrlMutexLock(tv_local->ctrl_mutex);
-        SCCtrlCondTimedwait(tv_local->ctrl_cond, tv_local->ctrl_mutex, &cond_time);
+        while (1) {
+            if (TmThreadsCheckFlag(tv_local, THV_KILL)) {
+                break;
+            }
+            int rc = SCCtrlCondTimedwait(tv_local->ctrl_cond, tv_local->ctrl_mutex, &cond_time);
+            if (rc == ETIMEDOUT || rc < 0) {
+                break;
+            }
+        }
         SCCtrlMutexUnlock(tv_local->ctrl_mutex);
 
         SCMutexLock(&stats_table_mutex);
@@ -453,15 +476,15 @@ static void *StatsMgmtThread(void *arg)
     return NULL;
 }
 
-void StatsSyncCounters(ThreadVars *tv)
+void StatsSyncCounters(StatsThreadContext *stats)
 {
-    StatsUpdateCounterArray(&tv->perf_private_ctx, &tv->perf_public_ctx);
+    StatsUpdateCounterArray(&stats->priv, &stats->pub);
 }
 
-void StatsSyncCountersIfSignalled(ThreadVars *tv)
+void StatsSyncCountersIfSignalled(StatsThreadContext *stats)
 {
-    if (SC_ATOMIC_GET(tv->perf_public_ctx.sync_now) == true) {
-        StatsUpdateCounterArray(&tv->perf_private_ctx, &tv->perf_public_ctx);
+    if (SC_ATOMIC_GET(stats->pub.sync_now)) {
+        StatsUpdateCounterArray(&stats->priv, &stats->pub);
     }
 }
 
@@ -494,14 +517,9 @@ static void *StatsWakeupThread(void *arg)
     }
 
     TmThreadsSetFlag(tv_local, THV_INIT_DONE | THV_RUNNING);
+    bool run = TmThreadsWaitForUnpause(tv_local);
 
-    while (1) {
-        if (TmThreadsCheckFlag(tv_local, THV_PAUSE)) {
-            TmThreadsSetFlag(tv_local, THV_PAUSED);
-            TmThreadTestThreadUnPaused(tv_local);
-            TmThreadsUnsetFlag(tv_local, THV_PAUSED);
-        }
-
+    while (run) {
         struct timeval cur_timev;
         gettimeofday(&cur_timev, NULL);
         struct timespec cond_time = FROM_TIMEVAL(cur_timev);
@@ -510,18 +528,26 @@ static void *StatsWakeupThread(void *arg)
         /* wait for the set time, or until we are woken up by
          * the shutdown procedure */
         SCCtrlMutexLock(tv_local->ctrl_mutex);
-        SCCtrlCondTimedwait(tv_local->ctrl_cond, tv_local->ctrl_mutex, &cond_time);
+        while (1) {
+            if (TmThreadsCheckFlag(tv_local, THV_KILL)) {
+                break;
+            }
+            int rc = SCCtrlCondTimedwait(tv_local->ctrl_cond, tv_local->ctrl_mutex, &cond_time);
+            if (rc == ETIMEDOUT || rc < 0) {
+                break;
+            }
+        }
         SCCtrlMutexUnlock(tv_local->ctrl_mutex);
 
         SCMutexLock(&tv_root_lock);
         ThreadVars *tv = tv_root[TVT_PPT];
         while (tv != NULL) {
-            if (tv->perf_public_ctx.head == NULL) {
+            if (tv->stats.pub.head == NULL) {
                 tv = tv->next;
                 continue;
             }
 
-            SC_ATOMIC_SET(tv->perf_public_ctx.sync_now, true);
+            SC_ATOMIC_SET(tv->stats.pub.sync_now, true);
 
             if (tv->inq != NULL) {
                 PacketQueue *q = tv->inq->pq;
@@ -536,12 +562,12 @@ static void *StatsWakeupThread(void *arg)
         /* mgt threads for flow manager */
         tv = tv_root[TVT_MGMT];
         while (tv != NULL) {
-            if (tv->perf_public_ctx.head == NULL) {
+            if (tv->stats.pub.head == NULL) {
                 tv = tv->next;
                 continue;
             }
 
-            SC_ATOMIC_SET(tv->perf_public_ctx.sync_now, true);
+            SC_ATOMIC_SET(tv->stats.pub.sync_now, true);
 
             tv = tv->next;
         }
@@ -568,15 +594,26 @@ static void StatsReleaseCounter(StatsCounter *pc)
     if (pc != NULL) {
         SCFree(pc);
     }
+}
 
-    return;
+/** \internal
+ *  \brief Get ID for counters referenced in a derive counter
+ *  \retval id (>=1) or 0 on error
+ */
+static uint16_t GetIdByName(const StatsPublicThreadContext *pctx, const char *name)
+{
+    for (const StatsCounter *c = pctx->head; c != NULL; c = c->next) {
+        if (strcmp(name, c->name) == 0) {
+            return c->id;
+        }
+    }
+    return 0;
 }
 
 /**
  * \brief Registers a counter.
  *
  * \param name    Name of the counter, to be registered
- * \param tm_name  Thread module to which this counter belongs
  * \param pctx     StatsPublicThreadContext for this tm-tv instance
  * \param type_q   Qualifier describing the type of counter to be registered
  *
@@ -584,9 +621,8 @@ static void StatsReleaseCounter(StatsCounter *pc)
  *         present counter on success
  * \retval 0 on failure
  */
-static uint16_t StatsRegisterQualifiedCounter(const char *name, const char *tm_name,
-                                              StatsPublicThreadContext *pctx,
-                                              int type_q, uint64_t (*Func)(void))
+static uint16_t StatsRegisterQualifiedCounter(const char *name, StatsPublicThreadContext *pctx,
+        enum StatsType type_q, uint64_t (*Func)(void), const char *dname1, const char *dname2)
 {
     StatsCounter **head = &pctx->head;
     StatsCounter *temp = NULL;
@@ -613,13 +649,31 @@ static uint16_t StatsRegisterQualifiedCounter(const char *name, const char *tm_n
     if (temp != NULL)
         return(temp->id);
 
+    uint16_t did1 = 0;
+    uint16_t did2 = 0;
+    if (type_q == STATS_TYPE_DERIVE_DIV) {
+        did1 = GetIdByName(pctx, dname1);
+        did2 = GetIdByName(pctx, dname2);
+        if (did1 == 0 || did2 == 0) {
+            return 0;
+        }
+    }
+
     /* if we reach this point we don't have a counter registered by this name */
     if ((pc = SCCalloc(1, sizeof(StatsCounter))) == NULL)
         return 0;
 
     /* assign a unique id to this StatsCounter.  The id is local to this
      * thread context.  Please note that the id start from 1, and not 0 */
-    pc->id = ++(pctx->curr_id);
+    if (type_q == STATS_TYPE_DERIVE_DIV) {
+        pc->id = ++pctx->derive_id;
+    } else {
+        pc->id = ++(pctx->curr_id);
+    }
+    /* for AVG counters we use 2 indices into the tables: one for values,
+     * the other to track updates. */
+    if (type_q == STATS_TYPE_AVERAGE)
+        ++(pctx->curr_id);
     pc->name = name;
 
     /* Precalculate the short name */
@@ -629,6 +683,8 @@ static uint16_t StatsRegisterQualifiedCounter(const char *name, const char *tm_n
 
     pc->type = type_q;
     pc->Func = Func;
+    pc->did1 = did1;
+    pc->did2 = did2;
 
     /* we now add the counter to the list */
     if (prev == NULL)
@@ -640,29 +696,11 @@ static uint16_t StatsRegisterQualifiedCounter(const char *name, const char *tm_n
 }
 
 /**
- * \brief Copies the StatsCounter value from the local counter present in the
- *        StatsPrivateThreadContext to its corresponding global counterpart.  Used
- *        internally by StatsUpdateCounterArray()
- *
- * \param pcae     Pointer to the StatsPrivateThreadContext which holds the local
- *                 versions of the counters
- */
-static void StatsCopyCounterValue(StatsLocalCounter *pcae)
-{
-    StatsCounter *pc = pcae->pc;
-
-    pc->value = pcae->value;
-    pc->updates = pcae->updates;
-    return;
-}
-
-/**
  * \brief The output interface for the Stats API
  */
 static int StatsOutput(ThreadVars *tv)
 {
     const StatsThreadStore *sts = NULL;
-    const StatsCounter *pc = NULL;
     void *td = stats_thread_data;
 
     if (counters_global_id == 0)
@@ -700,7 +738,7 @@ static int StatsOutput(ThreadVars *tv)
     /** temporary local table to merge the per thread counters,
      *  especially needed for the average counters */
     struct CountersMergeTable {
-        int type;
+        enum StatsType type;
         int64_t value;
         uint64_t updates;
     } merge_table[max_id];
@@ -715,7 +753,7 @@ static int StatsOutput(ThreadVars *tv)
     sts = stats_ctx->sts;
     SCLogDebug("sts %p", sts);
     while (sts != NULL) {
-        BUG_ON(thread < 0);
+        DEBUG_VALIDATE_BUG_ON(thread < 0);
 
         SCLogDebug("Thread %d %s ctx %p", thread, sts->name, sts->ctx);
 
@@ -726,34 +764,61 @@ static int StatsOutput(ThreadVars *tv)
         memset(&thread_table, 0x00,
                 max_id * sizeof(struct CountersMergeTable));
 
-        SCMutexLock(&sts->ctx->m);
-        pc = sts->ctx->head;
-        while (pc != NULL) {
-            SCLogDebug("Counter %s (%u:%u) value %"PRIu64,
-                    pc->name, pc->id, pc->gid, pc->value);
+        StatsLocalCounter thread_table_from_private[max_id];
+        memset(&thread_table_from_private, 0x00, max_id * sizeof(StatsLocalCounter));
 
+        /* copy private table to a local variable to loop it w/o lock */
+        bool skip = false;
+        SCSpinLock(&sts->ctx->lock);
+        const uint16_t table_size = sts->ctx->curr_id + sts->ctx->derive_id + 1;
+        if (sts->ctx->copy_of_private == NULL) {
+            skip = true;
+        } else {
+            memcpy(&thread_table_from_private, sts->ctx->copy_of_private,
+                    table_size * sizeof(StatsLocalCounter));
+        }
+        SCSpinUnlock(&sts->ctx->lock);
+        if (skip)
+            goto next;
+
+        /* loop counters and handle them. This includes the global counters, which
+         * access the StatsCounters but don't modify them. */
+        for (uint16_t i = 1; i < table_size; i++) {
+            const StatsCounter *pc = sts->ctx->pc_array[i];
             thread_table[pc->gid].type = pc->type;
+
+            table[pc->gid].name = pc->name;
+            table[pc->gid].short_name = pc->short_name;
+
             switch (pc->type) {
                 case STATS_TYPE_FUNC:
                     if (pc->Func != NULL)
                         thread_table[pc->gid].value = pc->Func();
                     break;
                 case STATS_TYPE_AVERAGE:
+                    thread_table[pc->gid].value = thread_table_from_private[i].v;
+                    thread_table[pc->gid].updates = thread_table_from_private[i + 1].v;
+                    /* skip updates row */
+                    i++;
+                    break;
+                case STATS_TYPE_DERIVE_DIV:
+                    SCLogDebug("counter %u/%u is derived from counters %u / %u", pc->id, pc->gid,
+                            pc->did1, pc->did2);
+                    thread_table[pc->gid].value = thread_table_from_private[pc->did1].v;
+                    thread_table[pc->gid].updates = thread_table_from_private[pc->did2].v;
+                    break;
                 default:
-                    thread_table[pc->gid].value = pc->value;
+                    SCLogDebug("Counter %s (%u:%u) value %" PRIu64, pc->name, pc->id, pc->gid,
+                            thread_table_from_private[i].v);
+
+                    thread_table[pc->gid].value = thread_table_from_private[i].v;
                     break;
             }
-            thread_table[pc->gid].updates = pc->updates;
-            table[pc->gid].name = pc->name;
-            table[pc->gid].short_name = pc->short_name;
-
-            pc = pc->next;
         }
-        SCMutexUnlock(&sts->ctx->m);
 
         /* update merge table */
         for (uint16_t c = 0; c < max_id; c++) {
-            struct CountersMergeTable *e = &thread_table[c];
+            const struct CountersMergeTable *e = &thread_table[c];
             /* thread only sets type if it has a counter
              * of this type. */
             if (e->type == 0)
@@ -778,7 +843,7 @@ static int StatsOutput(ThreadVars *tv)
 
         /* update per thread stats table */
         for (uint16_t c = 0; c < max_id; c++) {
-            struct CountersMergeTable *e = &thread_table[c];
+            const struct CountersMergeTable *e = &thread_table[c];
             /* thread only sets type if it has a counter
              * of this type. */
             if (e->type == 0)
@@ -795,6 +860,7 @@ static int StatsOutput(ThreadVars *tv)
 
             switch (e->type) {
                 case STATS_TYPE_AVERAGE:
+                case STATS_TYPE_DERIVE_DIV:
                     if (e->value > 0 && e->updates > 0) {
                         r->value = (uint64_t)(e->value / e->updates);
                     }
@@ -805,6 +871,7 @@ static int StatsOutput(ThreadVars *tv)
             }
         }
 
+    next:
         sts = sts->next;
         thread--;
     }
@@ -816,13 +883,14 @@ static int StatsOutput(ThreadVars *tv)
         table[x].value = 0;
         table[x].tm_name = "Total";
 
-        struct CountersMergeTable *m = &merge_table[x];
+        const struct CountersMergeTable *m = &merge_table[x];
         switch (m->type) {
             case STATS_TYPE_MAXIMUM:
                 if (m->value > table[x].value)
                     table[x].value = m->value;
                 break;
             case STATS_TYPE_AVERAGE:
+            case STATS_TYPE_DERIVE_DIV:
                 if (m->value > 0 && m->updates > 0) {
                     table[x].value = (uint64_t)(m->value / m->updates);
                 }
@@ -968,13 +1036,12 @@ void StatsSpawnThreads(void)
  * \retval id Counter id for the newly registered counter, or the already
  *            present counter
  */
-uint16_t StatsRegisterCounter(const char *name, struct ThreadVars_ *tv)
+StatsCounterId StatsRegisterCounter(const char *name, StatsThreadContext *stats)
 {
-    uint16_t id = StatsRegisterQualifiedCounter(name,
-            (tv->thread_group_name != NULL) ? tv->thread_group_name : tv->printable_name,
-            &tv->perf_public_ctx,
-            STATS_TYPE_NORMAL, NULL);
-    return id;
+    uint16_t id =
+            StatsRegisterQualifiedCounter(name, &stats->pub, STATS_TYPE_NORMAL, NULL, NULL, NULL);
+    StatsCounterId s = { .id = id };
+    return s;
 }
 
 /**
@@ -988,13 +1055,12 @@ uint16_t StatsRegisterCounter(const char *name, struct ThreadVars_ *tv)
  * \retval id Counter id for the newly registered counter, or the already
  *            present counter
  */
-uint16_t StatsRegisterAvgCounter(const char *name, struct ThreadVars_ *tv)
+StatsCounterAvgId StatsRegisterAvgCounter(const char *name, StatsThreadContext *stats)
 {
-    uint16_t id = StatsRegisterQualifiedCounter(name,
-            (tv->thread_group_name != NULL) ? tv->thread_group_name : tv->printable_name,
-            &tv->perf_public_ctx,
-            STATS_TYPE_AVERAGE, NULL);
-    return id;
+    uint16_t id =
+            StatsRegisterQualifiedCounter(name, &stats->pub, STATS_TYPE_AVERAGE, NULL, NULL, NULL);
+    StatsCounterAvgId s = { .id = id };
+    return s;
 }
 
 /**
@@ -1008,13 +1074,12 @@ uint16_t StatsRegisterAvgCounter(const char *name, struct ThreadVars_ *tv)
  * \retval the counter id for the newly registered counter, or the already
  *         present counter
  */
-uint16_t StatsRegisterMaxCounter(const char *name, struct ThreadVars_ *tv)
+StatsCounterMaxId StatsRegisterMaxCounter(const char *name, StatsThreadContext *stats)
 {
-    uint16_t id = StatsRegisterQualifiedCounter(name,
-            (tv->thread_group_name != NULL) ? tv->thread_group_name : tv->printable_name,
-            &tv->perf_public_ctx,
-            STATS_TYPE_MAXIMUM, NULL);
-    return id;
+    uint16_t id =
+            StatsRegisterQualifiedCounter(name, &stats->pub, STATS_TYPE_MAXIMUM, NULL, NULL, NULL);
+    StatsCounterMaxId s = { .id = id };
+    return s;
 }
 
 /**
@@ -1026,19 +1091,48 @@ uint16_t StatsRegisterMaxCounter(const char *name, struct ThreadVars_ *tv)
  * \retval id Counter id for the newly registered counter, or the already
  *            present counter
  */
-uint16_t StatsRegisterGlobalCounter(const char *name, uint64_t (*Func)(void))
+StatsCounterGlobalId StatsRegisterGlobalCounter(const char *name, uint64_t (*Func)(void))
 {
+    StatsCounterGlobalId s = { .id = 0 };
 #if defined (UNITTESTS) || defined (FUZZ)
     if (stats_ctx == NULL)
-        return 0;
+        return s;
 #else
     BUG_ON(stats_ctx == NULL);
 #endif
-    uint16_t id = StatsRegisterQualifiedCounter(name, NULL,
-            &(stats_ctx->global_counter_ctx),
-            STATS_TYPE_FUNC,
-            Func);
-    return id;
+    uint16_t id = StatsRegisterQualifiedCounter(
+            name, &(stats_ctx->global_counter_ctx), STATS_TYPE_FUNC, Func, NULL, NULL);
+    s.id = id;
+    return s;
+}
+
+/**
+ * \brief Registers a counter which tracks the result of the calculating the value
+ * of counter dname1 divided by the value of the counter dname2
+ *
+ * \param name Name of the counter, to be registered
+ * \param dname1 First counter name
+ * \param dname2 Second counter name
+ *
+ * Both counters need to already be registered in this thread.
+ *
+ * \retval id Counter id for the newly registered counter, or the already
+ *            present counter
+ */
+StatsCounterDeriveId StatsRegisterDeriveDivCounter(
+        const char *name, const char *dname1, const char *dname2, StatsThreadContext *stats)
+{
+    StatsCounterDeriveId s = { .id = 0 };
+#if defined(UNITTESTS) || defined(FUZZ)
+    if (stats_ctx == NULL)
+        return s;
+#else
+    BUG_ON(stats_ctx == NULL);
+#endif
+    uint16_t id = StatsRegisterQualifiedCounter(
+            name, &stats->pub, STATS_TYPE_DERIVE_DIV, NULL, dname1, dname2);
+    s.id = id;
+    return s;
 }
 
 typedef struct CountersIdType_ {
@@ -1050,9 +1144,9 @@ static uint32_t CountersIdHashFunc(HashTable *ht, void *data, uint16_t datalen)
 {
     CountersIdType *t = (CountersIdType *)data;
     uint32_t hash = 0;
-    int len = strlen(t->string);
+    size_t len = strlen(t->string);
 
-    for (int i = 0; i < len; i++)
+    for (size_t i = 0; i < len; i++)
         hash += u8_tolower((unsigned char)t->string[i]);
 
     hash = hash % ht->array_size;
@@ -1064,8 +1158,6 @@ static char CountersIdHashCompareFunc(void *data1, uint16_t datalen1,
 {
     CountersIdType *t1 = (CountersIdType *)data1;
     CountersIdType *t2 = (CountersIdType *)data2;
-    int len1 = 0;
-    int len2 = 0;
 
     if (t1 == NULL || t2 == NULL)
         return 0;
@@ -1073,14 +1165,7 @@ static char CountersIdHashCompareFunc(void *data1, uint16_t datalen1,
     if (t1->string == NULL || t2->string == NULL)
         return 0;
 
-    len1 = strlen(t1->string);
-    len2 = strlen(t2->string);
-
-    if (len1 == len2 && memcmp(t1->string, t2->string, len1) == 0) {
-        return 1;
-    }
-
-    return 0;
+    return strcmp(t1->string, t2->string) == 0;
 }
 
 static void CountersIdHashFreeFunc(void *data)
@@ -1088,6 +1173,41 @@ static void CountersIdHashFreeFunc(void *data)
     SCFree(data);
 }
 
+static int StatsThreadSetupPublic(StatsPublicThreadContext *pctx)
+{
+    size_t array_size = pctx->curr_id + pctx->derive_id + 1;
+    pctx->pc_array = SCCalloc(array_size, sizeof(StatsCounter *));
+    if (pctx->pc_array == NULL) {
+        return -1;
+    }
+    /* regular counters that get direct updates by their id as idx */
+    for (StatsCounter *pc = pctx->head; pc != NULL; pc = pc->next) {
+        if (pc->type != STATS_TYPE_DERIVE_DIV) {
+            SCLogDebug("pc %s gid %u id %u", pc->name, pc->gid, pc->id);
+            BUG_ON(pctx->pc_array[pc->id] != NULL);
+            pctx->pc_array[pc->id] = pc;
+        }
+    }
+    /* derive counters are not updated by the thread itself and will be put
+     * at the end of the array */
+    for (StatsCounter *pc = pctx->head; pc != NULL; pc = pc->next) {
+        if (pc->type == STATS_TYPE_DERIVE_DIV) {
+            uint16_t id = pctx->curr_id + pc->id;
+            SCLogDebug("STATS_TYPE_DERIVE_DIV: pc %s gid %u pc->id %u id %u", pc->name, pc->gid,
+                    pc->id, id);
+            BUG_ON(pctx->pc_array[id] != NULL);
+            pctx->pc_array[id] = pc;
+        }
+    }
+
+    SCLogDebug("array_size %u memory %" PRIu64, (uint32_t)array_size,
+            (uint64_t)(array_size * sizeof(StatsLocalCounter)));
+    pctx->copy_of_private = SCCalloc(array_size, sizeof(StatsLocalCounter));
+    if (pctx->copy_of_private == NULL) {
+        return -1;
+    }
+    return 0;
+}
 
 /** \internal
  *  \brief Adds a TM to the clubbed TM table.  Multiple instances of the same TM
@@ -1101,8 +1221,7 @@ static void CountersIdHashFreeFunc(void *data)
 static int StatsThreadRegister(const char *thread_name, StatsPublicThreadContext *pctx)
 {
     if (stats_ctx == NULL) {
-        SCLogDebug("Counter module has been disabled");
-        return 0;
+        return 1;
     }
 
     if (thread_name == NULL || pctx == NULL) {
@@ -1111,11 +1230,15 @@ static int StatsThreadRegister(const char *thread_name, StatsPublicThreadContext
     }
 
     SCMutexLock(&stats_ctx->sts_lock);
+    SCLogDebug("thread %s", thread_name);
     if (stats_ctx->counters_id_hash == NULL) {
         stats_ctx->counters_id_hash = HashTableInit(256, CountersIdHashFunc,
                                                               CountersIdHashCompareFunc,
                                                               CountersIdHashFreeFunc);
-        BUG_ON(stats_ctx->counters_id_hash == NULL);
+        if (stats_ctx->counters_id_hash == NULL) {
+            SCMutexUnlock(&stats_ctx->sts_lock);
+            return 0;
+        }
     }
     StatsCounter *pc = pctx->head;
     while (pc != NULL) {
@@ -1126,12 +1249,22 @@ static int StatsThreadRegister(const char *thread_name, StatsPublicThreadContext
             BUG_ON(id == NULL);
             id->id = counters_global_id++;
             id->string = pc->name;
-            BUG_ON(HashTableAdd(stats_ctx->counters_id_hash, id, sizeof(*id)) < 0);
+            int r = HashTableAdd(stats_ctx->counters_id_hash, id, sizeof(*id));
+            DEBUG_VALIDATE_BUG_ON(r < 0);
+            if (r < 0) {
+                SCMutexUnlock(&stats_ctx->sts_lock);
+                return 0;
+            }
         }
         pc->gid = id->id;
         pc = pc->next;
     }
 
+    if (StatsThreadSetupPublic(pctx) != 0) {
+        SCLogDebug("failed to setup StatsThreadSetupPublic");
+        SCMutexUnlock(&stats_ctx->sts_lock);
+        return 0;
+    }
 
     StatsThreadStore *temp = NULL;
     if ((temp = SCCalloc(1, sizeof(StatsThreadStore))) == NULL) {
@@ -1152,58 +1285,6 @@ static int StatsThreadRegister(const char *thread_name, StatsPublicThreadContext
 }
 
 /** \internal
- *  \brief Returns a counter array for counters in this id range(s_id - e_id)
- *
- *  \param s_id Counter id of the first counter to be added to the array
- *  \param e_id Counter id of the last counter to be added to the array
- *  \param pctx Pointer to the tv's StatsPublicThreadContext
- *
- *  \retval a counter-array in this(s_id-e_id) range for this TM instance
- */
-static int StatsGetCounterArrayRange(uint16_t s_id, uint16_t e_id,
-                                      StatsPublicThreadContext *pctx,
-                                      StatsPrivateThreadContext *pca)
-{
-    StatsCounter *pc = NULL;
-    uint32_t i = 0;
-
-    if (pctx == NULL || pca == NULL) {
-        SCLogDebug("pctx/pca is NULL");
-        return -1;
-    }
-
-    if (s_id < 1 || e_id < 1 || s_id > e_id) {
-        SCLogDebug("error with the counter ids");
-        return -1;
-    }
-
-    if (e_id > pctx->curr_id) {
-        SCLogDebug("end id is greater than the max id for this tv");
-        return -1;
-    }
-
-    if ((pca->head = SCCalloc(1, sizeof(StatsLocalCounter) * (e_id - s_id + 2))) == NULL) {
-        return -1;
-    }
-
-    pc = pctx->head;
-    while (pc->id != s_id)
-        pc = pc->next;
-
-    i = 1;
-    while ((pc != NULL) && (pc->id <= e_id)) {
-        pca->head[i].pc = pc;
-        pca->head[i].id = pc->id;
-        pc = pc->next;
-        i++;
-    }
-    pca->size = i - 1;
-
-    pca->initialized = 1;
-    return 0;
-}
-
-/** \internal
  *  \brief Returns a counter array for all counters registered for this tm
  *         instance
  *
@@ -1212,22 +1293,46 @@ static int StatsGetCounterArrayRange(uint16_t s_id, uint16_t e_id,
  *  \retval pca Pointer to a counter-array for all counter of this tm instance
  *              on success; NULL on failure
  */
-static int StatsGetAllCountersArray(StatsPublicThreadContext *pctx, StatsPrivateThreadContext *private)
+static int StatsGetAllCountersArray(
+        StatsPublicThreadContext *pctx, StatsPrivateThreadContext *private)
 {
     if (pctx == NULL || private == NULL)
         return -1;
 
-    return StatsGetCounterArrayRange(1, pctx->curr_id, pctx, private);
+    private->size = pctx->curr_id + 1;
+
+    private->head = SCCalloc(private->size, sizeof(StatsLocalCounter));
+    if (private->head == NULL) {
+        return -1;
+    }
+
+    private->initialized = 1;
+    return 0;
 }
 
-
-int StatsSetupPrivate(ThreadVars *tv)
+int StatsSetupPrivate(StatsThreadContext *stats, const char *thread_name)
 {
-    StatsGetAllCountersArray(&(tv)->perf_public_ctx, &(tv)->perf_private_ctx);
+    int r = StatsGetAllCountersArray(&stats->pub, &stats->priv);
+    if (r < 0) {
+        return -1;
+    }
 
-    StatsThreadRegister(tv->printable_name ? tv->printable_name : tv->name,
-        &(tv)->perf_public_ctx);
+    r = StatsThreadRegister(thread_name, &stats->pub);
+    if (r != 1) {
+        return -2;
+    }
     return 0;
+}
+
+static void StatsThreadInitPublic(StatsPublicThreadContext *pctx)
+{
+    memset(pctx, 0x00, sizeof(*pctx));
+    SCSpinInit(&pctx->lock, 0);
+}
+
+void StatsThreadInit(StatsThreadContext *stats)
+{
+    StatsThreadInitPublic(&stats->pub);
 }
 
 /**
@@ -1239,7 +1344,7 @@ int StatsSetupPrivate(ThreadVars *tv)
  * \retval  1 on success
  * \retval -1 on error
  */
-int StatsUpdateCounterArray(StatsPrivateThreadContext *pca, StatsPublicThreadContext *pctx)
+static int StatsUpdateCounterArray(StatsPrivateThreadContext *pca, StatsPublicThreadContext *pctx)
 {
 
     if (pca == NULL || pctx == NULL) {
@@ -1247,13 +1352,14 @@ int StatsUpdateCounterArray(StatsPrivateThreadContext *pca, StatsPublicThreadCon
         return -1;
     }
 
-    SCMutexLock(&pctx->m);
-    StatsLocalCounter *pcae = pca->head;
-    for (uint32_t i = 1; i <= pca->size; i++) {
-        StatsCopyCounterValue(&pcae[i]);
+    if (pca->size > 0 && pctx->copy_of_private != NULL) {
+        /* copy the whole table under lock to the public section
+         * and release the lock. The stats thread will copy it from
+         * there. */
+        SCSpinLock(&pctx->lock);
+        memcpy(pctx->copy_of_private, pca->head, pca->size * sizeof(StatsLocalCounter));
+        SCSpinUnlock(&pctx->lock);
     }
-    SCMutexUnlock(&pctx->m);
-
     SC_ATOMIC_SET(pctx->sync_now, false);
     return 1;
 }
@@ -1267,13 +1373,13 @@ int StatsUpdateCounterArray(StatsPrivateThreadContext *pca, StatsPublicThreadCon
  * \retval  0 on success.
  * \retval -1 on error.
  */
-uint64_t StatsGetLocalCounterValue(ThreadVars *tv, uint16_t id)
+int64_t StatsCounterGetLocalValue(StatsThreadContext *stats, StatsCounterId id)
 {
-    StatsPrivateThreadContext *pca = &tv->perf_private_ctx;
+    StatsPrivateThreadContext *pca = &stats->priv;
 #ifdef DEBUG
-    BUG_ON ((id < 1) || (id > pca->size));
+    BUG_ON((id.id < 1) || (id.id > pca->size));
 #endif
-    return pca->head[id].value;
+    return pca->head[id.id].v;
 }
 
 /**
@@ -1291,7 +1397,7 @@ void StatsReleaseResources(void)
  * \param head Pointer to the head of the list of perf counters that have to
  *             be freed
  */
-void StatsReleaseCounters(StatsCounter *head)
+static void StatsReleaseCounters(StatsCounter *head)
 {
     StatsCounter *pc = NULL;
 
@@ -1320,10 +1426,10 @@ static void StatsReleasePrivateThreadContext(StatsPrivateThreadContext *pca)
     }
 }
 
-void StatsThreadCleanup(ThreadVars *tv)
+void StatsThreadCleanup(StatsThreadContext *stats)
 {
-    StatsPublicThreadContextCleanup(&tv->perf_public_ctx);
-    StatsReleasePrivateThreadContext(&tv->perf_private_ctx);
+    StatsPublicThreadContextCleanup(&stats->pub);
+    StatsReleasePrivateThreadContext(&stats->priv);
 }
 
 /*----------------------------------Unit_Tests--------------------------------*/
@@ -1333,8 +1439,6 @@ void StatsThreadCleanup(ThreadVars *tv)
  * \brief Registers a normal, unqualified counter
  *
  * \param name   Name of the counter, to be registered
- * \param tm_name Name of the engine module under which the counter has to be
- *                registered
  * \param type    Datatype of this counter variable
  * \param pctx    StatsPublicThreadContext corresponding to the tm_name key under which the
  *                key has to be registered
@@ -1342,240 +1446,205 @@ void StatsThreadCleanup(ThreadVars *tv)
  * \retval id Counter id for the newly registered counter, or the already
  *            present counter
  */
-static uint16_t RegisterCounter(const char *name, const char *tm_name,
-                               StatsPublicThreadContext *pctx)
+static StatsCounterId RegisterCounter(
+        const char *name, const char *tm_name, StatsPublicThreadContext *pctx)
 {
-    uint16_t id = StatsRegisterQualifiedCounter(name, tm_name, pctx,
-                                                STATS_TYPE_NORMAL, NULL);
-    return id;
+    uint16_t id = StatsRegisterQualifiedCounter(name, pctx, STATS_TYPE_NORMAL, NULL, NULL, NULL);
+    StatsCounterId s = { .id = id };
+    return s;
 }
 
 static int StatsTestCounterReg02(void)
 {
     StatsPublicThreadContext pctx;
+    StatsThreadInitPublic(&pctx);
 
-    memset(&pctx, 0, sizeof(StatsPublicThreadContext));
-
-    return RegisterCounter(NULL, NULL, &pctx) == 0;
+    StatsCounterId id = RegisterCounter(NULL, NULL, &pctx);
+    FAIL_IF_NOT(id.id == 0);
+    PASS;
 }
 
 static int StatsTestCounterReg03(void)
 {
     StatsPublicThreadContext pctx;
-    int result;
+    StatsThreadInitPublic(&pctx);
 
-    memset(&pctx, 0, sizeof(StatsPublicThreadContext));
-
-    result = RegisterCounter("t1", "c1", &pctx);
-
-    FAIL_IF_NOT(result);
+    StatsCounterId id = RegisterCounter("t1", "c1", &pctx);
+    FAIL_IF_NOT(id.id == 1);
 
     StatsReleaseCounters(pctx.head);
-
     PASS;
 }
 
 static int StatsTestCounterReg04(void)
 {
     StatsPublicThreadContext pctx;
-    int result;
+    StatsThreadInitPublic(&pctx);
 
-    memset(&pctx, 0, sizeof(StatsPublicThreadContext));
-
-    RegisterCounter("t1", "c1", &pctx);
-    RegisterCounter("t2", "c2", &pctx);
-    RegisterCounter("t3", "c3", &pctx);
-
-    result = RegisterCounter("t1", "c1", &pctx);
-
-    FAIL_IF_NOT(result);
+    StatsCounterId c1 = RegisterCounter("t1", "c1", &pctx);
+    FAIL_IF_NOT(c1.id == 1);
+    StatsCounterId c2 = RegisterCounter("t2", "c2", &pctx);
+    FAIL_IF_NOT(c2.id == 2);
+    StatsCounterId c3 = RegisterCounter("t3", "c3", &pctx);
+    FAIL_IF_NOT(c3.id == 3);
+    StatsCounterId id = RegisterCounter("t1", "c1", &pctx);
+    FAIL_IF_NOT(id.id == 1);
 
     StatsReleaseCounters(pctx.head);
-
     PASS;
 }
 
 static int StatsTestGetCntArray05(void)
 {
     ThreadVars tv;
-    int id;
-
     memset(&tv, 0, sizeof(ThreadVars));
-
-    id = RegisterCounter("t1", "c1", &tv.perf_public_ctx);
-    FAIL_IF(id != 1);
-
-    int r = StatsGetAllCountersArray(NULL, &tv.perf_private_ctx);
+    StatsThreadInit(&tv.stats);
+    StatsCounterId c1 = RegisterCounter("t1", "c1", &tv.stats.pub);
+    FAIL_IF(c1.id != 1);
+    int r = StatsGetAllCountersArray(NULL, &tv.stats.priv);
     FAIL_IF_NOT(r == -1);
+    StatsThreadCleanup(&tv.stats);
     PASS;
 }
 
 static int StatsTestGetCntArray06(void)
 {
     ThreadVars tv;
-    int id;
-
     memset(&tv, 0, sizeof(ThreadVars));
-
-    id = RegisterCounter("t1", "c1", &tv.perf_public_ctx);
-    FAIL_IF(id != 1);
-
-    int r = StatsGetAllCountersArray(&tv.perf_public_ctx, &tv.perf_private_ctx);
+    StatsThreadInit(&tv.stats);
+    StatsCounterId c1 = RegisterCounter("t1", "c1", &tv.stats.pub);
+    FAIL_IF(c1.id != 1);
+    StatsThreadSetupPublic(&tv.stats.pub);
+    int r = StatsGetAllCountersArray(&tv.stats.pub, &tv.stats.priv);
     FAIL_IF_NOT(r == 0);
-
-    StatsReleaseCounters(tv.perf_public_ctx.head);
-    StatsReleasePrivateThreadContext(&tv.perf_private_ctx);
-
+    StatsThreadCleanup(&tv.stats);
     PASS;
 }
 
 static int StatsTestCntArraySize07(void)
 {
     ThreadVars tv;
+    memset(&tv, 0, sizeof(ThreadVars));
+    StatsThreadInit(&tv.stats);
     StatsPrivateThreadContext *pca = NULL;
 
-    memset(&tv, 0, sizeof(ThreadVars));
+    StatsCounterId id1 = RegisterCounter("t1", "c1", &tv.stats.pub);
+    StatsCounterId id2 = RegisterCounter("t2", "c2", &tv.stats.pub);
 
-    //pca = (StatsPrivateThreadContext *)&tv.perf_private_ctx;
+    StatsThreadSetupPublic(&tv.stats.pub);
+    StatsGetAllCountersArray(&tv.stats.pub, &tv.stats.priv);
+    pca = &tv.stats.priv;
 
-    RegisterCounter("t1", "c1", &tv.perf_public_ctx);
-    RegisterCounter("t2", "c2", &tv.perf_public_ctx);
+    StatsCounterIncr(&tv.stats, id1);
+    StatsCounterIncr(&tv.stats, id2);
 
-    StatsGetAllCountersArray(&tv.perf_public_ctx, &tv.perf_private_ctx);
-    pca = &tv.perf_private_ctx;
+    FAIL_IF_NOT(pca->size == 3);
 
-    StatsIncr(&tv, 1);
-    StatsIncr(&tv, 2);
-
-    FAIL_IF_NOT(pca->size == 2);
-
-    StatsReleaseCounters(tv.perf_public_ctx.head);
-    StatsReleasePrivateThreadContext(pca);
-
+    StatsThreadCleanup(&tv.stats);
     PASS;
 }
 
 static int StatsTestUpdateCounter08(void)
 {
     ThreadVars tv;
-    StatsPrivateThreadContext *pca = NULL;
-    int id;
-
     memset(&tv, 0, sizeof(ThreadVars));
+    StatsThreadInit(&tv.stats);
+    StatsCounterId c1 = RegisterCounter("t1", "c1", &tv.stats.pub);
+    StatsThreadSetupPublic(&tv.stats.pub);
+    StatsGetAllCountersArray(&tv.stats.pub, &tv.stats.priv);
+    StatsPrivateThreadContext *pca = &tv.stats.priv;
 
-    id = RegisterCounter("t1", "c1", &tv.perf_public_ctx);
+    StatsCounterIncr(&tv.stats, c1);
+    StatsCounterAddI64(&tv.stats, c1, 100);
+    FAIL_IF_NOT(pca->head[c1.id].v == 101);
 
-    StatsGetAllCountersArray(&tv.perf_public_ctx, &tv.perf_private_ctx);
-    pca = &tv.perf_private_ctx;
-
-    StatsIncr(&tv, id);
-    StatsAddUI64(&tv, id, 100);
-
-    FAIL_IF_NOT(pca->head[id].value == 101);
-
-    StatsReleaseCounters(tv.perf_public_ctx.head);
-    StatsReleasePrivateThreadContext(pca);
-
+    StatsThreadCleanup(&tv.stats);
     PASS;
 }
 
 static int StatsTestUpdateCounter09(void)
 {
     ThreadVars tv;
-    StatsPrivateThreadContext *pca = NULL;
-    uint16_t id1, id2;
-
     memset(&tv, 0, sizeof(ThreadVars));
+    StatsThreadInit(&tv.stats);
 
-    id1 = RegisterCounter("t1", "c1", &tv.perf_public_ctx);
-    RegisterCounter("t2", "c2", &tv.perf_public_ctx);
-    RegisterCounter("t3", "c3", &tv.perf_public_ctx);
-    RegisterCounter("t4", "c4", &tv.perf_public_ctx);
-    id2 = RegisterCounter("t5", "c5", &tv.perf_public_ctx);
+    StatsCounterId c1 = RegisterCounter("t1", "c1", &tv.stats.pub);
+    RegisterCounter("t2", "c2", &tv.stats.pub);
+    RegisterCounter("t3", "c3", &tv.stats.pub);
+    RegisterCounter("t4", "c4", &tv.stats.pub);
+    StatsCounterId c5 = RegisterCounter("t5", "c5", &tv.stats.pub);
 
-    StatsGetAllCountersArray(&tv.perf_public_ctx, &tv.perf_private_ctx);
-    pca = &tv.perf_private_ctx;
+    StatsThreadSetupPublic(&tv.stats.pub);
+    StatsGetAllCountersArray(&tv.stats.pub, &tv.stats.priv);
+    StatsPrivateThreadContext *pca = &tv.stats.priv;
 
-    StatsIncr(&tv, id2);
-    StatsAddUI64(&tv, id2, 100);
+    StatsCounterIncr(&tv.stats, c5);
+    StatsCounterAddI64(&tv.stats, c5, 100);
 
-    FAIL_IF_NOT((pca->head[id1].value == 0) && (pca->head[id2].value == 101));
+    FAIL_IF_NOT(pca->head[c1.id].v == 0);
+    FAIL_IF_NOT(pca->head[c5.id].v == 101);
 
-    StatsReleaseCounters(tv.perf_public_ctx.head);
-    StatsReleasePrivateThreadContext(pca);
-
+    StatsThreadCleanup(&tv.stats);
     PASS;
 }
 
 static int StatsTestUpdateGlobalCounter10(void)
 {
     ThreadVars tv;
-    StatsPrivateThreadContext *pca = NULL;
-
-    int result = 1;
-    uint16_t id1, id2, id3;
-
     memset(&tv, 0, sizeof(ThreadVars));
+    StatsThreadInit(&tv.stats);
 
-    id1 = RegisterCounter("t1", "c1", &tv.perf_public_ctx);
-    id2 = RegisterCounter("t2", "c2", &tv.perf_public_ctx);
-    id3 = RegisterCounter("t3", "c3", &tv.perf_public_ctx);
+    StatsCounterId c1 = RegisterCounter("t1", "c1", &tv.stats.pub);
+    StatsCounterId c2 = RegisterCounter("t2", "c2", &tv.stats.pub);
+    StatsCounterId c3 = RegisterCounter("t3", "c3", &tv.stats.pub);
 
-    StatsGetAllCountersArray(&tv.perf_public_ctx, &tv.perf_private_ctx);
-    pca = &tv.perf_private_ctx;
+    StatsThreadSetupPublic(&tv.stats.pub);
+    StatsGetAllCountersArray(&tv.stats.pub, &tv.stats.priv);
+    StatsPrivateThreadContext *pca = &tv.stats.priv;
 
-    StatsIncr(&tv, id1);
-    StatsAddUI64(&tv, id2, 100);
-    StatsIncr(&tv, id3);
-    StatsAddUI64(&tv, id3, 100);
+    StatsCounterIncr(&tv.stats, c1);
+    StatsCounterAddI64(&tv.stats, c2, 100);
+    StatsCounterIncr(&tv.stats, c3);
+    StatsCounterAddI64(&tv.stats, c3, 100);
 
-    StatsUpdateCounterArray(pca, &tv.perf_public_ctx);
+    StatsUpdateCounterArray(pca, &tv.stats.pub);
 
-    result = (1 == tv.perf_public_ctx.head->value);
-    result &= (100 == tv.perf_public_ctx.head->next->value);
-    result &= (101 == tv.perf_public_ctx.head->next->next->value);
-    FAIL_IF_NOT(result);
+    FAIL_IF_NOT(1 == tv.stats.pub.copy_of_private[c1.id].v);
+    FAIL_IF_NOT(100 == tv.stats.pub.copy_of_private[c2.id].v);
+    FAIL_IF_NOT(101 == tv.stats.pub.copy_of_private[c3.id].v);
 
-    StatsReleaseCounters(tv.perf_public_ctx.head);
-    StatsReleasePrivateThreadContext(pca);
-
+    StatsThreadCleanup(&tv.stats);
     PASS;
 }
 
 static int StatsTestCounterValues11(void)
 {
     ThreadVars tv;
-    StatsPrivateThreadContext *pca = NULL;
-
-    int result = 1;
-    uint16_t id1, id2, id3, id4;
-
     memset(&tv, 0, sizeof(ThreadVars));
+    StatsThreadInit(&tv.stats);
 
-    id1 = RegisterCounter("t1", "c1", &tv.perf_public_ctx);
-    id2 = RegisterCounter("t2", "c2", &tv.perf_public_ctx);
-    id3 = RegisterCounter("t3", "c3", &tv.perf_public_ctx);
-    id4 = RegisterCounter("t4", "c4", &tv.perf_public_ctx);
+    StatsCounterId c1 = RegisterCounter("t1", "c1", &tv.stats.pub);
+    StatsCounterId c2 = RegisterCounter("t2", "c2", &tv.stats.pub);
+    StatsCounterId c3 = RegisterCounter("t3", "c3", &tv.stats.pub);
+    StatsCounterId c4 = RegisterCounter("t4", "c4", &tv.stats.pub);
 
-    StatsGetAllCountersArray(&tv.perf_public_ctx, &tv.perf_private_ctx);
-    pca = &tv.perf_private_ctx;
+    StatsThreadSetupPublic(&tv.stats.pub);
+    StatsGetAllCountersArray(&tv.stats.pub, &tv.stats.priv);
+    StatsPrivateThreadContext *pca = &tv.stats.priv;
 
-    StatsIncr(&tv, id1);
-    StatsAddUI64(&tv, id2, 256);
-    StatsAddUI64(&tv, id3, 257);
-    StatsAddUI64(&tv, id4, 16843024);
+    StatsCounterIncr(&tv.stats, c1);
+    StatsCounterAddI64(&tv.stats, c2, 256);
+    StatsCounterAddI64(&tv.stats, c3, 257);
+    StatsCounterAddI64(&tv.stats, c4, 16843024);
 
-    StatsUpdateCounterArray(pca, &tv.perf_public_ctx);
+    StatsUpdateCounterArray(pca, &tv.stats.pub);
 
-    result &= (1 == tv.perf_public_ctx.head->value);
-    result &= (256 == tv.perf_public_ctx.head->next->value);
-    result &= (257 == tv.perf_public_ctx.head->next->next->value);
-    result &= (16843024 == tv.perf_public_ctx.head->next->next->next->value);
-    FAIL_IF_NOT(result);
+    FAIL_IF_NOT(1 == tv.stats.pub.copy_of_private[c1.id].v);
+    FAIL_IF_NOT(256 == tv.stats.pub.copy_of_private[c2.id].v);
+    FAIL_IF_NOT(257 == tv.stats.pub.copy_of_private[c3.id].v);
+    FAIL_IF_NOT(16843024 == tv.stats.pub.copy_of_private[c4.id].v);
 
-    StatsReleaseCounters(tv.perf_public_ctx.head);
-    StatsReleasePrivateThreadContext(pca);
-
+    StatsThreadCleanup(&tv.stats);
     PASS;
 }
 

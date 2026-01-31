@@ -96,9 +96,9 @@ static int DetectTemplateMatch (DetectEngineThreadCtx *det_ctx, Packet *p,
         /* fake pkt */
     }
 
-    if (PKT_IS_IPV4(p)) {
+    if (PacketIsIPv4(p)) {
         /* ipv4 pkt */
-    } else if (PKT_IS_IPV6(p)) {
+    } else if (PacketIsIPv6(p)) {
         /* ipv6 pkt */
     } else {
         SCLogDebug("packet is of not IPv4 or IPv6");
@@ -192,7 +192,7 @@ static int DetectTemplateSetup (DetectEngineCtx *de_ctx, Signature *s, const cha
     if (templated == NULL)
         return -1;
 
-    if (SigMatchAppendSMToList(de_ctx, s, DETECT_TEMPLATE, (SigMatchCtx *)templated,
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_TEMPLATE, (SigMatchCtx *)templated,
                 DETECT_SM_LIST_MATCH) == NULL) {
         DetectTemplateFree(de_ctx, templated);
         return -1;

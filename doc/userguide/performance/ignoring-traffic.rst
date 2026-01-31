@@ -4,10 +4,10 @@ Ignoring Traffic
 In some cases there are reasons to ignore certain traffic. Certain hosts
 may be trusted, or perhaps a backup stream should be ignored.
 
-capture filters (BPF)
+Capture Filters (BPF)
 ---------------------
 
-Through BPFs the capture methods pcap, af-packet, netmap  and pf_ring can be
+Through BPFs the capture methods pcap, af-packet, netmap and pf_ring can be
 told what to send to Suricata, and what not. For example a simple
 filter 'tcp' will only capture tcp packets.
 
@@ -70,17 +70,22 @@ Example::
   suppress gen_id 0, sig_id 0, track by_src, ip 1.2.3.4
 
 
-encrypted traffic
+Encrypted Traffic
 -----------------
 
-The TLS app layer parser has the ability to stop processing encrypted traffic
-after the initial handshake. By setting the `app-layer.protocols.tls.encryption-handling`
-option to `bypass` the rest of this flow is ignored. If flow bypass is enabled,
-the bypass is done in the kernel or in hardware.
+The TLS and SSH app layer parsers have the ability to stop processing
+encrypted traffic after the initial handshake. By setting the
+`app-layer.protocols.tls.encryption-handling` and
+`app-layer.protocols.quic.encryption-handling` and
+`app-layer.protocols.ssh.encryption-handling` options to `bypass` Suricata
+bypasses flows once the handshake is completed and encrypted traffic is
+detected. The rest of the flow is ignored.
+The bypass is done in the kernel or in hardware, similar to how flow bypass
+is done.
 
 .. _bypass:
 
-bypassing traffic
+Bypassing Traffic
 -----------------
 
 Aside from using the ``bypass`` keyword in rules, there are three other ways

@@ -31,7 +31,7 @@
 #include "source-pcap-file.h"
 #include "util-exception-policy.h"
 
-extern uint16_t max_pending_packets;
+extern uint32_t max_pending_packets;
 extern PcapFileGlobalVars pcap_g;
 
 static void PcapFileCallbackLoop(char *user, struct pcap_pkthdr *h, u_char *pkt);
@@ -80,7 +80,7 @@ void PcapFileCallbackLoop(char *user, struct pcap_pkthdr *h, u_char *pkt)
     p->ts = SCTIME_FROM_TIMEVAL_UNTRUSTED(&h->ts);
     SCLogDebug("p->ts.tv_sec %" PRIuMAX "", (uintmax_t)SCTIME_SECS(p->ts));
     p->datalink = ptv->datalink;
-    p->pcap_cnt = ++pcap_g.cnt;
+    p->pcap_v.pcap_cnt = ++pcap_g.cnt;
 
     p->pcap_v.tenant_id = ptv->shared->tenant_id;
     ptv->shared->pkts++;
@@ -96,8 +96,8 @@ void PcapFileCallbackLoop(char *user, struct pcap_pkthdr *h, u_char *pkt)
     if (pcap_g.checksum_mode == CHECKSUM_VALIDATION_DISABLE) {
         p->flags |= PKT_IGNORE_CHECKSUM;
     } else if (pcap_g.checksum_mode == CHECKSUM_VALIDATION_AUTO) {
-        if (ChecksumAutoModeCheck(ptv->shared->pkts, p->pcap_cnt,
-                                  SC_ATOMIC_GET(pcap_g.invalid_checksums))) {
+        if (ChecksumAutoModeCheck(ptv->shared->pkts, p->pcap_v.pcap_cnt,
+                    SC_ATOMIC_GET(pcap_g.invalid_checksums))) {
             pcap_g.checksum_mode = CHECKSUM_VALIDATION_DISABLE;
             p->flags |= PKT_IGNORE_CHECKSUM;
         }
@@ -168,7 +168,7 @@ TmEcode PcapFileDispatch(PcapFileFileVars *ptv)
             SCLogError("Pcap callback PcapFileCallbackLoop failed for %s", ptv->filename);
             loop_result = TM_ECODE_FAILED;
         }
-        StatsSyncCountersIfSignalled(ptv->shared->tv);
+        StatsSyncCountersIfSignalled(&ptv->shared->tv->stats);
     }
 
     SCReturnInt(loop_result);
@@ -208,6 +208,16 @@ TmEcode InitPcapFile(PcapFileFileVars *pfv)
         SCReturnInt(TM_ECODE_FAILED);
     }
 
+#if defined(HAVE_SETVBUF) && defined(OS_LINUX)
+    if (pcap_g.read_buffer_size > 0) {
+        errno = 0;
+        if (setvbuf(pcap_file(pfv->pcap_handle), pfv->buffer, _IOFBF, pcap_g.read_buffer_size) <
+                0) {
+            SCLogWarning("Failed to setvbuf on PCAP file handle: %s", strerror(errno));
+        }
+    }
+#endif
+
     if (pfv->shared != NULL && pfv->shared->bpf_string != NULL) {
         SCLogInfo("using bpf-filter \"%s\"", pfv->shared->bpf_string);
 
@@ -241,6 +251,9 @@ TmEcode InitPcapFile(PcapFileFileVars *pfv)
 TmEcode ValidateLinkType(int datalink, DecoderFunc *DecoderFn)
 {
     switch (datalink) {
+        case LINKTYPE_LINUX_SLL2:
+            *DecoderFn = DecodeSll2;
+            break;
         case LINKTYPE_LINUX_SLL:
             *DecoderFn = DecodeSll;
             break;
@@ -251,6 +264,7 @@ TmEcode ValidateLinkType(int datalink, DecoderFunc *DecoderFn)
             *DecoderFn = DecodePPP;
             break;
         case LINKTYPE_IPV4:
+        case LINKTYPE_IPV6:
         case LINKTYPE_RAW:
         case LINKTYPE_RAW2:
         case LINKTYPE_GRE_OVER_IP:

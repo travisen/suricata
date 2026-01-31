@@ -50,7 +50,7 @@
 #include "suricata.h"
 #include "util-bpf.h"
 
-extern uint16_t max_pending_packets;
+extern uint32_t max_pending_packets;
 
 const char *RunModeNetmapGetDefaultMode(void)
 {
@@ -61,38 +61,40 @@ static int NetmapRunModeIsIPS(void)
 {
     int nlive = LiveGetDeviceCount();
     int ldev;
-    ConfNode *if_root;
-    ConfNode *if_default = NULL;
-    ConfNode *netmap_node;
+    SCConfNode *if_root;
+    SCConfNode *if_default = NULL;
+    SCConfNode *netmap_node;
     int has_ips = 0;
     int has_ids = 0;
 
     /* Find initial node */
-    netmap_node = ConfGetNode("netmap");
+    netmap_node = SCConfGetNode("netmap");
     if (netmap_node == NULL) {
         return 0;
     }
 
-    if_default = ConfNodeLookupKeyValue(netmap_node, "interface", "default");
+    if_default = SCConfNodeLookupKeyValue(netmap_node, "interface", "default");
 
     for (ldev = 0; ldev < nlive; ldev++) {
         const char *live_dev = LiveGetDeviceName(ldev);
         if (live_dev == NULL) {
             SCLogError("Problem with config file");
-            return 0;
+            return -1;
         }
-        const char *copymodestr = NULL;
-        if_root = ConfNodeLookupKeyValue(netmap_node, "interface", live_dev);
+        if_root = SCConfNodeLookupKeyValue(netmap_node, "interface", live_dev);
 
         if (if_root == NULL) {
             if (if_default == NULL) {
                 SCLogError("Problem with config file");
-                return 0;
+                return -1;
             }
             if_root = if_default;
         }
 
-        if (ConfGetChildValueWithDefault(if_root, if_default, "copy-mode", &copymodestr) == 1) {
+        const char *copymodestr = NULL;
+        const char *copyifacestr = NULL;
+        if (SCConfGetChildValueWithDefault(if_root, if_default, "copy-mode", &copymodestr) == 1 &&
+                SCConfGetChildValue(if_root, "copy-iface", &copyifacestr) == 1) {
             if (strcmp(copymodestr, "ips") == 0) {
                 has_ips = 1;
             } else {
@@ -104,44 +106,22 @@ static int NetmapRunModeIsIPS(void)
     }
 
     if (has_ids && has_ips) {
-        SCLogWarning("Netmap using both IPS and TAP/IDS mode, this will not be "
-                     "allowed in Suricata 8 due to undefined behavior. See ticket #5588.");
-        for (ldev = 0; ldev < nlive; ldev++) {
-            const char *live_dev = LiveGetDeviceName(ldev);
-            if (live_dev == NULL) {
-                SCLogError("Problem with config file");
-                return 0;
-            }
-            if_root = ConfNodeLookupKeyValue(netmap_node, "interface", live_dev);
-            const char *copymodestr = NULL;
-
-            if (if_root == NULL) {
-                if (if_default == NULL) {
-                    SCLogError("Problem with config file");
-                    return 0;
-                }
-                if_root = if_default;
-            }
-
-            if (!((ConfGetChildValueWithDefault(if_root, if_default, "copy-mode", &copymodestr) ==
-                          1) &&
-                        (strcmp(copymodestr, "ips") == 0))) {
-                SCLogError("Netmap IPS mode used and interface '%s' is in IDS or TAP mode. "
-                           "Sniffing '%s' but expect bad result as stream-inline is activated.",
-                        live_dev, live_dev);
-            }
-        }
+        SCLogError("using both IPS and TAP/IDS mode is not allowed due to undefined behavior. See "
+                   "ticket #5588.");
+        return -1;
     }
 
     return has_ips;
 }
 
-static void NetmapRunModeEnableIPS(void)
+static int NetmapRunModeEnableIPS(void)
 {
-    if (NetmapRunModeIsIPS()) {
+    int r = NetmapRunModeIsIPS();
+    if (r == 1) {
         SCLogInfo("Netmap: Setting IPS mode");
         EngineModeSetIPS();
     }
+    return r;
 }
 
 void RunModeIdsNetmapRegister(void)
@@ -157,7 +137,6 @@ void RunModeIdsNetmapRegister(void)
             "each flow are assigned to a single detect "
             "thread.",
             RunModeIdsNetmapAutoFp, NetmapRunModeEnableIPS);
-    return;
 }
 
 #ifdef HAVE_NETMAP
@@ -171,8 +150,8 @@ static void NetmapDerefConfig(void *conf)
     }
 }
 
-static int ParseNetmapSettings(NetmapIfaceSettings *ns, const char *iface,
-        ConfNode *if_root, ConfNode *if_default)
+static int ParseNetmapSettings(
+        NetmapIfaceSettings *ns, const char *iface, SCConfNode *if_root, SCConfNode *if_default)
 {
     ns->threads = 0;
     ns->promisc = true;
@@ -219,7 +198,7 @@ static int ParseNetmapSettings(NetmapIfaceSettings *ns, const char *iface,
     }
 
     const char *threadsstr = NULL;
-    if (ConfGetChildValueWithDefault(if_root, if_default, "threads", &threadsstr) != 1) {
+    if (SCConfGetChildValueWithDefault(if_root, if_default, "threads", &threadsstr) != 1) {
         ns->threads = 0;
         ns->threads_auto = true;
     } else {
@@ -238,21 +217,19 @@ static int ParseNetmapSettings(NetmapIfaceSettings *ns, const char *iface,
     ConfSetBPFFilter(if_root, if_default, iface, &ns->bpf_filter);
 
     int boolval = 0;
-    (void)ConfGetChildValueBoolWithDefault(if_root, if_default, "disable-promisc", (int *)&boolval);
+    (void)SCConfGetChildValueBoolWithDefault(if_root, if_default, "disable-promisc", &boolval);
     if (boolval) {
         SCLogInfo("%s: disabling promiscuous mode", ns->iface);
         ns->promisc = false;
     }
 
     const char *tmpctype;
-    if (ConfGetChildValueWithDefault(if_root, if_default,
-                "checksum-checks", &tmpctype) == 1)
-    {
+    if (SCConfGetChildValueWithDefault(if_root, if_default, "checksum-checks", &tmpctype) == 1) {
         if (strcmp(tmpctype, "auto") == 0) {
             ns->checksum_mode = CHECKSUM_VALIDATION_AUTO;
-        } else if (ConfValIsTrue(tmpctype)) {
+        } else if (SCConfValIsTrue(tmpctype)) {
             ns->checksum_mode = CHECKSUM_VALIDATION_ENABLE;
-        } else if (ConfValIsFalse(tmpctype)) {
+        } else if (SCConfValIsFalse(tmpctype)) {
             ns->checksum_mode = CHECKSUM_VALIDATION_DISABLE;
         } else {
             SCLogWarning("%s: invalid value for checksum-checks '%s'", iface, tmpctype);
@@ -260,9 +237,7 @@ static int ParseNetmapSettings(NetmapIfaceSettings *ns, const char *iface,
     }
 
     const char *copymodestr;
-    if (ConfGetChildValueWithDefault(if_root, if_default,
-                "copy-mode", &copymodestr) == 1)
-    {
+    if (SCConfGetChildValueWithDefault(if_root, if_default, "copy-mode", &copymodestr) == 1) {
         if (strcmp(copymodestr, "ips") == 0) {
             ns->copy_mode = NETMAP_COPY_MODE_IPS;
         } else if (strcmp(copymodestr, "tap") == 0) {
@@ -304,8 +279,8 @@ finalize:
  */
 static void *ParseNetmapConfig(const char *iface_name)
 {
-    ConfNode *if_root = NULL;
-    ConfNode *if_default = NULL;
+    SCConfNode *if_root = NULL;
+    SCConfNode *if_default = NULL;
     const char *out_iface = NULL;
 
     if (iface_name == NULL) {
@@ -323,7 +298,7 @@ static void *ParseNetmapConfig(const char *iface_name)
     (void) SC_ATOMIC_ADD(aconf->ref, 1);
 
     /* Find initial node */
-    ConfNode *netmap_node = ConfGetNode("netmap");
+    SCConfNode *netmap_node = SCConfGetNode("netmap");
     if (netmap_node == NULL) {
         SCLogInfo("%s: unable to find netmap config using default value", iface_name);
     } else {
@@ -336,15 +311,16 @@ static void *ParseNetmapConfig(const char *iface_name)
 
     /* if we have a copy iface, parse that as well */
     if (netmap_node != NULL &&
-            ConfGetChildValueWithDefault(if_root, if_default, "copy-iface", &out_iface) == 1)
-    {
+            SCConfGetChildValueWithDefault(if_root, if_default, "copy-iface", &out_iface) == 1) {
         if (strlen(out_iface) > 0) {
             if_root = ConfFindDeviceConfig(netmap_node, out_iface);
             ParseNetmapSettings(&aconf->out, out_iface, if_root, if_default);
         }
     }
 
-    int ring_count = NetmapGetRSSCount(aconf->iface_name);
+    int ring_count = 0;
+    if (aconf->in.real)
+        ring_count = NetmapGetRSSCount(aconf->iface_name);
     if (strlen(aconf->iface_name) > 0 &&
             (aconf->iface_name[strlen(aconf->iface_name) - 1] == '^' ||
                     aconf->iface_name[strlen(aconf->iface_name) - 1] == '*')) {
@@ -381,13 +357,13 @@ static void *ParseNetmapConfig(const char *iface_name)
 
     SC_ATOMIC_RESET(aconf->ref);
     (void) SC_ATOMIC_ADD(aconf->ref, aconf->in.threads);
-    SCLogPerf("%s: using %d threads", aconf->iface_name, aconf->in.threads);
+    SCLogPerf("%s: using %u threads", aconf->iface_name, aconf->in.threads);
 
     LiveDeviceHasNoStats();
     return aconf;
 }
 
-static int NetmapConfigGeThreadsCount(void *conf)
+static uint16_t NetmapConfigGeThreadsCount(void *conf)
 {
     NetmapIfaceConfig *aconf = (NetmapIfaceConfig *)conf;
     return aconf->in.threads;
@@ -402,7 +378,7 @@ static int NetmapRunModeInit(NetmapRunMode_t runmode)
     TimeModeSetLive();
 
     const char *live_dev = NULL;
-    (void)ConfGet("netmap.live-interface", &live_dev);
+    (void)SCConfGet("netmap.live-interface", &live_dev);
 
     const char *runmode_str = "unknown";
     int ret;

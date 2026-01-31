@@ -48,14 +48,15 @@ static int DetectIkeNoncePayloadLengthMatch(DetectEngineThreadCtx *, Flow *, uin
  */
 void DetectIkeNoncePayloadLengthRegister(void)
 {
-    sigmatch_table[DETECT_AL_IKE_NONCE_PAYLOAD_LENGTH].name = "ike.nonce_payload_length";
-    sigmatch_table[DETECT_AL_IKE_NONCE_PAYLOAD_LENGTH].desc = "match IKE nonce payload length";
-    sigmatch_table[DETECT_AL_IKE_NONCE_PAYLOAD_LENGTH].url =
+    sigmatch_table[DETECT_IKE_NONCE_PAYLOAD_LENGTH].name = "ike.nonce_payload_length";
+    sigmatch_table[DETECT_IKE_NONCE_PAYLOAD_LENGTH].desc = "match IKE nonce payload length";
+    sigmatch_table[DETECT_IKE_NONCE_PAYLOAD_LENGTH].url =
             "/rules/ike-keywords.html#ike-nonce-payload-length";
-    sigmatch_table[DETECT_AL_IKE_NONCE_PAYLOAD_LENGTH].AppLayerTxMatch =
+    sigmatch_table[DETECT_IKE_NONCE_PAYLOAD_LENGTH].AppLayerTxMatch =
             DetectIkeNoncePayloadLengthMatch;
-    sigmatch_table[DETECT_AL_IKE_NONCE_PAYLOAD_LENGTH].Setup = DetectIkeNoncePayloadLengthSetup;
-    sigmatch_table[DETECT_AL_IKE_NONCE_PAYLOAD_LENGTH].Free = DetectIkeNoncePayloadLengthFree;
+    sigmatch_table[DETECT_IKE_NONCE_PAYLOAD_LENGTH].Setup = DetectIkeNoncePayloadLengthSetup;
+    sigmatch_table[DETECT_IKE_NONCE_PAYLOAD_LENGTH].Free = DetectIkeNoncePayloadLengthFree;
+    sigmatch_table[DETECT_IKE_NONCE_PAYLOAD_LENGTH].flags = SIGMATCH_INFO_UINT32;
 
     DetectAppLayerInspectEngineRegister("ike.nonce_payload_length", ALPROTO_IKE, SIG_FLAG_TOSERVER,
             1, DetectEngineInspectGenericList, NULL);
@@ -87,7 +88,7 @@ static int DetectIkeNoncePayloadLengthMatch(DetectEngineThreadCtx *det_ctx, Flow
     SCEnter();
 
     uint32_t length;
-    if (!rs_ike_state_get_nonce_payload_length(txv, &length))
+    if (!SCIkeStateGetNoncePayloadLength(txv, &length))
         SCReturnInt(0);
     const DetectU32Data *du32 = (const DetectU32Data *)ctx;
     return DetectU32Match(length, du32);
@@ -106,7 +107,7 @@ static int DetectIkeNoncePayloadLengthMatch(DetectEngineThreadCtx *det_ctx, Flow
 static int DetectIkeNoncePayloadLengthSetup(
         DetectEngineCtx *de_ctx, Signature *s, const char *rawstr)
 {
-    if (DetectSignatureSetAppProto(s, ALPROTO_IKE) != 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_IKE) != 0)
         return -1;
 
     DetectU32Data *nonce_payload_length = DetectU32Parse(rawstr);
@@ -116,7 +117,7 @@ static int DetectIkeNoncePayloadLengthSetup(
     /* okay so far so good, lets get this into a SigMatch
      * and put it in the Signature. */
 
-    if (SigMatchAppendSMToList(de_ctx, s, DETECT_AL_IKE_NONCE_PAYLOAD_LENGTH,
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_IKE_NONCE_PAYLOAD_LENGTH,
                 (SigMatchCtx *)nonce_payload_length,
                 g_ike_nonce_payload_length_buffer_id) == NULL) {
         goto error;
@@ -136,5 +137,5 @@ error:
  */
 static void DetectIkeNoncePayloadLengthFree(DetectEngineCtx *de_ctx, void *ptr)
 {
-    rs_detect_u32_free(ptr);
+    SCDetectU32Free(ptr);
 }

@@ -15,13 +15,13 @@
  * 02110-1301, USA.
  */
 
-use nom7::branch::alt;
-use nom7::bytes::complete::tag;
-use nom7::character::complete::{digit1, multispace0, multispace1};
-use nom7::combinator::{map_res, opt, verify};
-use nom7::error::{make_error, ErrorKind};
-use nom7::sequence::{separated_pair, tuple};
-use nom7::{Err, IResult};
+use nom8::branch::alt;
+use nom8::bytes::complete::tag;
+use nom8::character::complete::{digit1, multispace0, multispace1};
+use nom8::combinator::{map_res, opt, verify};
+use nom8::error::{make_error, ErrorKind};
+use nom8::sequence::separated_pair;
+use nom8::{Err, IResult, Parser};
 use std::ffi::CStr;
 use std::os::raw::c_char;
 
@@ -32,9 +32,9 @@ const ASN1_DEFAULT_MAX_FRAMES: u16 = 30;
 ///
 /// # Safety
 ///
-/// pointer must be free'd using `rs_detect_asn1_free`
+/// pointer must be free'd using `SCAsn1DetectFree`
 #[no_mangle]
-pub unsafe extern "C" fn rs_detect_asn1_parse(input: *const c_char) -> *mut DetectAsn1Data {
+pub unsafe extern "C" fn SCAsn1DetectParse(input: *const c_char) -> *mut DetectAsn1Data {
     if input.is_null() {
         return std::ptr::null_mut();
     }
@@ -73,9 +73,9 @@ pub unsafe extern "C" fn rs_detect_asn1_parse(input: *const c_char) -> *mut Dete
 ///
 /// # Safety
 ///
-/// ptr must be a valid object obtained using `rs_detect_asn1_parse`
+/// ptr must be a valid object obtained using `SCAsn1DetectParse`
 #[no_mangle]
-pub unsafe extern "C" fn rs_detect_asn1_free(ptr: *mut DetectAsn1Data) {
+pub unsafe extern "C" fn SCAsn1DetectFree(ptr: *mut DetectAsn1Data) {
     if ptr.is_null() {
         return;
     }
@@ -107,16 +107,16 @@ impl Default for DetectAsn1Data {
 }
 
 fn parse_u32_number(input: &str) -> IResult<&str, u32> {
-    map_res(digit1, |digits: &str| digits.parse::<u32>())(input)
+    map_res(digit1, |digits: &str| digits.parse::<u32>()).parse(input)
 }
 
 fn parse_u16_number(input: &str) -> IResult<&str, u16> {
-    map_res(digit1, |digits: &str| digits.parse::<u16>())(input)
+    map_res(digit1, |digits: &str| digits.parse::<u16>()).parse(input)
 }
 
 fn parse_i32_number(input: &str) -> IResult<&str, i32> {
-    let (rest, negate) = opt(tag("-"))(input)?;
-    let (rest, d) = map_res(digit1, |s: &str| s.parse::<i32>())(rest)?;
+    let (rest, negate) = opt(tag("-")).parse(input)?;
+    let (rest, d) = map_res(digit1, |s: &str| s.parse::<i32>()).parse(rest)?;
     let n = if negate.is_some() { -1 } else { 1 };
     Ok((rest, d * n))
 }
@@ -133,19 +133,19 @@ pub(super) fn asn1_parse_rule(input: &str) -> IResult<&str, DetectAsn1Data> {
 
     // Rule parsing functions
     fn bitstring_overflow(i: &str) -> IResult<&str, &str> {
-        tag("bitstring_overflow")(i)
+        tag("bitstring_overflow").parse(i)
     }
 
     fn double_overflow(i: &str) -> IResult<&str, &str> {
-        tag("double_overflow")(i)
+        tag("double_overflow").parse(i)
     }
 
     fn oversize_length(i: &str) -> IResult<&str, (&str, u32)> {
-        separated_pair(tag("oversize_length"), multispace1, parse_u32_number)(i)
+        separated_pair(tag("oversize_length"), multispace1, parse_u32_number).parse(i)
     }
 
     fn absolute_offset(i: &str) -> IResult<&str, (&str, u16)> {
-        separated_pair(tag("absolute_offset"), multispace1, parse_u16_number)(i)
+        separated_pair(tag("absolute_offset"), multispace1, parse_u16_number).parse(i)
     }
 
     fn relative_offset(i: &str) -> IResult<&str, (&str, i32)> {
@@ -153,9 +153,9 @@ pub(super) fn asn1_parse_rule(input: &str) -> IResult<&str, DetectAsn1Data> {
             tag("relative_offset"),
             multispace1,
             verify(parse_i32_number, |v| {
-                *v >= -i32::from(std::u16::MAX) && *v <= i32::from(std::u16::MAX)
+                *v >= -i32::from(u16::MAX) && *v <= i32::from(u16::MAX)
             }),
-        )(i)
+        ).parse(i)
     }
 
     let mut data = DetectAsn1Data::default();
@@ -175,7 +175,7 @@ pub(super) fn asn1_parse_rule(input: &str) -> IResult<&str, DetectAsn1Data> {
                 relative_offset,
                 _,
             ),
-        ) = tuple((
+        ) = (
             opt(multispace0),
             opt(bitstring_overflow),
             opt(double_overflow),
@@ -183,7 +183,7 @@ pub(super) fn asn1_parse_rule(input: &str) -> IResult<&str, DetectAsn1Data> {
             opt(absolute_offset),
             opt(relative_offset),
             opt(alt((multispace1, tag(",")))),
-        ))(rest)?;
+        ).parse(rest)?;
 
         if bitstring_overflow.is_some() {
             data.bitstring_overflow = true;

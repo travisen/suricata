@@ -43,7 +43,7 @@ static IPPairStorageId g_ippair_bit_storage_id = { .id = -1 }; /**< IPPair stora
 static void XBitFreeAll(void *store)
 {
     GenericVar *gv = store;
-    GenericVarFree(gv);
+    SCGenericVarFree(gv);
 }
 
 void IPPairBitInitCtx(void)
@@ -70,7 +70,7 @@ int IPPairBitsTimedoutCheck(IPPair *h, SCTime_t ts)
     for ( ; gv != NULL; gv = gv->next) {
         if (gv->type == DETECT_XBITS) {
             XBit *xb = (XBit *)gv;
-            if (xb->expire > (uint32_t)SCTIME_SECS(ts))
+            if (SCTIME_CMP_GT(xb->expire, ts))
                 return 0;
         }
     }
@@ -91,7 +91,7 @@ static XBit *IPPairBitGet(IPPair *h, uint32_t idx)
 }
 
 /* add a flowbit to the flow */
-static void IPPairBitAdd(IPPair *h, uint32_t idx, uint32_t expire)
+static void IPPairBitAdd(IPPair *h, uint32_t idx, SCTime_t expire)
 {
     XBit *fb = IPPairBitGet(h, idx);
     if (fb == NULL) {
@@ -128,7 +128,7 @@ static void IPPairBitRemove(IPPair *h, uint32_t idx)
     }
 }
 
-void IPPairBitSet(IPPair *h, uint32_t idx, uint32_t expire)
+void IPPairBitSet(IPPair *h, uint32_t idx, SCTime_t expire)
 {
     XBit *fb = IPPairBitGet(h, idx);
     if (fb == NULL) {
@@ -144,7 +144,7 @@ void IPPairBitUnset(IPPair *h, uint32_t idx)
     }
 }
 
-void IPPairBitToggle(IPPair *h, uint32_t idx, uint32_t expire)
+void IPPairBitToggle(IPPair *h, uint32_t idx, SCTime_t expire)
 {
     XBit *fb = IPPairBitGet(h, idx);
     if (fb != NULL) {
@@ -154,11 +154,11 @@ void IPPairBitToggle(IPPair *h, uint32_t idx, uint32_t expire)
     }
 }
 
-int IPPairBitIsset(IPPair *h, uint32_t idx, uint32_t ts)
+int IPPairBitIsset(IPPair *h, uint32_t idx, SCTime_t ts)
 {
     XBit *fb = IPPairBitGet(h, idx);
     if (fb != NULL) {
-        if (fb->expire < ts) {
+        if (SCTIME_CMP_LT(fb->expire, ts)) {
             IPPairBitRemove(h, idx);
             return 0;
         }
@@ -168,14 +168,14 @@ int IPPairBitIsset(IPPair *h, uint32_t idx, uint32_t ts)
     return 0;
 }
 
-int IPPairBitIsnotset(IPPair *h, uint32_t idx, uint32_t ts)
+int IPPairBitIsnotset(IPPair *h, uint32_t idx, SCTime_t ts)
 {
     XBit *fb = IPPairBitGet(h, idx);
     if (fb == NULL) {
         return 1;
     }
 
-    if (fb->expire < ts) {
+    if (SCTIME_CMP_LT(fb->expire, ts)) {
         IPPairBitRemove(h, idx);
         return 1;
     }
@@ -188,303 +188,280 @@ int IPPairBitIsnotset(IPPair *h, uint32_t idx, uint32_t ts)
 #ifdef UNITTESTS
 static int IPPairBitTest01 (void)
 {
-    int ret = 0;
-
+    StorageCleanup();
+    StorageInit();
+    IPPairBitInitCtx();
+    StorageFinalize();
     IPPairInitConfig(true);
     IPPair *h = IPPairAlloc();
-    if (h == NULL)
-        goto end;
+    FAIL_IF_NULL(h);
 
-    IPPairBitAdd(h, 0, 0);
+    IPPairBitAdd(h, 0, SCTIME_FROM_SECS(0));
 
     XBit *fb = IPPairBitGet(h,0);
-    if (fb != NULL)
-        ret = 1;
+    FAIL_IF_NULL(fb);
 
     IPPairFree(h);
-end:
-    IPPairCleanup();
-    return ret;
+    IPPairShutdown();
+    StorageCleanup();
+    PASS;
 }
 
 static int IPPairBitTest02 (void)
 {
-    int ret = 0;
-
+    StorageCleanup();
+    StorageInit();
+    IPPairBitInitCtx();
+    StorageFinalize();
     IPPairInitConfig(true);
     IPPair *h = IPPairAlloc();
-    if (h == NULL)
-        goto end;
+    FAIL_IF_NULL(h);
 
     XBit *fb = IPPairBitGet(h,0);
-    if (fb == NULL)
-        ret = 1;
+    FAIL_IF_NOT_NULL(fb);
 
     IPPairFree(h);
-end:
-    IPPairCleanup();
-    return ret;
+    IPPairShutdown();
+    StorageCleanup();
+    PASS;
 }
 
 static int IPPairBitTest03 (void)
 {
-    int ret = 0;
-
+    StorageCleanup();
+    StorageInit();
+    IPPairBitInitCtx();
+    StorageFinalize();
     IPPairInitConfig(true);
     IPPair *h = IPPairAlloc();
-    if (h == NULL)
-        goto end;
+    FAIL_IF_NULL(h);
 
-    IPPairBitAdd(h, 0, 30);
+    IPPairBitAdd(h, 0, SCTIME_FROM_SECS(30));
 
     XBit *fb = IPPairBitGet(h,0);
-    if (fb == NULL) {
-        printf("fb == NULL although it was just added: ");
-        goto end;
-    }
+    FAIL_IF_NULL(fb);
 
     IPPairBitRemove(h, 0);
 
     fb = IPPairBitGet(h,0);
-    if (fb != NULL) {
-        printf("fb != NULL although it was just removed: ");
-        goto end;
-    } else {
-        ret = 1;
-    }
+    FAIL_IF_NOT_NULL(fb);
 
     IPPairFree(h);
-end:
-    IPPairCleanup();
-    return ret;
+    IPPairShutdown();
+    StorageCleanup();
+    PASS;
 }
 
 static int IPPairBitTest04 (void)
 {
-    int ret = 0;
-
+    StorageCleanup();
+    StorageInit();
+    IPPairBitInitCtx();
+    StorageFinalize();
     IPPairInitConfig(true);
     IPPair *h = IPPairAlloc();
-    if (h == NULL)
-        goto end;
+    FAIL_IF_NULL(h);
 
-    IPPairBitAdd(h, 0,30);
-    IPPairBitAdd(h, 1,30);
-    IPPairBitAdd(h, 2,30);
-    IPPairBitAdd(h, 3,30);
+    IPPairBitAdd(h, 0, SCTIME_FROM_SECS(30));
+    IPPairBitAdd(h, 1, SCTIME_FROM_SECS(30));
+    IPPairBitAdd(h, 2, SCTIME_FROM_SECS(30));
+    IPPairBitAdd(h, 3, SCTIME_FROM_SECS(30));
 
     XBit *fb = IPPairBitGet(h,0);
-    if (fb != NULL)
-        ret = 1;
+    FAIL_IF_NULL(fb);
 
     IPPairFree(h);
-end:
-    IPPairCleanup();
-    return ret;
+    IPPairShutdown();
+    StorageCleanup();
+    PASS;
 }
 
 static int IPPairBitTest05 (void)
 {
-    int ret = 0;
-
+    StorageCleanup();
+    StorageInit();
+    IPPairBitInitCtx();
+    StorageFinalize();
     IPPairInitConfig(true);
     IPPair *h = IPPairAlloc();
-    if (h == NULL)
-        goto end;
+    FAIL_IF_NULL(h);
 
-    IPPairBitAdd(h, 0,90);
-    IPPairBitAdd(h, 1,90);
-    IPPairBitAdd(h, 2,90);
-    IPPairBitAdd(h, 3,90);
+    IPPairBitAdd(h, 0, SCTIME_FROM_SECS(90));
+    IPPairBitAdd(h, 1, SCTIME_FROM_SECS(90));
+    IPPairBitAdd(h, 2, SCTIME_FROM_SECS(90));
+    IPPairBitAdd(h, 3, SCTIME_FROM_SECS(90));
 
     XBit *fb = IPPairBitGet(h,1);
-    if (fb != NULL)
-        ret = 1;
+    FAIL_IF_NULL(fb);
 
     IPPairFree(h);
-end:
-    IPPairCleanup();
-    return ret;
+    IPPairShutdown();
+    StorageCleanup();
+    PASS;
 }
 
 static int IPPairBitTest06 (void)
 {
-    int ret = 0;
-
+    StorageCleanup();
+    StorageInit();
+    IPPairBitInitCtx();
+    StorageFinalize();
     IPPairInitConfig(true);
     IPPair *h = IPPairAlloc();
-    if (h == NULL)
-        goto end;
+    FAIL_IF_NULL(h);
 
-    IPPairBitAdd(h, 0,90);
-    IPPairBitAdd(h, 1,90);
-    IPPairBitAdd(h, 2,90);
-    IPPairBitAdd(h, 3,90);
+    IPPairBitAdd(h, 0, SCTIME_FROM_SECS(90));
+    IPPairBitAdd(h, 1, SCTIME_FROM_SECS(90));
+    IPPairBitAdd(h, 2, SCTIME_FROM_SECS(90));
+    IPPairBitAdd(h, 3, SCTIME_FROM_SECS(90));
 
     XBit *fb = IPPairBitGet(h,2);
-    if (fb != NULL)
-        ret = 1;
+    FAIL_IF_NULL(fb);
 
     IPPairFree(h);
-end:
-    IPPairCleanup();
-    return ret;
+    IPPairShutdown();
+    StorageCleanup();
+    PASS;
 }
 
 static int IPPairBitTest07 (void)
 {
-    int ret = 0;
-
+    StorageCleanup();
+    StorageInit();
+    IPPairBitInitCtx();
+    StorageFinalize();
     IPPairInitConfig(true);
     IPPair *h = IPPairAlloc();
-    if (h == NULL)
-        goto end;
+    FAIL_IF_NULL(h);
 
-    IPPairBitAdd(h, 0,90);
-    IPPairBitAdd(h, 1,90);
-    IPPairBitAdd(h, 2,90);
-    IPPairBitAdd(h, 3,90);
+    IPPairBitAdd(h, 0, SCTIME_FROM_SECS(90));
+    IPPairBitAdd(h, 1, SCTIME_FROM_SECS(90));
+    IPPairBitAdd(h, 2, SCTIME_FROM_SECS(90));
+    IPPairBitAdd(h, 3, SCTIME_FROM_SECS(90));
 
     XBit *fb = IPPairBitGet(h,3);
-    if (fb != NULL)
-        ret = 1;
+    FAIL_IF_NULL(fb);
 
     IPPairFree(h);
-end:
-    IPPairCleanup();
-    return ret;
+    IPPairShutdown();
+    StorageCleanup();
+    PASS;
 }
 
 static int IPPairBitTest08 (void)
 {
-    int ret = 0;
-
+    StorageCleanup();
+    StorageInit();
+    IPPairBitInitCtx();
+    StorageFinalize();
     IPPairInitConfig(true);
     IPPair *h = IPPairAlloc();
-    if (h == NULL)
-        goto end;
+    FAIL_IF_NULL(h);
 
-    IPPairBitAdd(h, 0,90);
-    IPPairBitAdd(h, 1,90);
-    IPPairBitAdd(h, 2,90);
-    IPPairBitAdd(h, 3,90);
+    IPPairBitAdd(h, 0, SCTIME_FROM_SECS(90));
+    IPPairBitAdd(h, 1, SCTIME_FROM_SECS(90));
+    IPPairBitAdd(h, 2, SCTIME_FROM_SECS(90));
+    IPPairBitAdd(h, 3, SCTIME_FROM_SECS(90));
 
     XBit *fb = IPPairBitGet(h,0);
-    if (fb == NULL)
-        goto end;
+    FAIL_IF_NULL(fb);
 
     IPPairBitRemove(h,0);
 
     fb = IPPairBitGet(h,0);
-    if (fb != NULL) {
-        printf("fb != NULL even though it was removed: ");
-        goto end;
-    }
+    FAIL_IF_NOT_NULL(fb);
 
-    ret = 1;
     IPPairFree(h);
-end:
-    IPPairCleanup();
-    return ret;
+    IPPairShutdown();
+    StorageCleanup();
+    PASS;
 }
 
 static int IPPairBitTest09 (void)
 {
-    int ret = 0;
-
+    StorageCleanup();
+    StorageInit();
+    IPPairBitInitCtx();
+    StorageFinalize();
     IPPairInitConfig(true);
     IPPair *h = IPPairAlloc();
-    if (h == NULL)
-        goto end;
+    FAIL_IF_NULL(h);
 
-    IPPairBitAdd(h, 0,90);
-    IPPairBitAdd(h, 1,90);
-    IPPairBitAdd(h, 2,90);
-    IPPairBitAdd(h, 3,90);
+    IPPairBitAdd(h, 0, SCTIME_FROM_SECS(90));
+    IPPairBitAdd(h, 1, SCTIME_FROM_SECS(90));
+    IPPairBitAdd(h, 2, SCTIME_FROM_SECS(90));
+    IPPairBitAdd(h, 3, SCTIME_FROM_SECS(90));
 
     XBit *fb = IPPairBitGet(h,1);
-    if (fb == NULL)
-        goto end;
+    FAIL_IF_NULL(fb);
 
     IPPairBitRemove(h,1);
 
     fb = IPPairBitGet(h,1);
-    if (fb != NULL) {
-        printf("fb != NULL even though it was removed: ");
-        goto end;
-    }
+    FAIL_IF_NOT_NULL(fb);
 
-    ret = 1;
     IPPairFree(h);
-end:
-    IPPairCleanup();
-    return ret;
+    IPPairShutdown();
+    StorageCleanup();
+    PASS;
 }
 
 static int IPPairBitTest10 (void)
 {
-    int ret = 0;
-
+    StorageCleanup();
+    StorageInit();
+    IPPairBitInitCtx();
+    StorageFinalize();
     IPPairInitConfig(true);
     IPPair *h = IPPairAlloc();
-    if (h == NULL)
-        goto end;
+    FAIL_IF_NULL(h);
 
-    IPPairBitAdd(h, 0,90);
-    IPPairBitAdd(h, 1,90);
-    IPPairBitAdd(h, 2,90);
-    IPPairBitAdd(h, 3,90);
+    IPPairBitAdd(h, 0, SCTIME_FROM_SECS(90));
+    IPPairBitAdd(h, 1, SCTIME_FROM_SECS(90));
+    IPPairBitAdd(h, 2, SCTIME_FROM_SECS(90));
+    IPPairBitAdd(h, 3, SCTIME_FROM_SECS(90));
 
     XBit *fb = IPPairBitGet(h,2);
-    if (fb == NULL)
-        goto end;
+    FAIL_IF_NULL(fb);
 
     IPPairBitRemove(h,2);
 
     fb = IPPairBitGet(h,2);
-    if (fb != NULL) {
-        printf("fb != NULL even though it was removed: ");
-        goto end;
-    }
+    FAIL_IF_NOT_NULL(fb);
 
-    ret = 1;
     IPPairFree(h);
-end:
-    IPPairCleanup();
-    return ret;
+    IPPairShutdown();
+    StorageCleanup();
+    PASS;
 }
 
 static int IPPairBitTest11 (void)
 {
-    int ret = 0;
-
+    StorageCleanup();
+    StorageInit();
+    IPPairBitInitCtx();
+    StorageFinalize();
     IPPairInitConfig(true);
     IPPair *h = IPPairAlloc();
-    if (h == NULL)
-        goto end;
+    FAIL_IF_NULL(h);
 
-    IPPairBitAdd(h, 0,90);
-    IPPairBitAdd(h, 1,90);
-    IPPairBitAdd(h, 2,90);
-    IPPairBitAdd(h, 3,90);
+    IPPairBitAdd(h, 0, SCTIME_FROM_SECS(90));
+    IPPairBitAdd(h, 1, SCTIME_FROM_SECS(90));
+    IPPairBitAdd(h, 2, SCTIME_FROM_SECS(90));
+    IPPairBitAdd(h, 3, SCTIME_FROM_SECS(90));
 
     XBit *fb = IPPairBitGet(h,3);
-    if (fb == NULL)
-        goto end;
+    FAIL_IF_NULL(fb);
 
     IPPairBitRemove(h,3);
 
     fb = IPPairBitGet(h,3);
-    if (fb != NULL) {
-        printf("fb != NULL even though it was removed: ");
-        goto end;
-    }
+    FAIL_IF_NOT_NULL(fb);
 
-    ret = 1;
     IPPairFree(h);
-end:
-    IPPairCleanup();
-    return ret;
+    IPPairShutdown();
+    StorageCleanup();
+    PASS;
 }
 
 #endif /* UNITTESTS */

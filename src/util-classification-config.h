@@ -21,8 +21,8 @@
  * \author Anoop Saldanha <anoopsaldanha@gmail.com>
  */
 
-#ifndef __UTIL_CLASSIFICATION_CONFIG_H__
-#define __UTIL_CLASSIFICATION_CONFIG_H__
+#ifndef SURICATA_UTIL_CLASSIFICATION_CONFIG_H
+#define SURICATA_UTIL_CLASSIFICATION_CONFIG_H
 
 #define CLASSTYPE_NAME_MAX_LEN 64
 #define CLASSTYPE_DESC_MAX_LEN 512
@@ -51,7 +51,7 @@ SCClassConfClasstype *SCClassConfGetClasstype(const char *,
                                               DetectEngineCtx *);
 void SCClassConfDeInitContext(DetectEngineCtx *);
 
-void SCClassConfInit(DetectEngineCtx *de_ctx);
+void SCClassSCConfInit(DetectEngineCtx *de_ctx);
 void SCClassConfDeinit(DetectEngineCtx *de_ctx);
 
 /* for unittests */
@@ -62,4 +62,4 @@ FILE *SCClassConfGenerateInvalidDummyClassConfigFD02(void);
 FILE *SCClassConfGenerateInvalidDummyClassConfigFD03(void);
 #endif
 
-#endif /* __UTIL_CLASSIFICATION_CONFIG_H__ */
+#endif /* SURICATA_UTIL_CLASSIFICATION_CONFIG_H */

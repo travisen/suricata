@@ -6,10 +6,12 @@ includedir="@includedir@"
 libdir="@libdir@"
 LIBS="@LIBS@ @RUST_LDADD@"
 
+# Shared library to link to (the default).
 shared_lib="-lsuricata"
-static_lib="-lsuricata_c -lsuricata_rust"
 
-enable_non_bundled_htp="@enable_non_bundled_htp@"
+# Static libraries to link to. We duplicate these as there are
+# circular references and --start-group is not portable.
+static_lib="-lsuricata_c -lsuricata_rust -lsuricata_c -lsuricata_rust"
 
 lib="$shared_lib"
 
@@ -33,7 +35,7 @@ do
             ;;
         --static)
             lib="$static_lib"
-            use_status="yes"
+            use_static="yes"
             ;;
     esac
     shift
@@ -45,12 +47,6 @@ if [ "$use_static" = "no" ]; then
     if ! test -e "$libdir/libsuricata.so"; then
         lib="$static_lib"
     fi
-fi
-
-# If we're using a bundled htp, add it to the libs as well. It will
-# already be present if we're use a non-bundled libhtp.
-if [ "$enable_non_bundled_htp" = "no" ]; then
-    lib="${lib} -lhtp"
 fi
 
 output=""

@@ -21,8 +21,8 @@
  * \author Eileen Donlon <emdonlo@gmail.com>
  */
 
-#ifndef __DETECT_ENGINE_ANALYZER_H__
-#define __DETECT_ENGINE_ANALYZER_H__
+#ifndef SURICATA_DETECT_ENGINE_ANALYZER_H
+#define SURICATA_DETECT_ENGINE_ANALYZER_H
 
 #include <stdint.h>
 
@@ -31,12 +31,14 @@ struct DetectEngineCtx_;
 void SetupEngineAnalysis(struct DetectEngineCtx_ *de_ctx, bool *, bool *);
 void CleanupEngineAnalysis(struct DetectEngineCtx_ *de_ctx);
 
-void EngineAnalysisFP(const struct DetectEngineCtx_ *de_ctx, const Signature *s, char *line);
+void EngineAnalysisFP(const struct DetectEngineCtx_ *de_ctx, const Signature *s, const char *line);
 void EngineAnalysisRules(
         const struct DetectEngineCtx_ *de_ctx, const Signature *s, const char *line);
 void EngineAnalysisRulesFailure(
-        const struct DetectEngineCtx_ *de_ctx, char *line, char *file, int lineno);
+        const struct DetectEngineCtx_ *de_ctx, const char *line, const char *file, int lineno);
 
 void EngineAnalysisRules2(const struct DetectEngineCtx_ *de_ctx, const Signature *s);
 
-#endif /* __DETECT_ENGINE_ANALYZER_H__ */
+int FirewallAnalyzer(const struct DetectEngineCtx_ *de_ctx);
+
+#endif /* SURICATA_DETECT_ENGINE_ANALYZER_H */

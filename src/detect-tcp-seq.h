@@ -21,19 +21,12 @@
  * \author Brian Rectanus <brectanu@gmail.com>
  */
 
-#ifndef __DETECT_SEQ_H__
-#define __DETECT_SEQ_H__
-
-/**
- * \brief seq data
- */
-typedef struct DetectSeqData_ {
-    uint32_t seq;                    /**< seq to match */
-} DetectSeqData;
+#ifndef SURICATA_DETECT_SEQ_H
+#define SURICATA_DETECT_SEQ_H
 
 /**
  * \brief Registration function for ack: keyword
  */
 void DetectSeqRegister(void);
 
-#endif /* __DETECT_SEQ_H__ */
+#endif /* SURICATA_DETECT_SEQ_H */

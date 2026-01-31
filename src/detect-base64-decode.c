@@ -1,4 +1,4 @@
-/* Copyright (C) 2020-2022 Open Information Security Foundation
+/* Copyright (C) 2020-2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -19,16 +19,16 @@
 #include "detect.h"
 #include "detect-parse.h"
 #include "detect-base64-decode.h"
-#include "util-base64.h"
 #include "util-byte.h"
 #include "util-print.h"
 #include "detect-engine-build.h"
+#include "rust.h"
 
 /* Arbitrary maximum buffer size for decoded base64 data. */
 #define BASE64_DECODE_MAX 65535
 
 typedef struct DetectBase64Decode_ {
-    uint32_t bytes;
+    uint16_t bytes;
     uint32_t offset;
     uint8_t relative;
 } DetectBase64Decode;
@@ -67,7 +67,6 @@ int DetectBase64DecodeDoMatch(DetectEngineThreadCtx *det_ctx, const Signature *s
     const SigMatchData *smd, const uint8_t *payload, uint32_t payload_len)
 {
     DetectBase64Decode *data = (DetectBase64Decode *)smd->ctx;
-    int decode_len;
 
 #if 0
     printf("Input data:\n");
@@ -76,6 +75,7 @@ int DetectBase64DecodeDoMatch(DetectEngineThreadCtx *det_ctx, const Signature *s
 
     if (data->relative) {
         payload += det_ctx->buffer_offset;
+        DEBUG_VALIDATE_BUG_ON(det_ctx->buffer_offset > payload_len);
         payload_len -= det_ctx->buffer_offset;
     }
 
@@ -87,19 +87,18 @@ int DetectBase64DecodeDoMatch(DetectEngineThreadCtx *det_ctx, const Signature *s
         payload_len -= data->offset;
     }
 
-    decode_len = MIN(payload_len, data->bytes);
-
+    uint32_t decode_len = MIN(payload_len, data->bytes);
 #if 0
     printf("Decoding:\n");
     PrintRawDataFp(stdout, payload, decode_len);
 #endif
 
-    uint32_t consumed = 0, num_decoded = 0;
-    (void)DecodeBase64(det_ctx->base64_decoded, det_ctx->base64_decoded_len_max, payload,
-            decode_len, &consumed, &num_decoded, BASE64_MODE_RFC4648);
-    det_ctx->base64_decoded_len = num_decoded;
-    SCLogDebug("Decoded %d bytes from base64 data.",
-        det_ctx->base64_decoded_len);
+    if (decode_len > 0) {
+        uint32_t num_decoded =
+                SCBase64Decode(payload, decode_len, SCBase64ModeRFC4648, det_ctx->base64_decoded);
+        det_ctx->base64_decoded_len = num_decoded;
+        SCLogDebug("Decoded %d bytes from base64 data.", det_ctx->base64_decoded_len);
+    }
 #if 0
     if (det_ctx->base64_decoded_len) {
         printf("Decoded data:\n");
@@ -111,8 +110,8 @@ int DetectBase64DecodeDoMatch(DetectEngineThreadCtx *det_ctx, const Signature *s
     return det_ctx->base64_decoded_len > 0;
 }
 
-static int DetectBase64DecodeParse(const char *str, uint32_t *bytes,
-    uint32_t *offset, uint8_t *relative)
+static int DetectBase64DecodeParse(
+        const char *str, uint16_t *bytes, uint32_t *offset, uint8_t *relative)
 {
     const char *bytes_str = NULL;
     const char *offset_str = NULL;
@@ -132,7 +131,7 @@ static int DetectBase64DecodeParse(const char *str, uint32_t *bytes,
 
     if (pcre_rc >= 3) {
         if (pcre2_substring_get_bynumber(match, 2, (PCRE2_UCHAR8 **)&bytes_str, &pcre2_len) == 0) {
-            if (StringParseUint32(bytes, 10, 0, bytes_str) <= 0) {
+            if (StringParseUint16(bytes, 10, 0, bytes_str) <= 0) {
                 SCLogError("Bad value for bytes: \"%s\"", bytes_str);
                 goto error;
             }
@@ -186,7 +185,7 @@ error:
 static int DetectBase64DecodeSetup(DetectEngineCtx *de_ctx, Signature *s,
     const char *str)
 {
-    uint32_t bytes = 0;
+    uint16_t bytes = 0;
     uint32_t offset = 0;
     uint8_t relative = 0;
     DetectBase64Decode *data = NULL;
@@ -225,7 +224,7 @@ static int DetectBase64DecodeSetup(DetectEngineCtx *de_ctx, Signature *s,
         }
     }
 
-    if (SigMatchAppendSMToList(de_ctx, s, DETECT_BASE64_DECODE, (SigMatchCtx *)data, sm_list) ==
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_BASE64_DECODE, (SigMatchCtx *)data, sm_list) ==
             NULL) {
         goto error;
     }
@@ -234,9 +233,6 @@ static int DetectBase64DecodeSetup(DetectEngineCtx *de_ctx, Signature *s,
         data->bytes = BASE64_DECODE_MAX;
     }
     if (data->bytes > de_ctx->base64_decode_max_len) {
-#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
-        data->bytes = BASE64_DECODE_MAX;
-#endif
         de_ctx->base64_decode_max_len = data->bytes;
     }
 
@@ -268,7 +264,7 @@ static int g_http_header_buffer_id = 0;
 static int DetectBase64TestDecodeParse(void)
 {
     int retval = 0;
-    uint32_t bytes = 0;
+    uint16_t bytes = 0;
     uint32_t offset = 0;
     uint8_t relative = 0;
 
@@ -377,6 +373,7 @@ static int DetectBase64DecodeTestDecode(void)
     };
 
     memset(&tv, 0, sizeof(tv));
+    StatsThreadInit(&tv.stats);
 
     if ((de_ctx = DetectEngineCtxInit()) == NULL) {
         goto end;
@@ -408,13 +405,12 @@ end:
         DetectEngineThreadCtxDeinit(&tv, det_ctx);
     }
     if (de_ctx != NULL) {
-        SigCleanSignatures(de_ctx);
-        SigGroupCleanup(de_ctx);
         DetectEngineCtxFree(de_ctx);
     }
     if (p != NULL) {
         UTHFreePacket(p);
     }
+    StatsThreadCleanup(&tv.stats);
     return retval;
 }
 
@@ -434,6 +430,7 @@ static int DetectBase64DecodeTestDecodeWithOffset(void)
     char decoded[] = "Hello World";
 
     memset(&tv, 0, sizeof(tv));
+    StatsThreadInit(&tv.stats);
 
     if ((de_ctx = DetectEngineCtxInit()) == NULL) {
         goto end;
@@ -475,6 +472,7 @@ end:
     if (p != NULL) {
         UTHFreePacket(p);
     }
+    StatsThreadCleanup(&tv.stats);
     return retval;
 }
 
@@ -492,6 +490,7 @@ static int DetectBase64DecodeTestDecodeLargeOffset(void)
     };
 
     memset(&tv, 0, sizeof(tv));
+    StatsThreadInit(&tv.stats);
 
     if ((de_ctx = DetectEngineCtxInit()) == NULL) {
         goto end;
@@ -524,13 +523,12 @@ end:
         DetectEngineThreadCtxDeinit(&tv, det_ctx);
     }
     if (de_ctx != NULL) {
-        SigCleanSignatures(de_ctx);
-        SigGroupCleanup(de_ctx);
         DetectEngineCtxFree(de_ctx);
     }
     if (p != NULL) {
         UTHFreePacket(p);
     }
+    StatsThreadCleanup(&tv.stats);
     return retval;
 }
 
@@ -550,6 +548,7 @@ static int DetectBase64DecodeTestDecodeRelative(void)
     char decoded[] = "Hello World";
 
     memset(&tv, 0, sizeof(tv));
+    StatsThreadInit(&tv.stats);
 
     if ((de_ctx = DetectEngineCtxInit()) == NULL) {
         goto end;
@@ -585,13 +584,12 @@ end:
         DetectEngineThreadCtxDeinit(&tv, det_ctx);
     }
     if (de_ctx != NULL) {
-        SigCleanSignatures(de_ctx);
-        SigGroupCleanup(de_ctx);
         DetectEngineCtxFree(de_ctx);
     }
     if (p != NULL) {
         UTHFreePacket(p);
     }
+    StatsThreadCleanup(&tv.stats);
     return retval;
 }
 

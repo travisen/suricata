@@ -20,11 +20,9 @@
 #include "app-layer-dnp3.h"
 #include "app-layer-dnp3-objects.h"
 
-#ifdef HAVE_LUA
-
-#include <lua.h>
-#include <lualib.h>
-#include <lauxlib.h>
+#include "lua.h"
+#include "lualib.h"
+#include "lauxlib.h"
 
 #include "util-lua.h"
 #include "util-lua-common.h"
@@ -39,6 +37,13 @@
         lua_pushinteger(luastate, v);           \
         lua_settable(luastate, -3);             \
     } while (0);
+
+static void SCLuaPushTableBoolean(lua_State *L, const char *key, bool val)
+{
+    lua_pushstring(L, key);
+    lua_pushboolean(L, val);
+    lua_settable(L, -3);
+}
 
 static void DNP3PushPoints(lua_State *luastate, DNP3Object *object)
 {
@@ -167,22 +172,19 @@ static int DNP3GetTx(lua_State *luastate)
     lua_pushinteger(luastate, tx->tx_num);
     lua_settable(luastate, -3);
 
-    LUA_PUSHT_INT(luastate, "has_request", tx->is_request ? 1 : 0);
+    SCLuaPushTableBoolean(luastate, "is_request", tx->is_request);
     if (tx->is_request) {
         lua_pushliteral(luastate, "request");
         lua_newtable(luastate);
-        LUA_PUSHT_INT(luastate, "done", tx->done);
-        LUA_PUSHT_INT(luastate, "complete", tx->complete);
+        SCLuaPushTableBoolean(luastate, "done", tx->done);
+        SCLuaPushTableBoolean(luastate, "complete", tx->complete);
         DNP3PushRequest(luastate, tx);
         lua_settable(luastate, -3);
-    }
-
-    LUA_PUSHT_INT(luastate, "has_response", tx->is_request ? 0 : 1);
-    if (!tx->is_request) {
+    } else {
         lua_pushliteral(luastate, "response");
         lua_newtable(luastate);
-        LUA_PUSHT_INT(luastate, "done", tx->done);
-        LUA_PUSHT_INT(luastate, "complete", tx->complete);
+        SCLuaPushTableBoolean(luastate, "done", tx->done);
+        SCLuaPushTableBoolean(luastate, "complete", tx->complete);
         DNP3PushResponse(luastate, tx);
         lua_settable(luastate, -3);
     }
@@ -190,12 +192,15 @@ static int DNP3GetTx(lua_State *luastate)
     return 1;
 }
 
-int LuaRegisterDNP3Functions(lua_State *luastate)
+static const struct luaL_Reg dnp3lib[] = {
+    // clang-format off
+    { "get_tx", DNP3GetTx, },
+    { NULL, NULL, }
+    // clang-format on
+};
+
+int SCLuaLoadDnp3Lib(lua_State *L)
 {
-    lua_pushcfunction(luastate, DNP3GetTx);
-    lua_setglobal(luastate, "DNP3GetTx");
-
-    return 0;
+    luaL_newlib(L, dnp3lib);
+    return 1;
 }
-
-#endif /* HAVE_LUA */

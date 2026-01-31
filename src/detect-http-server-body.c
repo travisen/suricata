@@ -38,6 +38,7 @@
 #include "detect.h"
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-content-inspection.h"
 #include "detect-content.h"
 
@@ -68,16 +69,17 @@ static int g_buffer_id = 0;
 void DetectHttpServerBodyRegister(void)
 {
     /* http_server_body content modifier */
-    sigmatch_table[DETECT_AL_HTTP_SERVER_BODY].name = "http_server_body";
-    sigmatch_table[DETECT_AL_HTTP_SERVER_BODY].desc = "content modifier to match on the HTTP response-body";
-    sigmatch_table[DETECT_AL_HTTP_SERVER_BODY].url = "/rules/http-keywords.html#http-server-body";
-    sigmatch_table[DETECT_AL_HTTP_SERVER_BODY].Setup = DetectHttpServerBodySetup;
+    sigmatch_table[DETECT_HTTP_SERVER_BODY].name = "http_server_body";
+    sigmatch_table[DETECT_HTTP_SERVER_BODY].desc =
+            "content modifier to match on the HTTP response-body";
+    sigmatch_table[DETECT_HTTP_SERVER_BODY].url = "/rules/http-keywords.html#http-server-body";
+    sigmatch_table[DETECT_HTTP_SERVER_BODY].Setup = DetectHttpServerBodySetup;
 #ifdef UNITTESTS
-    sigmatch_table[DETECT_AL_HTTP_SERVER_BODY].RegisterTests = DetectHttpServerBodyRegisterTests;
+    sigmatch_table[DETECT_HTTP_SERVER_BODY].RegisterTests = DetectHttpServerBodyRegisterTests;
 #endif
-    sigmatch_table[DETECT_AL_HTTP_SERVER_BODY].flags |= SIGMATCH_NOOPT;
-    sigmatch_table[DETECT_AL_HTTP_SERVER_BODY].flags |= SIGMATCH_INFO_CONTENT_MODIFIER;
-    sigmatch_table[DETECT_AL_HTTP_SERVER_BODY].alternative = DETECT_HTTP_RESPONSE_BODY;
+    sigmatch_table[DETECT_HTTP_SERVER_BODY].flags |= SIGMATCH_NOOPT;
+    sigmatch_table[DETECT_HTTP_SERVER_BODY].flags |= SIGMATCH_INFO_CONTENT_MODIFIER;
+    sigmatch_table[DETECT_HTTP_SERVER_BODY].alternative = DETECT_HTTP_RESPONSE_BODY;
 
     /* http.request_body sticky buffer */
     sigmatch_table[DETECT_HTTP_RESPONSE_BODY].name = "http.response_body";
@@ -106,7 +108,7 @@ void DetectHttpServerBodyRegister(void)
 int DetectHttpServerBodySetup(DetectEngineCtx *de_ctx, Signature *s, const char *arg)
 {
     return DetectEngineContentModifierBufferSetup(
-            de_ctx, s, arg, DETECT_AL_HTTP_SERVER_BODY, g_buffer_id, ALPROTO_HTTP1);
+            de_ctx, s, arg, DETECT_HTTP_SERVER_BODY, g_buffer_id, ALPROTO_HTTP1);
 }
 
 /**
@@ -120,10 +122,13 @@ int DetectHttpServerBodySetup(DetectEngineCtx *de_ctx, Signature *s, const char 
  */
 static int DetectHttpServerBodySetupSticky(DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
-    if (DetectBufferSetActiveList(de_ctx, s, g_buffer_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_buffer_id) < 0)
         return -1;
-    if (DetectSignatureSetAppProto(s, ALPROTO_HTTP) < 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_HTTP) < 0)
         return -1;
+    // file data is on both directions, but we only take the one to client here
+    s->flags |= SIG_FLAG_TOCLIENT;
+    s->flags &= ~SIG_FLAG_TOSERVER;
     return 0;
 }
 

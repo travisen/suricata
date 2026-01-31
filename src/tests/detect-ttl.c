@@ -166,13 +166,14 @@ static int DetectTtlTestSig1(void)
     IPV4Hdr ip4h;
 
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
     memset(&ip4h, 0, sizeof(ip4h));
 
     p->src.family = AF_INET;
     p->dst.family = AF_INET;
     p->proto = IPPROTO_TCP;
     ip4h.ip_ttl = 15;
-    p->ip4h = &ip4h;
+    UTHSetIPV4Hdr(p, &ip4h);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     FAIL_IF_NULL(de_ctx);
@@ -199,10 +200,10 @@ static int DetectTtlTestSig1(void)
     FAIL_IF_NOT(PacketAlertCheck(p, 3));
     FAIL_IF_NOT(PacketAlertCheck(p, 4));
 
+    PacketFree(p);
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
-
-    SCFree(p);
+    StatsThreadCleanup(&th_v.stats);
     PASS;
 }
 

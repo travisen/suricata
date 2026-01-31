@@ -20,12 +20,12 @@
  *  \author Eric Leblond <eric@regit.org>
  */
 
-#ifndef __UTIL_RUNMODES_H__
-#define __UTIL_RUNMODES_H__
+#ifndef SURICATA_UTIL_RUNMODES_H
+#define SURICATA_UTIL_RUNMODES_H
 
 typedef void *(*ConfigIfaceParserFunc) (const char *);
 typedef void *(*ConfigIPSParserFunc) (int);
-typedef int (*ConfigIfaceThreadsCountFunc) (void *);
+typedef uint16_t (*ConfigIfaceThreadsCountFunc)(void *);
 
 int RunModeSetLiveCaptureAuto(ConfigIfaceParserFunc configparser,
                               ConfigIfaceThreadsCountFunc ModThreadsCount,
@@ -59,4 +59,4 @@ int RunModeSetIPSWorker(ConfigIPSParserFunc ConfigParser,
 
 char *RunmodeAutoFpCreatePickupQueuesString(int n);
 
-#endif /* __UTIL_RUNMODES_H__ */
+#endif /* SURICATA_UTIL_RUNMODES_H */

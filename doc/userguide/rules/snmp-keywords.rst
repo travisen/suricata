@@ -6,6 +6,8 @@ snmp.version
 
 SNMP protocol version (integer). Expected values are 1, 2 (for version 2c) or 3.
 
+snmp.version uses an, :ref:` unsigned 32-bits integer <rules-integer-keywords>`.
+
 Syntax::
 
  snmp.version:[op]<number>
@@ -69,17 +71,19 @@ snmp.pdu_type
 
 SNMP PDU type (integer).
 
-Common values are:
+snmp.pdu_type uses an, :ref:` unsigned 32-bits integer <rules-integer-keywords>`.
 
- - 0: GetRequest
- - 1: GetNextRequest
- - 2: Response
- - 3: SetRequest
- - 4: TrapV1 (obsolete, was the old Trap-PDU in SNMPv1)
- - 5: GetBulkRequest
- - 6: InformRequest
- - 7: TrapV2
- - 8: Report
+You can specify the value as an integer or a string:
+
+ - 0: get_request
+ - 1: get_next_request
+ - 2: response
+ - 3: set_request
+ - 4: trap_v1 (obsolete, was the old Trap-PDU in SNMPv1)
+ - 5: get_bulk_request
+ - 6: inform_request
+ - 7: trap_v2
+ - 8: report
 
 This keyword will not match if the value is not accessible within (for ex, an encrypted
 SNMP v3 message).
@@ -87,7 +91,7 @@ SNMP v3 message).
 
 Syntax::
 
- snmp.pdu_type:<number>
+ snmp.pdu_type:(mode) <number or string>
 
 Signature example::
 

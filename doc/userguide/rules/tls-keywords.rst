@@ -1,3 +1,5 @@
+.. _TLS Rule Keywords:
+
 SSL/TLS Keywords
 ================
 
@@ -121,6 +123,21 @@ Examples::
 to use the previous name, but it's recommended that rules be converted to use
 the new name.
 
+tls.subjectaltname
+------------------
+
+Match TLS/SSL Subject Alternative Name field.
+
+Examples::
+
+  tls.subjectaltname; content:"|73 75 72 69 63 61 74 61 2e 69 6f|";
+
+``tls.subjectaltname`` is a 'sticky buffer'.
+
+``tls.subjectaltname`` can be used as ``fast_pattern``.
+
+``tls.subjectaltname`` supports multiple buffer matching, see :doc:`multi-buffer-matching`.
+
 tls_cert_notbefore
 ------------------
 
@@ -214,6 +231,10 @@ Example::
   alert tls any any -> any any (msg:"match SSLv2 and SSLv3"; \
     ssl_version:sslv2,sslv3; sid:200031;)
 
+The list can be prefixed with ``!`` to match if version is different than
+all the versions listed in the signature. Such a negation does not match
+on a yet undetermined version.
+
 tls.fingerprint
 ---------------
 
@@ -246,7 +267,7 @@ You can specify several states with ``|`` (OR) to check for any of the specified
 tls.random
 ----------
 
-Matches on the 32 bytes of the TLS random field.
+Matches on the 32 bytes of the TLS random field from the client hello or server hello records.
 
 Example::
 
@@ -258,7 +279,7 @@ Example::
 tls.random_time
 ---------------
 
-Matches on the first 4 bytes of the TLS random field.
+Matches on the first 4 bytes of the TLS random field from the client hello or server hello records.
 
 Example::
 
@@ -270,7 +291,7 @@ Example::
 tls.random_bytes
 ----------------
 
-Matches on the last 28 bytes of the TLS random field.
+Matches on the last 28 bytes of the TLS random field from the client hello or server hello records.
 
 Example::
 
@@ -304,3 +325,16 @@ Example::
 
   alert tls any any -> any any (msg:"cert chain not value"; \
  tls.cert_chain_len:!2; classtype:misc-activity; sid:4; rev:1;)
+
+tls.alpn
+--------
+
+Matches on the ALPN buffers.
+
+Example::
+
+  alert tls any any -> any any (msg:"TLS ALPN test"; \
+    tls.alpn; content:"http/1.1"; sid:1;)
+
+``tls.alpn`` is a sticky buffer.
+

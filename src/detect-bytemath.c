@@ -29,17 +29,17 @@
 #include "threads.h"
 #include "decode.h"
 
+#include "rust.h"
 #include "app-layer-parser.h"
 #include "app-layer-protos.h"
 
 #include "detect.h"
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-state.h"
 #include "detect-engine-build.h"
-
-#include "rust-bindings.h"
 
 #include "detect-content.h"
 #include "detect-pcre.h"
@@ -58,12 +58,13 @@
 
 static int DetectByteMathSetup(DetectEngineCtx *, Signature *, const char *);
 #ifdef UNITTESTS
+#define DETECT_BYTEMATH_ENDIAN_DEFAULT (uint8_t) BigEndian
+#define DETECT_BYTEMATH_BASE_DEFAULT   (uint8_t) BaseDec
+
 static void DetectByteMathRegisterTests(void);
 #endif
 static void DetectByteMathFree(DetectEngineCtx *, void *);
 
-#define DETECT_BYTEMATH_ENDIAN_DEFAULT (uint8_t) BigEndian
-#define DETECT_BYTEMATH_BASE_DEFAULT   (uint8_t) BaseDec
 /**
  * \brief Registers the keyword handlers for the "byte_math" keyword.
  */
@@ -73,6 +74,8 @@ void DetectBytemathRegister(void)
     sigmatch_table[DETECT_BYTEMATH].Match = NULL;
     sigmatch_table[DETECT_BYTEMATH].Setup = DetectByteMathSetup;
     sigmatch_table[DETECT_BYTEMATH].Free = DetectByteMathFree;
+    sigmatch_table[DETECT_BYTEMATH].desc = "used to perform mathematical operations on byte values";
+    sigmatch_table[DETECT_BYTEMATH].url = "/rules/payload-keywords.html#byte-math";
 #ifdef UNITTESTS
     sigmatch_table[DETECT_BYTEMATH].RegisterTests = DetectByteMathRegisterTests;
 #endif
@@ -146,7 +149,7 @@ int DetectByteMathDoMatch(DetectEngineThreadCtx *det_ctx, const DetectByteMathDa
             }
         }
     } else {
-        ByteMathEndian bme = endian;
+        ByteEndian bme = endian;
         int endianness = (bme == BigEndian) ? BYTE_BIG_ENDIAN : BYTE_LITTLE_ENDIAN;
         extbytes = ByteExtractUint64(&val, endianness, nbytes, ptr);
         if (extbytes != nbytes) {
@@ -155,7 +158,7 @@ int DetectByteMathDoMatch(DetectEngineThreadCtx *det_ctx, const DetectByteMathDa
         }
     }
 
-    BUG_ON(extbytes > len);
+    DEBUG_VALIDATE_BUG_ON(extbytes > len);
 
     ptr += extbytes;
 
@@ -190,7 +193,7 @@ int DetectByteMathDoMatch(DetectEngineThreadCtx *det_ctx, const DetectByteMathDa
             break;
     }
 
-    det_ctx->buffer_offset = ptr - payload;
+    det_ctx->buffer_offset = (uint32_t)(ptr - payload);
 
     if (data->flags & DETECT_BYTEMATH_FLAG_BITMASK) {
         val &= data->bitmask_val;
@@ -218,7 +221,7 @@ static DetectByteMathData *DetectByteMathParse(
         DetectEngineCtx *de_ctx, const char *arg, char **nbytes, char **rvalue)
 {
     DetectByteMathData *bmd;
-    if ((bmd = ScByteMathParse(arg)) == NULL) {
+    if ((bmd = SCByteMathParse(arg)) == NULL) {
         SCLogError("invalid bytemath values");
         return NULL;
     }
@@ -323,7 +326,7 @@ static int DetectByteMathSetup(DetectEngineCtx *de_ctx, Signature *s, const char
             sm_list = DETECT_SM_LIST_PMATCH;
         }
 
-        if (DetectSignatureSetAppProto(s, ALPROTO_DCERPC) < 0)
+        if (SCDetectSignatureSetAppProto(s, ALPROTO_DCERPC) < 0)
             goto error;
 
     } else if (data->flags & DETECT_BYTEMATH_FLAG_RELATIVE) {
@@ -344,7 +347,7 @@ static int DetectByteMathSetup(DetectEngineCtx *de_ctx, Signature *s, const char
     }
 
     if (data->endian == EndianDCE) {
-        if (DetectSignatureSetAppProto(s, ALPROTO_DCERPC) != 0)
+        if (SCDetectSignatureSetAppProto(s, ALPROTO_DCERPC) != 0)
             goto error;
 
         if ((data->flags & DETECT_BYTEMATH_FLAG_STRING) || (data->base == BaseDec) ||
@@ -357,7 +360,7 @@ static int DetectByteMathSetup(DetectEngineCtx *de_ctx, Signature *s, const char
 
     if (nbytes != NULL) {
         DetectByteIndexType index;
-        if (!DetectByteRetrieveSMVar(nbytes, s, &index)) {
+        if (!DetectByteRetrieveSMVar(nbytes, s, sm_list, &index)) {
             SCLogError("unknown byte_ keyword var seen in byte_math - %s", nbytes);
             goto error;
         }
@@ -369,7 +372,7 @@ static int DetectByteMathSetup(DetectEngineCtx *de_ctx, Signature *s, const char
 
     if (rvalue != NULL) {
         DetectByteIndexType index;
-        if (!DetectByteRetrieveSMVar(rvalue, s, &index)) {
+        if (!DetectByteRetrieveSMVar(rvalue, s, sm_list, &index)) {
             SCLogError("unknown byte_ keyword var seen in byte_math - %s", rvalue);
             goto error;
         }
@@ -390,7 +393,8 @@ static int DetectByteMathSetup(DetectEngineCtx *de_ctx, Signature *s, const char
         de_ctx->byte_extract_max_local_id = data->local_id;
     }
 
-    if (SigMatchAppendSMToList(de_ctx, s, DETECT_BYTEMATH, (SigMatchCtx *)data, sm_list) == NULL) {
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_BYTEMATH, (SigMatchCtx *)data, sm_list) ==
+            NULL) {
         goto error;
     }
 
@@ -427,7 +431,7 @@ static int DetectByteMathSetup(DetectEngineCtx *de_ctx, Signature *s, const char
  */
 static void DetectByteMathFree(DetectEngineCtx *de_ctx, void *ptr)
 {
-    ScByteMathFree(ptr);
+    SCByteMathFree(ptr);
 }
 
 /**
@@ -438,7 +442,7 @@ static void DetectByteMathFree(DetectEngineCtx *de_ctx, void *ptr)
  *
  * \retval A pointer to the SigMatch if found, otherwise NULL.
  */
-SigMatch *DetectByteMathRetrieveSMVar(const char *arg, const Signature *s)
+SigMatch *DetectByteMathRetrieveSMVar(const char *arg, int sm_list, const Signature *s)
 {
     for (uint32_t x = 0; x < s->init_data->buffer_index; x++) {
         SigMatch *sm = s->init_data->buffers[x].head;
@@ -457,7 +461,8 @@ SigMatch *DetectByteMathRetrieveSMVar(const char *arg, const Signature *s)
     for (int list = 0; list < DETECT_SM_LIST_MAX; list++) {
         SigMatch *sm = s->init_data->smlists[list];
         while (sm != NULL) {
-            if (sm->type == DETECT_BYTEMATH) {
+            // Make sure that the linked buffers ore on the same list
+            if (sm->type == DETECT_BYTEMATH && (sm_list == -1 || sm_list == list)) {
                 const DetectByteMathData *bmd = (const DetectByteMathData *)sm->ctx;
                 if (strcmp(bmd->result, arg) == 0) {
                     SCLogDebug("Retrieved SM for \"%s\"", arg);
@@ -807,6 +812,7 @@ static int DetectByteMathPacket01(void)
     AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
 
     memset(&tv, 0, sizeof(ThreadVars));
+    StatsThreadInit(&tv.stats);
     memset(&f, 0, sizeof(Flow));
 
     p = UTHBuildPacketReal(buf, sizeof(buf), IPPROTO_UDP,
@@ -891,7 +897,7 @@ static int DetectByteMathPacket01(void)
 
     FLOW_DESTROY(&f);
     UTHFreePacket(p);
-
+    StatsThreadCleanup(&tv.stats);
     PASS;
 }
 
@@ -908,6 +914,7 @@ static int DetectByteMathPacket02(void)
     AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
 
     memset(&tv, 0, sizeof(ThreadVars));
+    StatsThreadInit(&tv.stats);
     memset(&f, 0, sizeof(Flow));
 
     p = UTHBuildPacketReal(buf, sizeof(buf), IPPROTO_UDP, "192.168.1.5", "192.168.1.1", 41424, 53);
@@ -993,6 +1000,7 @@ static int DetectByteMathPacket02(void)
     FLOW_DESTROY(&f);
     UTHFreePacket(p);
 
+    StatsThreadCleanup(&tv.stats);
     PASS;
 }
 

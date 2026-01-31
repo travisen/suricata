@@ -70,11 +70,16 @@ void DetectFlowRegister (void)
     sigmatch_table[DETECT_FLOW].Match = DetectFlowMatch;
     sigmatch_table[DETECT_FLOW].Setup = DetectFlowSetup;
     sigmatch_table[DETECT_FLOW].Free  = DetectFlowFree;
+    sigmatch_table[DETECT_FLOW].flags = SIGMATCH_SUPPORT_FIREWALL;
 #ifdef UNITTESTS
     sigmatch_table[DETECT_FLOW].RegisterTests = DetectFlowRegisterTests;
 #endif
     sigmatch_table[DETECT_FLOW].SupportsPrefilter = PrefilterFlowIsPrefilterable;
     sigmatch_table[DETECT_FLOW].SetupPrefilter = PrefilterSetupFlow;
+    /* all but pre_flow */
+    sigmatch_table[DETECT_FLOW].tables =
+            DETECT_TABLE_PACKET_PRE_STREAM_FLAG | DETECT_TABLE_PACKET_FILTER_FLAG |
+            DETECT_TABLE_PACKET_TD_FLAG | DETECT_TABLE_APP_FILTER_FLAG | DETECT_TABLE_APP_TD_FLAG;
 
     DetectSetupParseRegexes(PARSE_REGEX, &parse_regex);
 }
@@ -340,8 +345,8 @@ int DetectFlowSetupImplicit(Signature *s, uint32_t flags)
     BUG_ON(flags & ~SIG_FLAG_BOTH);
     BUG_ON((flags & SIG_FLAG_BOTH) == SIG_FLAG_BOTH);
 
-    SCLogDebug("want %08lx", flags & SIG_FLAG_BOTH);
-    SCLogDebug("have %08lx", s->flags & SIG_FLAG_BOTH);
+    SCLogDebug("want %08x", flags & SIG_FLAG_BOTH);
+    SCLogDebug("have %08x", s->flags & SIG_FLAG_BOTH);
 
     if (flags & SIG_FLAG_TOSERVER) {
         if ((s->flags & SIG_FLAG_BOTH) == SIG_FLAG_BOTH) {
@@ -391,12 +396,33 @@ int DetectFlowSetup (DetectEngineCtx *de_ctx, Signature *s, const char *flowstr)
     bool appendsm = true;
     /* set the signature direction flags */
     if (fd->flags & DETECT_FLOW_FLAG_TOSERVER) {
+        if (s->flags & SIG_FLAG_TXBOTHDIR) {
+            SCLogError(
+                    "rule %u means to use both directions, cannot specify a flow direction", s->id);
+            goto error;
+        }
+        if (s->flags & SIG_FLAG_TOCLIENT) {
+            SCLogError("rule %u has flow to_server but a hook to_client", s->id);
+            goto error;
+        }
         s->flags |= SIG_FLAG_TOSERVER;
     } else if (fd->flags & DETECT_FLOW_FLAG_TOCLIENT) {
+        if (s->flags & SIG_FLAG_TXBOTHDIR) {
+            SCLogError(
+                    "rule %u means to use both directions, cannot specify a flow direction", s->id);
+            goto error;
+        }
+        if (s->flags & SIG_FLAG_TOSERVER) {
+            SCLogError("rule %u has flow to_client but a hook to_server", s->id);
+            goto error;
+        }
         s->flags |= SIG_FLAG_TOCLIENT;
     } else {
-        s->flags |= SIG_FLAG_TOSERVER;
-        s->flags |= SIG_FLAG_TOCLIENT;
+        /* if direction wasn't already set, e.g. by rule hook, assume both */
+        if ((s->flags & (SIG_FLAG_TOSERVER | SIG_FLAG_TOCLIENT)) == 0) {
+            s->flags |= SIG_FLAG_TOSERVER;
+            s->flags |= SIG_FLAG_TOCLIENT;
+        }
     }
     if (fd->flags == 0 || fd->flags == DETECT_FLOW_FLAG_TOSERVER ||
             fd->flags == DETECT_FLOW_FLAG_TOCLIENT) {
@@ -408,11 +434,11 @@ int DetectFlowSetup (DetectEngineCtx *de_ctx, Signature *s, const char *flowstr)
     }
 
     if (appendsm) {
-        if (SigMatchAppendSMToList(
+        if (SCSigMatchAppendSMToList(
                     de_ctx, s, DETECT_FLOW, (SigMatchCtx *)fd, DETECT_SM_LIST_MATCH) == NULL) {
             goto error;
         }
-    } else if (fd != NULL) {
+    } else {
         DetectFlowFree(de_ctx, fd);
     }
 
@@ -445,14 +471,18 @@ void DetectFlowFree(DetectEngineCtx *de_ctx, void *ptr)
 static void
 PrefilterPacketFlowMatch(DetectEngineThreadCtx *det_ctx, Packet *p, const void *pectx)
 {
+    SCEnter();
+
     const PrefilterPacketHeaderCtx *ctx = pectx;
 
     if (!PrefilterPacketHeaderExtraMatch(ctx, p))
         return;
 
     if (FlowMatch(p->flags, p->flowflags, ctx->v1.u16[0], ctx->v1.u16[1])) {
+        SCLogDebug("match: adding sids");
         PrefilterAddSids(&det_ctx->pmq, ctx->sigs_array, ctx->sigs_cnt);
     }
+    SCReturn;
 }
 
 static void
@@ -475,22 +505,13 @@ PrefilterPacketFlowCompare(PrefilterPacketHeaderValue v, void *smctx)
 
 static int PrefilterSetupFlow(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
 {
-    return PrefilterSetupPacketHeader(de_ctx, sgh, DETECT_FLOW,
-        PrefilterPacketFlowSet,
-        PrefilterPacketFlowCompare,
-        PrefilterPacketFlowMatch);
+    return PrefilterSetupPacketHeader(de_ctx, sgh, DETECT_FLOW, 0, PrefilterPacketFlowSet,
+            PrefilterPacketFlowCompare, PrefilterPacketFlowMatch);
 }
 
 static bool PrefilterFlowIsPrefilterable(const Signature *s)
 {
-    const SigMatch *sm;
-    for (sm = s->init_data->smlists[DETECT_SM_LIST_MATCH] ; sm != NULL; sm = sm->next) {
-        switch (sm->type) {
-            case DETECT_FLOW:
-                return true;
-        }
-    }
-    return false;
+    return PrefilterIsPrefilterableById(s, DETECT_FLOW);
 }
 
 #ifdef UNITTESTS
@@ -520,6 +541,7 @@ static int DetectFlowTestParse02 (void)
     FAIL_IF_NULL(fd);
     FAIL_IF_NOT(fd->flags == DETECT_FLOW_FLAG_ESTABLISHED &&
         fd->match_cnt == 1);
+    DetectFlowFree(NULL, fd);
     PASS;
 }
 
@@ -972,6 +994,7 @@ static int DetectFlowSigTest01(void)
     DecodeThreadVars dtv;
     memset(&dtv, 0, sizeof(DecodeThreadVars));
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
 
     Packet *p = UTHBuildPacket(buf, buflen, IPPROTO_TCP);
     FAIL_IF_NULL(p);
@@ -998,6 +1021,7 @@ static int DetectFlowSigTest01(void)
     DetectEngineCtxFree(de_ctx);
     UTHFreePacket(p);
 
+    StatsThreadCleanup(&th_v.stats);
     PASS;
 }
 
@@ -1065,6 +1089,7 @@ static int DetectFlowTestNoFragMatch(void)
     FAIL_IF_NOT(FlowMatch(pflags, 0, fd->flags, fd->match_cnt));
     pflags |= PKT_REBUILT_FRAGMENT;
     FAIL_IF(FlowMatch(pflags, 0, fd->flags, fd->match_cnt));
+    DetectFlowFree(NULL, fd);
     PASS;
 }
 
@@ -1082,6 +1107,7 @@ static int DetectFlowTestOnlyFragMatch(void)
     FAIL_IF(FlowMatch(pflags, 0, fd->flags, fd->match_cnt));
     pflags |= PKT_REBUILT_FRAGMENT;
     FAIL_IF_NOT(FlowMatch(pflags, 0, fd->flags, fd->match_cnt));
+    DetectFlowFree(NULL, fd);
     PASS;
 }
 

@@ -21,8 +21,8 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __FLOW_UTIL_H__
-#define __FLOW_UTIL_H__
+#ifndef SURICATA_FLOW_UTIL_H
+#define SURICATA_FLOW_UTIL_H
 
 #include "flow.h"
 #include "stream-tcp-private.h"
@@ -41,7 +41,6 @@
         (f)->dp = 0;                                                                               \
         (f)->proto = 0;                                                                            \
         (f)->livedev = NULL;                                                                       \
-        (f)->timeout_at = 0;                                                                       \
         (f)->timeout_policy = 0;                                                                   \
         (f)->vlan_idx = 0;                                                                         \
         (f)->next = NULL;                                                                          \
@@ -88,7 +87,6 @@
         (f)->vlan_idx = 0;                                                                         \
         (f)->ffr = 0;                                                                              \
         (f)->next = NULL;                                                                          \
-        (f)->timeout_at = 0;                                                                       \
         (f)->timeout_policy = 0;                                                                   \
         (f)->flow_state = 0;                                                                       \
         (f)->tenant_id = 0;                                                                        \
@@ -113,7 +111,7 @@
         (f)->thread_id[1] = 0;                                                                     \
         (f)->sgh_toserver = NULL;                                                                  \
         (f)->sgh_toclient = NULL;                                                                  \
-        GenericVarFree((f)->flowvar);                                                              \
+        SCGenericVarFree((f)->flowvar);                                                            \
         (f)->flowvar = NULL;                                                                       \
         RESET_COUNTERS((f));                                                                       \
     } while (0)
@@ -123,7 +121,7 @@
         FlowCleanupAppLayer((f));                                                                  \
                                                                                                    \
         FLOWLOCK_DESTROY((f));                                                                     \
-        GenericVarFree((f)->flowvar);                                                              \
+        SCGenericVarFree((f)->flowvar);                                                            \
     } while (0)
 
 /** \brief check if a memory alloc would fit in the memcap
@@ -140,29 +138,29 @@
 Flow *FlowAlloc(void);
 void FlowFree(Flow *);
 uint8_t FlowGetProtoMapping(uint8_t);
-void FlowInit(Flow *, const Packet *);
+void FlowInit(ThreadVars *, Flow *, const Packet *);
 uint8_t FlowGetReverseProtoMapping(uint8_t rproto);
 
 /* flow end counter logic */
 
 typedef struct FlowEndCounters_ {
-    uint16_t flow_state[FLOW_STATE_SIZE];
-    uint16_t flow_tcp_state[TCP_CLOSED + 1];
-    uint16_t flow_tcp_liberal;
+    StatsCounterId flow_state[FLOW_STATE_SIZE];
+    StatsCounterId flow_tcp_state[TCP_CLOSED + 1];
+    StatsCounterId flow_tcp_liberal;
 } FlowEndCounters;
 
 static inline void FlowEndCountersUpdate(ThreadVars *tv, FlowEndCounters *fec, Flow *f)
 {
     if (f->proto == IPPROTO_TCP && f->protoctx != NULL) {
         TcpSession *ssn = f->protoctx;
-        StatsIncr(tv, fec->flow_tcp_state[ssn->state]);
+        StatsCounterIncr(&tv->stats, fec->flow_tcp_state[ssn->state]);
         if (ssn->flags & STREAMTCP_FLAG_LOSSY_BE_LIBERAL) {
-            StatsIncr(tv, fec->flow_tcp_liberal);
+            StatsCounterIncr(&tv->stats, fec->flow_tcp_liberal);
         }
     }
-    StatsIncr(tv, fec->flow_state[f->flow_state]);
+    StatsCounterIncr(&tv->stats, fec->flow_state[f->flow_state]);
 }
 
 void FlowEndCountersRegister(ThreadVars *t, FlowEndCounters *fec);
 
-#endif /* __FLOW_UTIL_H__ */
+#endif /* SURICATA_FLOW_UTIL_H */

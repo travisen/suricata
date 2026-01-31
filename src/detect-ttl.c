@@ -64,8 +64,7 @@ void DetectTtlRegister(void)
 #endif
     sigmatch_table[DETECT_TTL].SupportsPrefilter = PrefilterTtlIsPrefilterable;
     sigmatch_table[DETECT_TTL].SetupPrefilter = PrefilterSetupTtl;
-
-    return;
+    sigmatch_table[DETECT_TTL].flags = SIGMATCH_INFO_UINT8;
 }
 
 /**
@@ -83,14 +82,15 @@ void DetectTtlRegister(void)
 static int DetectTtlMatch (DetectEngineThreadCtx *det_ctx, Packet *p,
         const Signature *s, const SigMatchCtx *ctx)
 {
-    if (PKT_IS_PSEUDOPKT(p))
-        return 0;
+    DEBUG_VALIDATE_BUG_ON(PKT_IS_PSEUDOPKT(p));
 
     uint8_t pttl;
-    if (PKT_IS_IPV4(p)) {
-        pttl = IPV4_GET_IPTTL(p);
-    } else if (PKT_IS_IPV6(p)) {
-        pttl = IPV6_GET_HLIM(p);
+    if (PacketIsIPv4(p)) {
+        const IPV4Hdr *ip4h = PacketGetIPv4(p);
+        pttl = IPV4_GET_RAW_IPTTL(ip4h);
+    } else if (PacketIsIPv6(p)) {
+        const IPV6Hdr *ip6h = PacketGetIPv6(p);
+        pttl = IPV6_GET_RAW_HLIM(ip6h);
     } else {
         SCLogDebug("Packet is not IPv4 or IPv6");
         return 0;
@@ -116,8 +116,8 @@ static int DetectTtlSetup (DetectEngineCtx *de_ctx, Signature *s, const char *tt
     if (ttld == NULL)
         return -1;
 
-    if (SigMatchAppendSMToList(de_ctx, s, DETECT_TTL, (SigMatchCtx *)ttld, DETECT_SM_LIST_MATCH) ==
-            NULL) {
+    if (SCSigMatchAppendSMToList(
+                de_ctx, s, DETECT_TTL, (SigMatchCtx *)ttld, DETECT_SM_LIST_MATCH) == NULL) {
         DetectTtlFree(de_ctx, ttld);
         return -1;
     }
@@ -132,7 +132,7 @@ static int DetectTtlSetup (DetectEngineCtx *de_ctx, Signature *s, const char *tt
  */
 void DetectTtlFree(DetectEngineCtx *de_ctx, void *ptr)
 {
-    rs_detect_u8_free(ptr);
+    SCDetectU8Free(ptr);
 }
 
 /* prefilter code */
@@ -140,15 +140,15 @@ void DetectTtlFree(DetectEngineCtx *de_ctx, void *ptr)
 static void
 PrefilterPacketTtlMatch(DetectEngineThreadCtx *det_ctx, Packet *p, const void *pectx)
 {
-    if (PKT_IS_PSEUDOPKT(p)) {
-        SCReturn;
-    }
+    DEBUG_VALIDATE_BUG_ON(PKT_IS_PSEUDOPKT(p));
 
     uint8_t pttl;
-    if (PKT_IS_IPV4(p)) {
-        pttl = IPV4_GET_IPTTL(p);
-    } else if (PKT_IS_IPV6(p)) {
-        pttl = IPV6_GET_HLIM(p);
+    if (PacketIsIPv4(p)) {
+        const IPV4Hdr *ip4h = PacketGetIPv4(p);
+        pttl = IPV4_GET_RAW_IPTTL(ip4h);
+    } else if (PacketIsIPv6(p)) {
+        const IPV6Hdr *ip6h = PacketGetIPv6(p);
+        pttl = IPV6_GET_RAW_HLIM(ip6h);
     } else {
         SCLogDebug("Packet is not IPv4 or IPv6");
         return;
@@ -170,20 +170,13 @@ PrefilterPacketTtlMatch(DetectEngineThreadCtx *det_ctx, Packet *p, const void *p
 
 static int PrefilterSetupTtl(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
 {
-    return PrefilterSetupPacketHeader(de_ctx, sgh, DETECT_TTL, PrefilterPacketU8Set,
-            PrefilterPacketU8Compare, PrefilterPacketTtlMatch);
+    return PrefilterSetupPacketHeader(de_ctx, sgh, DETECT_TTL, SIG_MASK_REQUIRE_REAL_PKT,
+            PrefilterPacketU8Set, PrefilterPacketU8Compare, PrefilterPacketTtlMatch);
 }
 
 static bool PrefilterTtlIsPrefilterable(const Signature *s)
 {
-    const SigMatch *sm;
-    for (sm = s->init_data->smlists[DETECT_SM_LIST_MATCH] ; sm != NULL; sm = sm->next) {
-        switch (sm->type) {
-            case DETECT_TTL:
-                return true;
-        }
-    }
-    return false;
+    return PrefilterIsPrefilterableById(s, DETECT_TTL);
 }
 
 #ifdef UNITTESTS

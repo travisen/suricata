@@ -104,7 +104,7 @@ static void DecodeTeredoConfigPorts(const char *pstr)
 void DecodeTeredoConfig(void)
 {
     int enabled = 0;
-    if (ConfGetBool("decoder.teredo.enabled", &enabled) == 1) {
+    if (SCConfGetBool("decoder.teredo.enabled", &enabled) == 1) {
         if (enabled) {
             g_teredo_enabled = true;
         } else {
@@ -112,7 +112,7 @@ void DecodeTeredoConfig(void)
         }
     }
     if (g_teredo_enabled) {
-        ConfNode *node = ConfGetNode("decoder.teredo.ports");
+        SCConfNode *node = SCConfGetNode("decoder.teredo.ports");
         if (node && node->val) {
             DecodeTeredoConfigPorts(node->val);
         }
@@ -182,7 +182,7 @@ int DecodeTeredo(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
 
         if (len ==  IPV6_HEADER_LEN +
                 IPV6_GET_RAW_PLEN(thdr) + (start - pkt)) {
-            int blen = len - (start - pkt);
+            uint32_t blen = len - (uint32_t)(start - pkt);
             /* spawn off tunnel packet */
             Packet *tp = PacketTunnelPktSetup(tv, dtv, p, start, blen,
                     DECODE_TUNNEL_IPV6_TEREDO);
@@ -190,7 +190,7 @@ int DecodeTeredo(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
                 PKT_SET_SRC(tp, PKT_SRC_DECODER_TEREDO);
                 /* add the tp to the packet queue. */
                 PacketEnqueueNoLock(&tv->decode_pq,tp);
-                StatsIncr(tv, dtv->counter_teredo);
+                StatsCounterIncr(&tv->stats, dtv->counter_teredo);
                 return TM_ECODE_OK;
             }
         }

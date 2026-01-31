@@ -1,4 +1,4 @@
-/* Copyright (C) 2018 Open Information Security Foundation
+/* Copyright (C) 2018-2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -20,19 +20,19 @@ use crate::kerberos::*;
 use crate::smb::ntlmssp_records::*;
 use crate::smb::smb::*;
 
-use nom7::{Err, IResult};
-use der_parser6::ber::BerObjectContent;
-use der_parser6::der::{parse_der_oid, parse_der_sequence};
+use nom8::{Err, IResult};
+use der_parser::ber::BerObjectContent;
+use der_parser::der::{parse_der_oid, parse_der_sequence};
 
 fn parse_secblob_get_spnego(blob: &[u8]) -> IResult<&[u8], &[u8], SecBlobError>
 {
-    let (rem, base_o) = der_parser6::parse_der(blob).map_err(Err::convert)?;
+    let (rem, base_o) = der_parser::parse_der(blob).map_err(|_| Err::Error(SecBlobError::NotSpNego))?;
     SCLogDebug!("parse_secblob_get_spnego: base_o {:?}", base_o);
     let d = match base_o.content.as_slice() {
         Err(_) => { return Err(Err::Error(SecBlobError::NotSpNego)); },
         Ok(d) => d,
     };
-    let (next, o) = parse_der_oid(d).map_err(Err::convert)?;
+    let (next, o) = parse_der_oid(d).map_err(|_| Err::Error(SecBlobError::NotSpNego))?;
     SCLogDebug!("parse_secblob_get_spnego: sub_o {:?}", o);
 
     let oid = match o.content.as_oid() {
@@ -59,7 +59,7 @@ fn parse_secblob_get_spnego(blob: &[u8]) -> IResult<&[u8], &[u8], SecBlobError>
 
 fn parse_secblob_spnego_start(blob: &[u8]) -> IResult<&[u8], &[u8], SecBlobError>
 {
-    let (rem, o) = der_parser6::parse_der(blob).map_err(Err::convert)?;
+    let (rem, o) = der_parser::parse_der(blob).map_err(|_| Err::Error(SecBlobError::NotSpNego))?;
     let d = match o.content.as_slice() {
         Ok(d) => {
             SCLogDebug!("d: next data len {}",d.len());
@@ -96,7 +96,7 @@ fn parse_secblob_spnego(blob: &[u8]) -> Option<SpnegoRequest>
             Ok(s) => s,
             _ => { continue; },
         };
-        let o = match der_parser6::parse_der(n) {
+        let o = match der_parser::parse_der(n) {
             Ok((_,x)) => x,
             _ => { continue; },
         };

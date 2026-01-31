@@ -1,12 +1,12 @@
 #! /usr/bin/env bash
 #
-# This script will bundle libhtp and/or suricata-update for you.
+# This script will bundle suricata-update for you.
 #
 # To use, run from the top Suricata source directory:
 #
-#    ./scripts/bundle.sh [suricata-update|libhtp]
+#    ./scripts/bundle.sh [suricata-update]
 #
-# If no arguments are provided, both suricata-update and libhtp will
+# If no arguments are provided, suricata-update will
 # be bundled.
 #
 # Environment variables:
@@ -14,10 +14,6 @@
 #   SU_REPO:   Overrides the Suricata-Update git repo
 #   SU_BRANCH: Override the Suricata-Update branch to a branch, tag or
 #              {pull,merge}-request.
-#
-#   LIBHTP_REPO:   Overrides the libhtp git repo
-#   LIBHTP_BRANCH: Override the libhtp branch to a branch, tag or
-#                  {pull,merge}-request.
 #
 #   DESTDIR: Checkout to another directory instead of the current
 #            directory.
@@ -33,13 +29,27 @@ what="$1"
 
 # Transforms a branch name in the form of "pr/<NUMBER>" or
 # "mr/<NUMBER>" into a proper ref for GitHub or GitLab.
-transform_branch() {
-    pr=$(echo "${1}" | sed -n 's/^pr\/\([[:digit:]]\+\)$/\1/p')
-    if [ "${pr}" ]; then
-        echo "refs/pull/${pr}/head"
-        return
-    fi
 
+# Transform a branch name to a ref.
+#
+# For GitHub the following formats are allowed:
+# - pr/123
+# - pull/123
+# - https://github.com/OISF/suricata-update/pull/123
+# - OISF/suricata-update#123
+#
+# For GibLab only the format "mr/123" is supported.
+transform_branch() {
+    pr=$(echo "${1}" | sed -n \
+        -e 's/^https:\/\/github.com\/OISF\/.*\/pull\/\([0-9]*\)$/\1/p' \
+	-e 's/^OISF\/.*#\([0-9]*\)$/\1/p' \
+	-e 's/^pull\/\([0-9]*\)$/\1/p' \
+        -e 's/^pr\/\([0-9]*\)$/\1/p')
+    if [ "${pr}" ]; then
+	echo "refs/pull/${pr}/head"
+	return
+    fi
+    
     mr=$(echo "${1}" | sed -n 's/^mr\/\([[:digit:]]\+\)$/\1/p')
     if [ "${mr}" ]; then
         echo "refs/merge-requests/${mr}/head"
@@ -81,14 +91,6 @@ while IFS= read -r requirement; do
             rm -rf ${DESTDIR}/suricata-update.tmp/.git
             cp -a ${DESTDIR}/suricata-update.tmp/. ${DESTDIR}/suricata-update
             rm -rf ${DESTDIR}/suricata-update.tmp
-            ;;
-        libhtp)
-            LIBHTP_REPO=${LIBHTP_REPO:-$2}
-            LIBHTP_BRANCH=$(transform_branch ${LIBHTP_BRANCH:-$3})
-            echo "===> Bundling ${LIBHTP_REPO} (${LIBHTP_BRANCH})"
-            rm -rf ${DESTDIR}/libhtp
-            fetch "${LIBHTP_REPO}" "${DESTDIR}/libhtp" "${LIBHTP_BRANCH}"
-            rm -rf libhtp/.git
             ;;
         \#*)
             # Ignore comment.

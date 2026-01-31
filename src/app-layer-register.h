@@ -21,8 +21,8 @@
  * \author Pierre Chifflier <chifflier@wzdftpd.net>
  */
 
-#ifndef __APP_LAYER_REGISTER_H__
-#define __APP_LAYER_REGISTER_H__
+#ifndef SURICATA_APP_LAYER_REGISTER_H
+#define SURICATA_APP_LAYER_REGISTER_H
 
 #include "app-layer-detect-proto.h"
 
@@ -51,15 +51,15 @@ typedef struct AppLayerParser {
     const int complete_tc;
     int (*StateGetProgress)(void *alstate, uint8_t direction);
 
-    int (*StateGetEventInfo)(const char *event_name,
-                             int *event_id, AppLayerEventType *event_type);
-    int (*StateGetEventInfoById)(int event_id, const char **event_name,
-                                  AppLayerEventType *event_type);
+    int (*StateGetEventInfo)(
+            const char *event_name, uint8_t *event_id, AppLayerEventType *event_type);
+    int (*StateGetEventInfoById)(
+            uint8_t event_id, const char **event_name, AppLayerEventType *event_type);
 
     void *(*LocalStorageAlloc)(void);
     void (*LocalStorageFree)(void *);
 
-    AppLayerGetFileState (*GetTxFiles)(void *, void *, uint8_t);
+    AppLayerGetFileState (*GetTxFiles)(void *, uint8_t);
 
     AppLayerGetTxIterTuple (*GetTxIterator)(const uint8_t ipproto,
             const AppProto alproto, void *alstate, uint64_t min_tx_id,
@@ -67,16 +67,32 @@ typedef struct AppLayerParser {
 
     AppLayerStateData *(*GetStateData)(void *state);
     AppLayerTxData *(*GetTxData)(void *tx);
-    bool (*ApplyTxConfig)(void *state, void *tx, int mode, AppLayerTxConfig);
+    void (*ApplyTxConfig)(void *state, void *tx, int mode, AppLayerTxConfig);
 
     uint32_t flags;
-
-    void (*Truncate)(void *state, uint8_t direction);
 
     AppLayerParserGetFrameIdByNameFn GetFrameIdByName;
     AppLayerParserGetFrameNameByIdFn GetFrameNameById;
 
+    AppLayerParserGetStateIdByNameFn GetStateIdByName;
+    AppLayerParserGetStateNameByIdFn GetStateNameById;
 } AppLayerParser;
+
+/// First part of AppLayerParser, needed only for protocol detection
+typedef struct AppLayerProtocolDetect {
+    /// name of the app-layer
+    const char *name;
+    /// default port(s)
+    const char *default_port;
+    /// ip protocol : TCP or UDP
+    uint8_t ip_proto;
+    /// probing parser to server
+    ProbingParserFPtr ProbeTS;
+    /// probing parser to client
+    ProbingParserFPtr ProbeTC;
+    uint16_t min_depth;
+    uint16_t max_depth;
+} AppLayerProtocolDetect;
 
 /**
  * \brief App layer protocol detection function.
@@ -86,7 +102,8 @@ typedef struct AppLayerParser {
  *
  * \retval The AppProto constant if successful. On error, this function never returns.
  */
-AppProto AppLayerRegisterProtocolDetection(const struct AppLayerParser *parser, int enable_default);
+AppProto SCAppLayerRegisterProtocolDetection(
+        const struct AppLayerProtocolDetect *parser, int enable_default);
 
 /**
  * \brief App layer protocol registration function.
@@ -98,6 +115,6 @@ AppProto AppLayerRegisterProtocolDetection(const struct AppLayerParser *parser, 
  */
 int AppLayerRegisterParser(const struct AppLayerParser *p, AppProto alproto);
 
-int AppLayerRegisterParserAlias(const char *proto_name, const char *proto_alias);
+int SCAppLayerRegisterParserAlias(const char *proto_name, const char *proto_alias);
 
-#endif /* __APP_LAYER_REGISTER_H__ */
+#endif /* SURICATA_APP_LAYER_REGISTER_H */

@@ -1,4 +1,4 @@
-/* Copyright (C) 2020-2023 Open Information Security Foundation
+/* Copyright (C) 2020-2025 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -21,13 +21,23 @@
 use super::parser;
 use crate::applayer;
 use crate::applayer::*;
-use crate::core::{AppProto, Flow, ALPROTO_UNKNOWN, IPPROTO_TCP};
+use crate::core::{
+    sc_app_layer_parser_trigger_raw_stream_inspection, ALPROTO_UNKNOWN, IPPROTO_TCP,
+};
+use crate::direction::Direction;
+use crate::flow::Flow;
 use crate::frames::*;
-use nom7::Err;
+use nom8::Err;
 use std;
 use std::ffi::CString;
+use std::os::raw::c_char;
+use suricata_sys::sys::{
+    AppLayerParserState, AppProto, SCAppLayerParserConfParserEnabled,
+    SCAppLayerParserRegisterLogger, SCAppLayerProtoDetectConfProtoDetectionEnabled,
+    SCAppLayerProtoDetectPMRegisterPatternCI,
+};
 
-static mut ALPROTO_RFB: AppProto = ALPROTO_UNKNOWN;
+pub(super) static mut ALPROTO_RFB: AppProto = ALPROTO_UNKNOWN;
 
 #[derive(FromPrimitive, Debug, AppLayerEvent)]
 pub enum RFBEvent {
@@ -165,10 +175,16 @@ impl RFBState {
 
     fn get_current_tx(&mut self) -> Option<&mut RFBTransaction> {
         let tx_id = self.tx_id;
-        self.transactions.iter_mut().find(|tx| tx.tx_id == tx_id)
+        let r = self.transactions.iter_mut().find(|tx| tx.tx_id == tx_id);
+        if let Some(tx) = r {
+            tx.tx_data.updated_tc = true;
+            tx.tx_data.updated_ts = true;
+            return Some(tx);
+        }
+        return None;
     }
 
-    fn parse_request(&mut self, flow: *const Flow, stream_slice: StreamSlice) -> AppLayerResult {
+    fn parse_request(&mut self, flow: *mut Flow, stream_slice: StreamSlice) -> AppLayerResult {
         let input = stream_slice.as_slice();
 
         // We're not interested in empty requests.
@@ -194,6 +210,7 @@ impl RFBState {
                                 current,
                                 consumed as i64,
                                 RFBFrameType::Pdu as u8,
+                                None,
                             );
 
                             current = rem;
@@ -207,6 +224,10 @@ impl RFBState {
 
                             if let Some(current_transaction) = self.get_current_tx() {
                                 current_transaction.ts_client_protocol_version = Some(request);
+                                sc_app_layer_parser_trigger_raw_stream_inspection(
+                                    flow,
+                                    Direction::ToServer as i32,
+                                );
                             } else {
                                 debug_validate_fail!(
                                     "no transaction set at protocol selection stage"
@@ -235,6 +256,7 @@ impl RFBState {
                                 current,
                                 consumed as i64,
                                 RFBFrameType::Pdu as u8,
+                                None,
                             );
 
                             current = rem;
@@ -245,6 +267,10 @@ impl RFBState {
                                 current_transaction.ts_security_type_selection = Some(request);
                                 current_transaction.chosen_security_type =
                                     Some(chosen_security_type as u32);
+                                sc_app_layer_parser_trigger_raw_stream_inspection(
+                                    flow,
+                                    Direction::ToServer as i32,
+                                );
                             } else {
                                 debug_validate_fail!("no transaction set at security type stage");
                             }
@@ -293,6 +319,7 @@ impl RFBState {
                             current,
                             consumed as i64,
                             RFBFrameType::Pdu as u8,
+                            None,
                         );
 
                         current = rem;
@@ -301,6 +328,10 @@ impl RFBState {
 
                         if let Some(current_transaction) = self.get_current_tx() {
                             current_transaction.ts_vnc_response = Some(request);
+                            sc_app_layer_parser_trigger_raw_stream_inspection(
+                                flow,
+                                Direction::ToServer as i32,
+                            );
                         } else {
                             debug_validate_fail!("no transaction set at security result stage");
                         }
@@ -330,6 +361,7 @@ impl RFBState {
                             current,
                             consumed as i64,
                             RFBFrameType::Pdu as u8,
+                            None,
                         );
 
                         current = rem;
@@ -338,6 +370,10 @@ impl RFBState {
 
                         if let Some(current_transaction) = self.get_current_tx() {
                             current_transaction.ts_client_init = Some(request);
+                            sc_app_layer_parser_trigger_raw_stream_inspection(
+                                flow,
+                                Direction::ToServer as i32,
+                            );
                         } else {
                             debug_validate_fail!("no transaction set at client init stage");
                         }
@@ -384,7 +420,7 @@ impl RFBState {
         }
     }
 
-    fn parse_response(&mut self, flow: *const Flow, stream_slice: StreamSlice) -> AppLayerResult {
+    fn parse_response(&mut self, flow: *mut Flow, stream_slice: StreamSlice) -> AppLayerResult {
         let input = stream_slice.as_slice();
         // We're not interested in empty responses.
         if input.is_empty() {
@@ -413,6 +449,7 @@ impl RFBState {
                                 current,
                                 consumed as i64,
                                 RFBFrameType::Pdu as u8,
+                                None,
                             );
 
                             current = rem;
@@ -423,6 +460,10 @@ impl RFBState {
 
                             if let Some(current_transaction) = self.get_current_tx() {
                                 current_transaction.tc_server_protocol_version = Some(request);
+                                sc_app_layer_parser_trigger_raw_stream_inspection(
+                                    flow,
+                                    Direction::ToClient as i32,
+                                );
                             } else {
                                 debug_validate_fail!("no transaction set but we just set one");
                             }
@@ -449,6 +490,7 @@ impl RFBState {
                                 current,
                                 consumed as i64,
                                 RFBFrameType::Pdu as u8,
+                                None,
                             );
 
                             current = rem;
@@ -471,6 +513,10 @@ impl RFBState {
 
                             if let Some(current_transaction) = self.get_current_tx() {
                                 current_transaction.tc_supported_security_types = Some(request);
+                                sc_app_layer_parser_trigger_raw_stream_inspection(
+                                    flow,
+                                    Direction::ToClient as i32,
+                                );
                             } else {
                                 debug_validate_fail!("no transaction set at security type stage");
                             }
@@ -503,6 +549,7 @@ impl RFBState {
                                 current,
                                 consumed as i64,
                                 RFBFrameType::Pdu as u8,
+                                None,
                             );
 
                             current = rem;
@@ -536,6 +583,10 @@ impl RFBState {
                                 current_transaction.tc_server_security_type = Some(request);
                                 current_transaction.chosen_security_type =
                                     Some(chosen_security_type);
+                                sc_app_layer_parser_trigger_raw_stream_inspection(
+                                    flow,
+                                    Direction::ToClient as i32,
+                                );
                             } else {
                                 debug_validate_fail!("no transaction set at security type stage");
                             }
@@ -566,6 +617,7 @@ impl RFBState {
                             current,
                             consumed as i64,
                             RFBFrameType::Pdu as u8,
+                            None,
                         );
 
                         current = rem;
@@ -574,6 +626,10 @@ impl RFBState {
 
                         if let Some(current_transaction) = self.get_current_tx() {
                             current_transaction.tc_vnc_challenge = Some(request);
+                            sc_app_layer_parser_trigger_raw_stream_inspection(
+                                flow,
+                                Direction::ToClient as i32,
+                            );
                         } else {
                             debug_validate_fail!("no transaction set at auth stage");
                         }
@@ -604,6 +660,7 @@ impl RFBState {
                                 current,
                                 consumed as i64,
                                 RFBFrameType::Pdu as u8,
+                                None,
                             );
 
                             current = rem;
@@ -613,6 +670,10 @@ impl RFBState {
 
                                 if let Some(current_transaction) = self.get_current_tx() {
                                     current_transaction.tc_security_result = Some(request);
+                                    sc_app_layer_parser_trigger_raw_stream_inspection(
+                                        flow,
+                                        Direction::ToClient as i32,
+                                    );
                                 } else {
                                     debug_validate_fail!(
                                         "no transaction set at security result stage"
@@ -652,6 +713,10 @@ impl RFBState {
                         Ok((_rem, request)) => {
                             if let Some(current_transaction) = self.get_current_tx() {
                                 current_transaction.tc_failure_reason = Some(request);
+                                sc_app_layer_parser_trigger_raw_stream_inspection(
+                                    flow,
+                                    Direction::ToClient as i32,
+                                );
                             } else {
                                 debug_validate_fail!("no transaction set at failure reason stage");
                             }
@@ -684,6 +749,7 @@ impl RFBState {
                                 current,
                                 consumed as i64,
                                 RFBFrameType::Pdu as u8,
+                                None,
                             );
 
                             current = rem;
@@ -692,6 +758,10 @@ impl RFBState {
 
                             if let Some(current_transaction) = self.get_current_tx() {
                                 current_transaction.tc_server_init = Some(request);
+                                sc_app_layer_parser_trigger_raw_stream_inspection(
+                                    flow,
+                                    Direction::ToClient as i32,
+                                );
                                 // connection initialization is complete and parsed
                                 current_transaction.complete = true;
                             } else {
@@ -743,8 +813,7 @@ impl RFBState {
 
 // C exports.
 
-#[no_mangle]
-pub extern "C" fn rs_rfb_state_new(
+extern "C" fn rfb_state_new(
     _orig_state: *mut std::os::raw::c_void, _orig_proto: AppProto,
 ) -> *mut std::os::raw::c_void {
     let state = RFBState::new();
@@ -752,38 +821,33 @@ pub extern "C" fn rs_rfb_state_new(
     return Box::into_raw(boxed) as *mut _;
 }
 
-#[no_mangle]
-pub extern "C" fn rs_rfb_state_free(state: *mut std::os::raw::c_void) {
+extern "C" fn rfb_state_free(state: *mut std::os::raw::c_void) {
     // Just unbox...
     std::mem::drop(unsafe { Box::from_raw(state as *mut RFBState) });
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_rfb_state_tx_free(state: *mut std::os::raw::c_void, tx_id: u64) {
+unsafe extern "C" fn rfb_state_tx_free(state: *mut std::os::raw::c_void, tx_id: u64) {
     let state = cast_pointer!(state, RFBState);
     state.free_tx(tx_id);
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_rfb_parse_request(
-    flow: *const Flow, state: *mut std::os::raw::c_void, _pstate: *mut std::os::raw::c_void,
-    stream_slice: StreamSlice, _data: *const std::os::raw::c_void,
+unsafe extern "C" fn rfb_parse_request(
+    flow: *mut Flow, state: *mut std::os::raw::c_void, _pstate: *mut AppLayerParserState,
+    stream_slice: StreamSlice, _data: *mut std::os::raw::c_void,
 ) -> AppLayerResult {
     let state = cast_pointer!(state, RFBState);
     return state.parse_request(flow, stream_slice);
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_rfb_parse_response(
-    flow: *const Flow, state: *mut std::os::raw::c_void, _pstate: *mut std::os::raw::c_void,
-    stream_slice: StreamSlice, _data: *const std::os::raw::c_void,
+unsafe extern "C" fn rfb_parse_response(
+    flow: *mut Flow, state: *mut std::os::raw::c_void, _pstate: *mut AppLayerParserState,
+    stream_slice: StreamSlice, _data: *mut std::os::raw::c_void,
 ) -> AppLayerResult {
     let state = cast_pointer!(state, RFBState);
     return state.parse_response(flow, stream_slice);
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_rfb_state_get_tx(
+unsafe extern "C" fn rfb_state_get_tx(
     state: *mut std::os::raw::c_void, tx_id: u64,
 ) -> *mut std::os::raw::c_void {
     let state = cast_pointer!(state, RFBState);
@@ -797,14 +861,12 @@ pub unsafe extern "C" fn rs_rfb_state_get_tx(
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_rfb_state_get_tx_count(state: *mut std::os::raw::c_void) -> u64 {
+unsafe extern "C" fn rfb_state_get_tx_count(state: *mut std::os::raw::c_void) -> u64 {
     let state = cast_pointer!(state, RFBState);
     return state.tx_id;
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_rfb_tx_get_alstate_progress(
+unsafe extern "C" fn rfb_tx_get_alstate_progress(
     tx: *mut std::os::raw::c_void, _direction: u8,
 ) -> std::os::raw::c_int {
     let tx = cast_pointer!(tx, RFBTransaction);
@@ -817,11 +879,11 @@ pub unsafe extern "C" fn rs_rfb_tx_get_alstate_progress(
 // Parser name as a C style string.
 const PARSER_NAME: &[u8] = b"rfb\0";
 
-export_tx_data_get!(rs_rfb_get_tx_data, RFBTransaction);
-export_state_data_get!(rs_rfb_get_state_data, RFBState);
+export_tx_data_get!(rfb_get_tx_data, RFBTransaction);
+export_state_data_get!(rfb_get_state_data, RFBState);
 
 #[no_mangle]
-pub unsafe extern "C" fn rs_rfb_register_parser() {
+pub unsafe extern "C" fn SCRfbRegisterParser() {
     let parser = RustParser {
         name: PARSER_NAME.as_ptr() as *const std::os::raw::c_char,
         default_port: std::ptr::null(),
@@ -830,40 +892,64 @@ pub unsafe extern "C" fn rs_rfb_register_parser() {
         probe_tc: None,
         min_depth: 0,
         max_depth: 16,
-        state_new: rs_rfb_state_new,
-        state_free: rs_rfb_state_free,
-        tx_free: rs_rfb_state_tx_free,
-        parse_ts: rs_rfb_parse_request,
-        parse_tc: rs_rfb_parse_response,
-        get_tx_count: rs_rfb_state_get_tx_count,
-        get_tx: rs_rfb_state_get_tx,
+        state_new: rfb_state_new,
+        state_free: rfb_state_free,
+        tx_free: rfb_state_tx_free,
+        parse_ts: rfb_parse_request,
+        parse_tc: rfb_parse_response,
+        get_tx_count: rfb_state_get_tx_count,
+        get_tx: rfb_state_get_tx,
         tx_comp_st_ts: 1,
         tx_comp_st_tc: 1,
-        tx_get_progress: rs_rfb_tx_get_alstate_progress,
+        tx_get_progress: rfb_tx_get_alstate_progress,
         get_eventinfo: Some(RFBEvent::get_event_info),
         get_eventinfo_byid: Some(RFBEvent::get_event_info_by_id),
         localstorage_new: None,
         localstorage_free: None,
         get_tx_files: None,
         get_tx_iterator: Some(applayer::state_get_tx_iterator::<RFBState, RFBTransaction>),
-        get_tx_data: rs_rfb_get_tx_data,
-        get_state_data: rs_rfb_get_state_data,
+        get_tx_data: rfb_get_tx_data,
+        get_state_data: rfb_get_state_data,
         apply_tx_config: None,
         flags: 0,
-        truncate: None,
         get_frame_id_by_name: Some(RFBFrameType::ffi_id_from_name),
         get_frame_name_by_id: Some(RFBFrameType::ffi_name_from_id),
+        get_state_id_by_name: None,
+        get_state_name_by_id: None,
     };
 
     let ip_proto_str = CString::new("tcp").unwrap();
 
-    if AppLayerProtoDetectConfProtoDetectionEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
-        let alproto = AppLayerRegisterProtocolDetection(&parser, 1);
+    if SCAppLayerProtoDetectConfProtoDetectionEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
+        let alproto = applayer_register_protocol_detection(&parser, 1);
         ALPROTO_RFB = alproto;
-        if AppLayerParserConfParserEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
+        if SCAppLayerParserConfParserEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
             let _ = AppLayerRegisterParser(&parser, alproto);
         }
         SCLogDebug!("Rust rfb parser registered.");
+        SCAppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_RFB);
+        if SCAppLayerProtoDetectPMRegisterPatternCI(
+            IPPROTO_TCP,
+            ALPROTO_RFB,
+            b"RFB \0".as_ptr() as *const c_char,
+            b"RFB ".len() as u16,
+            0,
+            Direction::ToServer.into(),
+        ) < 0
+        {
+            SCLogDebug!("Failed to register protocol detection pattern for direction TOSERVER");
+        };
+        if SCAppLayerProtoDetectPMRegisterPatternCI(
+            IPPROTO_TCP,
+            ALPROTO_RFB,
+            b"RFB \0".as_ptr() as *const c_char,
+            b"RFB ".len() as u16,
+            0,
+            Direction::ToClient.into(),
+        ) < 0
+        {
+            SCLogDebug!("Failed to register protocol detection pattern for direction TOCLIENT");
+        }
     } else {
         SCLogDebug!("Protocol detector and parser disabled for RFB.");
     }
@@ -885,7 +971,7 @@ mod test {
             0x2e, 0x6c, 0x6f, 0x63, 0x61, 0x6c, 0x64, 0x6f, 0x6d, 0x61, 0x69, 0x6e,
         ];
         let r = state.parse_response(
-            std::ptr::null(),
+            std::ptr::null_mut(),
             StreamSlice::from_slice(buf, STREAM_START, 0),
         );
 
@@ -926,7 +1012,7 @@ mod test {
         //The buffer values correspond to Server Protocol version: 003.008
         // Same buffer is used for both functions due to similar values in request and response
         init_state.parse_response(
-            std::ptr::null(),
+            std::ptr::null_mut(),
             StreamSlice::from_slice(&buf[0..12], STREAM_START, 0),
         );
         let mut ok_state = parser::RFBGlobalState::TSClientProtocolVersion;
@@ -934,21 +1020,21 @@ mod test {
 
         //The buffer values correspond to Client Protocol version: 003.008
         init_state.parse_request(
-            std::ptr::null(),
+            std::ptr::null_mut(),
             StreamSlice::from_slice(&buf[0..12], STREAM_START, 0),
         );
         ok_state = parser::RFBGlobalState::TCSupportedSecurityTypes;
         assert_eq!(init_state.state, ok_state);
 
         init_state.parse_response(
-            std::ptr::null(),
+            std::ptr::null_mut(),
             StreamSlice::from_slice(&buf[12..14], STREAM_START, 0),
         );
         ok_state = parser::RFBGlobalState::TSSecurityTypeSelection;
         assert_eq!(init_state.state, ok_state);
 
         init_state.parse_request(
-            std::ptr::null(),
+            std::ptr::null_mut(),
             StreamSlice::from_slice(&buf[14..15], STREAM_START, 0),
         );
         ok_state = parser::RFBGlobalState::TCVncChallenge;
@@ -957,7 +1043,7 @@ mod test {
         //The buffer values correspond to Server Authentication challenge: 547b7a6f36a154db03a2575c6f2a4ec5
         // Same buffer is used for both functions due to similar values in request and response
         init_state.parse_response(
-            std::ptr::null(),
+            std::ptr::null_mut(),
             StreamSlice::from_slice(&buf[15..31], STREAM_START, 0),
         );
         ok_state = parser::RFBGlobalState::TSVncResponse;
@@ -965,28 +1051,28 @@ mod test {
 
         //The buffer values correspond to Client Authentication response: 547b7a6f36a154db03a2575c6f2a4ec5
         init_state.parse_request(
-            std::ptr::null(),
+            std::ptr::null_mut(),
             StreamSlice::from_slice(&buf[15..31], STREAM_START, 0),
         );
         ok_state = parser::RFBGlobalState::TCSecurityResult;
         assert_eq!(init_state.state, ok_state);
 
         init_state.parse_response(
-            std::ptr::null(),
+            std::ptr::null_mut(),
             StreamSlice::from_slice(&buf[31..35], STREAM_START, 0),
         );
         ok_state = parser::RFBGlobalState::TSClientInit;
         assert_eq!(init_state.state, ok_state);
 
         init_state.parse_request(
-            std::ptr::null(),
+            std::ptr::null_mut(),
             StreamSlice::from_slice(&buf[35..36], STREAM_START, 0),
         );
         ok_state = parser::RFBGlobalState::TCServerInit;
         assert_eq!(init_state.state, ok_state);
 
         init_state.parse_response(
-            std::ptr::null(),
+            std::ptr::null_mut(),
             StreamSlice::from_slice(&buf[36..90], STREAM_START, 0),
         );
         ok_state = parser::RFBGlobalState::Skip;

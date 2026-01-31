@@ -21,8 +21,8 @@
  *  \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __FLOW_HASH_H__
-#define __FLOW_HASH_H__
+#ifndef SURICATA_FLOW_HASH_H
+#define SURICATA_FLOW_HASH_H
 
 #include "flow.h"
 
@@ -82,7 +82,7 @@ typedef struct FlowBucket_ {
 Flow *FlowGetFlowFromHash(ThreadVars *tv, FlowLookupStruct *tctx, Packet *, Flow **);
 
 Flow *FlowGetFromFlowKey(FlowKey *key, struct timespec *ttime, const uint32_t hash);
-Flow *FlowGetExistingFlowFromFlowId(int64_t flow_id);
+Flow *FlowGetExistingFlowFromFlowId(uint64_t flow_id);
 uint32_t FlowKeyGetHash(FlowKey *flow_key);
 uint32_t FlowGetIpPairProtoHash(const Packet *p);
 
@@ -102,5 +102,4 @@ static inline void RemoveFromHash(Flow *f, Flow *prev_f)
     f->fb = NULL;
 }
 
-#endif /* __FLOW_HASH_H__ */
-
+#endif /* SURICATA_FLOW_HASH_H */

@@ -135,39 +135,6 @@ uint16_t UtilCpuGetNumProcessorsOnline(void)
 }
 
 /**
- * \brief Get the maximum number of cpus allowed in the system
- *        This syscall is present on Solaris, but it's not on linux
- *        or macosx. Maybe you should look at UtilCpuGetNumProcessorsConfigured()
- * \retval 0 if the syscall is not available or we have an error;
- *           otherwise it will return the number of cpus allowed
- */
-uint16_t UtilCpuGetNumProcessorsMax(void)
-{
-#ifdef SYSCONF_NPROCESSORS_MAX_COMPAT
-    long nprocs = -1;
-    nprocs = sysconf(_SC_NPROCESSORS_MAX);
-    if (nprocs < 1) {
-        SCLogError("Couldn't retrieve the maximum number of cpus "
-                   "allowed by the system (%s)",
-                strerror(errno));
-        return 0;
-    }
-
-    if (nprocs > UINT16_MAX) {
-        SCLogDebug("It seems that the system support more that %"PRIu16" CPUs. You "
-                   "can modify util-cpu.{c,h} to use uint32_t to support it", UINT16_MAX);
-        return UINT16_MAX;
-    }
-
-    return (uint16_t)nprocs;
-#else
-    SCLogError("Couldn't retrieve the maximum number of cpus allowed by "
-               "the system, synconf macro unavailable");
-    return 0;
-#endif
-}
-
-/**
  * \brief Print a summary of CPUs detected (configured and online)
  */
 void UtilCpuPrintSummary(void)
@@ -225,6 +192,10 @@ uint64_t UtilCpuGetTicks(void)
     ::: "%eax", "%ecx", "%edx");
 #endif
 
+#elif defined(__GNUC__) && defined(__aarch64__)
+    __asm__ __volatile__("isb\n\t"
+                         "mrs %0,  cntvct_el0\n\t"
+                         : "=r"(val));
 #else /* #if defined(__GNU__) */
 //#warning Using inferior version of UtilCpuGetTicks
     struct timeval now;

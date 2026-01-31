@@ -22,11 +22,71 @@
  *
  */
 
-#ifndef __UTIL_FILE_H__
-#define __UTIL_FILE_H__
+#ifndef SURICATA_UTIL_FILE_H
+#define SURICATA_UTIL_FILE_H
+
+// only bindgen this function as struct File_ defined here in C
+// uses some structrues from rust
+uint16_t SCFileFlowFlagsToFlags(const uint16_t flow_file_flags, uint8_t direction);
 
 #include "conf.h"
 #include "util-streaming-buffer.h"
+
+typedef struct File_ File;
+
+typedef struct FileContainer_ {
+    File *head;
+    File *tail;
+} FileContainer;
+
+/**
+ *  \brief Store a chunk of file data in the flow. The open "flowfile"
+ *         will be used.
+ *
+ *  \param ffc the container
+ *  \param data data chunk
+ *  \param data_len data chunk len
+ *
+ *  \retval 0 ok
+ *  \retval -1 error
+ */
+int FileAppendData(FileContainer *, const StreamingBufferConfig *sbcfg, const uint8_t *data,
+        uint32_t data_len);
+
+/**
+ *  \brief Open a new File
+ *
+ *  \param ffc flow container
+ *  \param sbcfg buffer config
+ *  \param name filename character array
+ *  \param name_len filename len
+ *  \param data initial data
+ *  \param data_len initial data len
+ *  \param flags open flags
+ *
+ *  \retval ff flowfile object
+ *
+ *  \note filename is not a string, so it's not nul terminated.
+ *
+ *  If flags contains the FILE_USE_DETECT bit, the pruning code will
+ *  consider not just the content_stored tracker, but also content_inspected.
+ *  It's the responsibility of the API user to make sure this tracker is
+ *  properly updated.
+ */
+int FileOpenFileWithId(FileContainer *, const StreamingBufferConfig *, uint32_t track_id,
+        const uint8_t *name, uint16_t name_len, const uint8_t *data, uint32_t data_len,
+        uint16_t flags);
+int FileAppendDataById(FileContainer *, const StreamingBufferConfig *sbcfg, uint32_t track_id,
+        const uint8_t *data, uint32_t data_len);
+int FileAppendGAPById(FileContainer *ffc, const StreamingBufferConfig *sbcfg, uint32_t track_id,
+        const uint8_t *data, uint32_t data_len);
+int FileCloseFileById(FileContainer *, const StreamingBufferConfig *sbcfg, uint32_t track_id,
+        const uint8_t *data, uint32_t data_len, uint16_t flags);
+
+void FileContainerRecycle(FileContainer *, const StreamingBufferConfig *cfg);
+
+#ifndef SURICATA_BINDGEN_H
+
 #include "flow.h"
 
 /* Hack: Pulling rust.h to get the SCSha256 causes all sorts of problems with
@@ -110,41 +170,10 @@ typedef struct File_ {
     uint32_t sid_max;
 } File;
 
-typedef struct FileContainer_ {
-    File *head;
-    File *tail;
-} FileContainer;
-
 FileContainer *FileContainerAlloc(void);
 void FileContainerFree(FileContainer *, const StreamingBufferConfig *cfg);
 
-void FileContainerRecycle(FileContainer *, const StreamingBufferConfig *cfg);
-
 void FileContainerAdd(FileContainer *, File *);
-
-/**
- *  \brief Open a new File
- *
- *  \param ffc flow container
- *  \param sbcfg buffer config
- *  \param name filename character array
- *  \param name_len filename len
- *  \param data initial data
- *  \param data_len initial data len
- *  \param flags open flags
- *
- *  \retval ff flowfile object
- *
- *  \note filename is not a string, so it's not nul terminated.
- *
- *  If flags contains the FILE_USE_DETECT bit, the pruning code will
- *  consider not just the content_stored tracker, but also content_inspected.
- *  It's the responsibility of the API user to make sure this tracker is
- *  properly updated.
- */
-int FileOpenFileWithId(FileContainer *, const StreamingBufferConfig *,
-        uint32_t track_id, const uint8_t *name, uint16_t name_len,
-        const uint8_t *data, uint32_t data_len, uint16_t flags);
 
 /**
  *  \brief Close a File
@@ -159,28 +188,8 @@ int FileOpenFileWithId(FileContainer *, const StreamingBufferConfig *,
  */
 int FileCloseFile(FileContainer *, const StreamingBufferConfig *sbcfg, const uint8_t *data,
         uint32_t data_len, uint16_t flags);
-int FileCloseFileById(FileContainer *, const StreamingBufferConfig *sbcfg, uint32_t track_id,
-        const uint8_t *data, uint32_t data_len, uint16_t flags);
 int FileCloseFilePtr(File *ff, const StreamingBufferConfig *sbcfg, const uint8_t *data,
         uint32_t data_len, uint16_t flags);
-
-/**
- *  \brief Store a chunk of file data in the flow. The open "flowfile"
- *         will be used.
- *
- *  \param ffc the container
- *  \param data data chunk
- *  \param data_len data chunk len
- *
- *  \retval 0 ok
- *  \retval -1 error
- */
-int FileAppendData(FileContainer *, const StreamingBufferConfig *sbcfg, const uint8_t *data,
-        uint32_t data_len);
-int FileAppendDataById(FileContainer *, const StreamingBufferConfig *sbcfg, uint32_t track_id,
-        const uint8_t *data, uint32_t data_len);
-int FileAppendGAPById(FileContainer *ffc, const StreamingBufferConfig *sbcfg, uint32_t track_id,
-        const uint8_t *data, uint32_t data_len);
 
 void FileSetInspectSizes(File *file, const uint32_t win, const uint32_t min);
 
@@ -232,7 +241,7 @@ int FileForceSha256(void);
 
 void FileUpdateFlowFileFlags(Flow *f, uint16_t set_file_flags, uint8_t direction);
 
-void FileForceHashParseCfg(ConfNode *);
+void FileForceHashParseCfg(SCConfNode *);
 
 void FileForceTrackingEnable(void);
 
@@ -241,7 +250,6 @@ void FileStoreFileById(FileContainer *fc, uint32_t);
 uint64_t FileDataSize(const File *file);
 uint64_t FileTrackedSize(const File *file);
 
-uint16_t FileFlowFlagsToFlags(const uint16_t flow_file_flags, uint8_t direction);
 uint16_t FileFlowToFlags(const Flow *flow, uint8_t direction);
 
 #ifdef DEBUG
@@ -252,4 +260,6 @@ void FilePrintFlags(const File *file);
 
 void FilesPrune(FileContainer *fc, const StreamingBufferConfig *sbcfg, const bool trunc);
 
-#endif /* __UTIL_FILE_H__ */
+#endif // SURICATA_BINDGEN_H
+
+#endif /* SURICATA_UTIL_FILE_H */

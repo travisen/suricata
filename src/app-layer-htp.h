@@ -30,40 +30,37 @@
  * This file provides a HTTP protocol support for the engine using HTP library.
  */
 
-#ifndef __APP_LAYER_HTP_H__
-#define __APP_LAYER_HTP_H__
+#ifndef SURICATA_APP_LAYER_HTP_H
+#define SURICATA_APP_LAYER_HTP_H
 
 #include "rust.h"
 #include "app-layer-frames.h"
 
-#include <htp/htp.h>
+#include "htp/htp_rs.h"
 
 /* default request body limit */
-#define HTP_CONFIG_DEFAULT_REQUEST_BODY_LIMIT           4096U
-#define HTP_CONFIG_DEFAULT_RESPONSE_BODY_LIMIT          4096U
-#define HTP_CONFIG_DEFAULT_REQUEST_INSPECT_MIN_SIZE     32768U
-#define HTP_CONFIG_DEFAULT_REQUEST_INSPECT_WINDOW       4096U
-#define HTP_CONFIG_DEFAULT_RESPONSE_INSPECT_MIN_SIZE    32768U
-#define HTP_CONFIG_DEFAULT_RESPONSE_INSPECT_WINDOW      4096U
-#define HTP_CONFIG_DEFAULT_FIELD_LIMIT_SOFT             9000U
-#define HTP_CONFIG_DEFAULT_FIELD_LIMIT_HARD             18000U
+#define HTP_CONFIG_DEFAULT_REQUEST_BODY_LIMIT        4096U
+#define HTP_CONFIG_DEFAULT_RESPONSE_BODY_LIMIT       4096U
+#define HTP_CONFIG_DEFAULT_REQUEST_INSPECT_MIN_SIZE  32768U
+#define HTP_CONFIG_DEFAULT_REQUEST_INSPECT_WINDOW    4096U
+#define HTP_CONFIG_DEFAULT_RESPONSE_INSPECT_MIN_SIZE 32768U
+#define HTP_CONFIG_DEFAULT_RESPONSE_INSPECT_WINDOW   4096U
+#define HTP_CONFIG_DEFAULT_FIELD_LIMIT               18000U
 
 #define HTP_CONFIG_DEFAULT_LZMA_LAYERS 0U
 /* default libhtp lzma limit, taken from libhtp. */
-#define HTP_CONFIG_DEFAULT_LZMA_MEMLIMIT                1048576U
-#define HTP_CONFIG_DEFAULT_COMPRESSION_BOMB_LIMIT       1048576U
+#define HTP_CONFIG_DEFAULT_LZMA_MEMLIMIT          1048576U
+#define HTP_CONFIG_DEFAULT_COMPRESSION_BOMB_LIMIT 1048576U
 // 100000 usec is 0.1 sec
 #define HTP_CONFIG_DEFAULT_COMPRESSION_TIME_LIMIT 100000
 
-#define HTP_CONFIG_DEFAULT_RANDOMIZE                    1
-#define HTP_CONFIG_DEFAULT_RANDOMIZE_RANGE              10
-
-/** a boundary should be smaller in size */
-#define HTP_BOUNDARY_MAX                            200U
+#define HTP_CONFIG_DEFAULT_RANDOMIZE       1
+#define HTP_CONFIG_DEFAULT_RANDOMIZE_RANGE 10
 
 // 0x0001 not used
-#define HTP_FLAG_STATE_CLOSED_TS    0x0002    /**< Flag to indicate that HTTP
-                                             connection is closed */
+#define HTP_FLAG_STATE_CLOSED_TS                                                                   \
+    0x0002 /**< Flag to indicate that HTTP                                                         \
+          connection is closed */
 #define HTP_FLAG_STATE_CLOSED_TC                                                                   \
     0x0004 /**< Flag to indicate that HTTP                                                         \
           connection is closed */
@@ -76,67 +73,15 @@ enum {
 };
 
 enum {
-    /* libhtp errors/warnings */
-    HTTP_DECODER_EVENT_UNKNOWN_ERROR,
-    HTTP_DECODER_EVENT_GZIP_DECOMPRESSION_FAILED,
-    HTTP_DECODER_EVENT_REQUEST_FIELD_MISSING_COLON,
-    HTTP_DECODER_EVENT_RESPONSE_FIELD_MISSING_COLON,
-    HTTP_DECODER_EVENT_INVALID_REQUEST_CHUNK_LEN,
-    HTTP_DECODER_EVENT_INVALID_RESPONSE_CHUNK_LEN,
-    HTTP_DECODER_EVENT_INVALID_TRANSFER_ENCODING_VALUE_IN_REQUEST,
-    HTTP_DECODER_EVENT_INVALID_TRANSFER_ENCODING_VALUE_IN_RESPONSE,
-    HTTP_DECODER_EVENT_INVALID_CONTENT_LENGTH_FIELD_IN_REQUEST,
-    HTTP_DECODER_EVENT_INVALID_CONTENT_LENGTH_FIELD_IN_RESPONSE,
-    HTTP_DECODER_EVENT_DUPLICATE_CONTENT_LENGTH_FIELD_IN_REQUEST,
-    HTTP_DECODER_EVENT_DUPLICATE_CONTENT_LENGTH_FIELD_IN_RESPONSE,
-    HTTP_DECODER_EVENT_100_CONTINUE_ALREADY_SEEN,
-    HTTP_DECODER_EVENT_UNABLE_TO_MATCH_RESPONSE_TO_REQUEST,
-    HTTP_DECODER_EVENT_INVALID_SERVER_PORT_IN_REQUEST,
-    HTTP_DECODER_EVENT_INVALID_AUTHORITY_PORT,
-    HTTP_DECODER_EVENT_REQUEST_HEADER_INVALID,
-    HTTP_DECODER_EVENT_RESPONSE_HEADER_INVALID,
-    HTTP_DECODER_EVENT_MISSING_HOST_HEADER,
-    HTTP_DECODER_EVENT_HOST_HEADER_AMBIGUOUS,
-    HTTP_DECODER_EVENT_INVALID_REQUEST_FIELD_FOLDING,
-    HTTP_DECODER_EVENT_INVALID_RESPONSE_FIELD_FOLDING,
-    HTTP_DECODER_EVENT_REQUEST_FIELD_TOO_LONG,
-    HTTP_DECODER_EVENT_RESPONSE_FIELD_TOO_LONG,
-    HTTP_DECODER_EVENT_FILE_NAME_TOO_LONG,
-    HTTP_DECODER_EVENT_REQUEST_SERVER_PORT_TCP_PORT_MISMATCH,
-    HTTP_DECODER_EVENT_URI_HOST_INVALID,
-    HTTP_DECODER_EVENT_HEADER_HOST_INVALID,
-    HTTP_DECODER_EVENT_METHOD_DELIM_NON_COMPLIANT,
-    HTTP_DECODER_EVENT_URI_DELIM_NON_COMPLIANT,
-    HTTP_DECODER_EVENT_REQUEST_LINE_LEADING_WHITESPACE,
-    HTTP_DECODER_EVENT_TOO_MANY_ENCODING_LAYERS,
-    HTTP_DECODER_EVENT_ABNORMAL_CE_HEADER,
-    HTTP_DECODER_EVENT_AUTH_UNRECOGNIZED,
-    HTTP_DECODER_EVENT_REQUEST_HEADER_REPETITION,
-    HTTP_DECODER_EVENT_RESPONSE_HEADER_REPETITION,
-    HTTP_DECODER_EVENT_RESPONSE_MULTIPART_BYTERANGES,
-    HTTP_DECODER_EVENT_RESPONSE_ABNORMAL_TRANSFER_ENCODING,
-    HTTP_DECODER_EVENT_RESPONSE_CHUNKED_OLD_PROTO,
-    HTTP_DECODER_EVENT_RESPONSE_INVALID_PROTOCOL,
-    HTTP_DECODER_EVENT_RESPONSE_INVALID_STATUS,
-    HTTP_DECODER_EVENT_REQUEST_LINE_INCOMPLETE,
-    HTTP_DECODER_EVENT_DOUBLE_ENCODED_URI,
-    HTTP_DECODER_EVENT_REQUEST_LINE_INVALID,
-    HTTP_DECODER_EVENT_REQUEST_BODY_UNEXPECTED,
-
-    HTTP_DECODER_EVENT_LZMA_MEMLIMIT_REACHED,
-    HTTP_DECODER_EVENT_COMPRESSION_BOMB,
-
-    HTTP_DECODER_EVENT_RANGE_INVALID,
-    HTTP_DECODER_EVENT_REQUEST_CHUNK_EXTENSION,
-
     /* suricata errors/warnings */
-    HTTP_DECODER_EVENT_MULTIPART_GENERIC_ERROR,
-    HTTP_DECODER_EVENT_MULTIPART_NO_FILEDATA,
-    HTTP_DECODER_EVENT_MULTIPART_INVALID_HEADER,
+    HTTP_DECODER_EVENT_MULTIPART_GENERIC_ERROR = 200,
+    HTTP_DECODER_EVENT_MULTIPART_NO_FILEDATA = 201,
+    HTTP_DECODER_EVENT_MULTIPART_INVALID_HEADER = 202,
 
-    HTTP_DECODER_EVENT_TOO_MANY_WARNINGS,
-
-    HTTP_DECODER_EVENT_FAILED_PROTOCOL_CHANGE,
+    HTTP_DECODER_EVENT_TOO_MANY_WARNINGS = 203,
+    HTTP_DECODER_EVENT_RANGE_INVALID = 204,
+    HTTP_DECODER_EVENT_FILE_NAME_TOO_LONG = 205,
+    HTTP_DECODER_EVENT_FAILED_PROTOCOL_CHANGE = 206,
 };
 
 typedef enum HtpSwfCompressType_ {
@@ -211,8 +156,6 @@ typedef struct HtpTxUserData_ {
     uint8_t request_has_trailers;
     uint8_t response_has_trailers;
 
-    uint8_t boundary_len;
-
     uint8_t tsflags;
     uint8_t tcflags;
 
@@ -221,17 +164,12 @@ typedef struct HtpTxUserData_ {
     HtpBody request_body;
     HtpBody response_body;
 
-    bstr *request_uri_normalized;
-
     uint8_t *request_headers_raw;
     uint8_t *response_headers_raw;
     uint32_t request_headers_raw_len;
     uint32_t response_headers_raw_len;
 
-    /** Holds the boundary identification string if any (used on
-     *  multipart/form-data only)
-     */
-    uint8_t *boundary;
+    MimeStateHTTP *mime_state;
 
     HttpRangeContainerBlock *file_range; /**< used to assign track ids to range file */
 
@@ -247,18 +185,11 @@ typedef struct HtpState_ {
     htp_conn_t *conn;
     Flow *f;                /**< Needed to retrieve the original flow when using HTPLib callbacks */
     uint64_t transaction_cnt;
-    // tx_freed is the number of already freed transactions
-    // This is needed as libhtp only keeps the live transactions :
-    // To get the total number of transactions, we need to add
-    // the number of transactions tracked by libhtp to this number.
-    // It is also needed as an offset to translate between suricata
-    // transaction id to libhtp offset in its list/array
-    uint64_t tx_freed;
     const struct HTPCfgRec_ *cfg;
     uint16_t flags;
     uint16_t events;
-    uint16_t htp_messages_offset; /**< offset into conn->messages list */
-    uint32_t file_track_id;       /**< used to assign file track ids to files */
+    uint16_t htp_messages_count; /**< Number of already logged messages */
+    uint32_t file_track_id;      /**< used to assign file track ids to files */
     uint64_t last_request_data_stamp;
     uint64_t last_response_data_stamp;
     StreamSlice *slice;
@@ -268,10 +199,7 @@ typedef struct HtpState_ {
 } HtpState;
 
 /** part of the engine needs the request body (e.g. http_client_body keyword) */
-#define HTP_REQUIRE_REQUEST_BODY        (1 << 0)
-/** part of the engine needs the request body multipart header (e.g. filename
- *  and / or fileext keywords) */
-#define HTP_REQUIRE_REQUEST_MULTIPART   (1 << 1)
+#define HTP_REQUIRE_REQUEST_BODY (1 << 0)
 /** part of the engine needs the request file (e.g. log-file module) */
 #define HTP_REQUIRE_REQUEST_FILE        (1 << 2)
 /** part of the engine needs the request body (e.g. file_data keyword) */
@@ -297,7 +225,7 @@ void HtpConfigRestoreBackup(void);
 
 void *HtpGetTxForH2(void *);
 
-#endif	/* __APP_LAYER_HTP_H__ */
+#endif /* SURICATA_APP_LAYER_HTP_H */
 
 /**
  * @}

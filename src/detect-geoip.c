@@ -100,7 +100,7 @@ static bool InitGeolocationEngine(DetectGeoipData *geoipdata)
     const char *filename = NULL;
 
     /* Get location and name of GeoIP2 database from YAML conf */
-    (void)ConfGet("geoip-database", &filename);
+    (void)SCConfGet("geoip-database", &filename);
 
     if (filename == NULL) {
         SCLogWarning("Unable to locate a GeoIP2"
@@ -250,11 +250,9 @@ static int DetectGeoipMatch(DetectEngineThreadCtx *det_ctx,
     const DetectGeoipData *geoipdata = (const DetectGeoipData *)ctx;
     int matches = 0;
 
-    if (PKT_IS_PSEUDOPKT(p))
-        return 0;
+    DEBUG_VALIDATE_BUG_ON(PKT_IS_PSEUDOPKT(p));
 
-    if (PKT_IS_IPV4(p))
-    {
+    if (PacketIsIPv4(p)) {
         if (geoipdata->flags & ( GEOIP_MATCH_SRC_FLAG | GEOIP_MATCH_BOTH_FLAG ))
         {
             if (CheckGeoMatchIPv4(geoipdata, GET_IPV4_SRC_ADDR_U32(p)))
@@ -381,7 +379,7 @@ static DetectGeoipData *DetectGeoipDataParse (DetectEngineCtx *de_ctx, const cha
     /* init geo engine, but not when running as unittests */
     if (!(RunmodeIsUnittests())) {
         /* Initialize the geolocation engine */
-        if (InitGeolocationEngine(geoipdata) == false)
+        if (!InitGeolocationEngine(geoipdata))
             goto error;
     }
 
@@ -414,7 +412,7 @@ static int DetectGeoipSetup(DetectEngineCtx *de_ctx, Signature *s, const char *o
 
     /* Get this into a SigMatch and put it in the Signature. */
 
-    if (SigMatchAppendSMToList(
+    if (SCSigMatchAppendSMToList(
                 de_ctx, s, DETECT_GEOIP, (SigMatchCtx *)geoipdata, DETECT_SM_LIST_MATCH) == NULL) {
         goto error;
     }

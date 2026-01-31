@@ -21,10 +21,11 @@
  * \author Eric Leblond <eric@regit.org>
  */
 
-#ifndef __UTIL_EBPF_H__
-#define __UTIL_EBPF_H__
+#ifndef SURICATA_UTIL_EBPF_H
+#define SURICATA_UTIL_EBPF_H
 
 #include "flow-bypass.h"
+#include "conf.h"
 
 #ifdef HAVE_PACKET_EBPF
 
@@ -85,7 +86,7 @@ int EBPFCheckBypassedFlowCreate(ThreadVars *th_v, struct timespec *curtime, void
 
 void EBPFRegisterExtension(void);
 
-void EBPFBuildCPUSet(ConfNode *node, char *iface);
+void EBPFBuildCPUSet(SCConfNode *node, char *iface);
 
 int EBPFSetPeerIface(const char *iface, const char *out_iface);
 

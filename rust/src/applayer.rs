@@ -18,16 +18,34 @@
 //! Parser registration functions and common interface module.
 
 use std;
-use crate::core::{self,DetectEngineState,Flow,AppLayerEventType,AppProto,Direction};
+use crate::core::{self,AppLayerEventType, STREAM_TOSERVER};
+use crate::direction::Direction;
 use crate::filecontainer::FileContainer;
+use crate::flow::Flow;
 use std::os::raw::{c_void,c_char,c_int};
-use crate::core::SC;
 use std::ffi::CStr;
 use crate::core::StreamingBufferConfig;
 
 // Make the AppLayerEvent derive macro available to users importing
 // AppLayerEvent from this module.
 pub use suricata_derive::AppLayerEvent;
+use suricata_sys::sys::{
+    AppLayerDecoderEvents, AppLayerGetTxIterState, AppLayerParserState, AppProto,
+    DetectEngineState, GenericVar,
+};
+#[cfg(not(test))]
+use suricata_sys::sys::{
+    SCAppLayerDecoderEventsFreeEvents, SCAppLayerDecoderEventsSetEventRaw, SCDetectEngineStateFree,
+    SCGenericVarFree,
+};
+
+/// Cast pointer to a variable, as a mutable reference to an object
+///
+/// UNSAFE !
+#[macro_export]
+macro_rules! cast_pointer {
+    ($ptr:ident, $ty:ty) => ( &mut *($ptr as *mut $ty) );
+}
 
 #[repr(C)]
 pub struct StreamSlice {
@@ -58,6 +76,9 @@ impl StreamSlice {
         self.input_len
     }
     pub fn as_slice(&self) -> &[u8] {
+        if self.input.is_null() && self.input_len == 0 {
+            return &[];
+        }
         unsafe { std::slice::from_raw_parts(self.input, self.input_len as usize) }
     }
     pub fn is_empty(&self) -> bool {
@@ -81,22 +102,22 @@ pub struct AppLayerTxConfig {
     log_flags: u8,
 }
 
-impl AppLayerTxConfig {
-    pub fn new() -> Self {
-        Self {
-            log_flags: 0,
-        }
-    }
-}
-
 #[repr(C)]
 #[derive(Debug, PartialEq, Eq)]
 pub struct AppLayerTxData {
     /// config: log flags
     pub config: AppLayerTxConfig,
 
+    /// The tx has been updated and needs to be processed : detection, logging, cleaning
+    /// It can then be skipped until new data arrives.
+    /// There is a boolean for both directions : to server and to client
+    pub updated_tc: bool,
+    pub updated_ts: bool,
+
+    flags: u8,
+
     /// logger flags for tx logging api
-    logged: LoggerFlags,
+    logged: u32,
 
     /// track file open/logs so we can know how long to keep the tx
     pub files_opened: u32,
@@ -111,13 +132,22 @@ pub struct AppLayerTxData {
     /// STREAM_TOCLIENT: file tx , files only in toclient dir
     /// STREAM_TOSERVER|STREAM_TOCLIENT: files possible in both dirs
     pub file_tx: u8,
+    /// Number of times this tx data has already been logged for signatures
+    /// not using application layer keywords
+    pub guessed_applayer_logged: u8,
 
-    /// detection engine flags for use by detection engine
-    detect_flags_ts: u64,
-    detect_flags_tc: u64,
+    /// detection engine progress tracking for use by detection engine
+    /// Reflects the "progress" of prefilter engines into this TX, where
+    /// the value is offset by 1. So if for progress state 0 the engines
+    /// are done, the value here will be 1. So a value of 0 means, no
+    /// progress tracked yet.
+    ///
+    detect_progress_ts: u8,
+    detect_progress_tc: u8,
 
     de_state: *mut DetectEngineState,
-    pub events: *mut core::AppLayerDecoderEvents,
+    pub events: *mut AppLayerDecoderEvents,
+    txbits: *mut GenericVar,
 }
 
 impl Default for AppLayerTxData {
@@ -128,53 +158,86 @@ impl Default for AppLayerTxData {
 
 impl Drop for AppLayerTxData {
     fn drop(&mut self) {
-        if !self.de_state.is_null() {
-            core::sc_detect_engine_state_free(self.de_state);
-        }
-        if !self.events.is_null() {
-            core::sc_app_layer_decoder_events_free_events(&mut self.events);
-        }
+        self.cleanup();
     }
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn SCAppLayerTxDataCleanup(txd: *mut AppLayerTxData) {
+    let txd = cast_pointer!(txd, AppLayerTxData);
+    txd.cleanup()
+}
+
 impl AppLayerTxData {
+    #[cfg(not(test))]
+    pub fn cleanup(&mut self) {
+        if !self.de_state.is_null() {
+            unsafe {
+                SCDetectEngineStateFree(self.de_state);
+            }
+        }
+        if !self.events.is_null() {
+            unsafe {
+                SCAppLayerDecoderEventsFreeEvents(&mut self.events);
+            }
+        }
+        if !self.txbits.is_null() {
+            unsafe {
+                SCGenericVarFree(self.txbits);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn cleanup(&mut self) {}
+
     /// Create new AppLayerTxData for a transaction that covers both
     /// directions.
     pub fn new() -> Self {
         Self {
-            config: AppLayerTxConfig::new(),
-            logged: LoggerFlags::new(),
+            config: AppLayerTxConfig::default(),
+            logged: 0,
             files_opened: 0,
             files_logged: 0,
             files_stored: 0,
             file_flags: 0,
             file_tx: 0,
-            detect_flags_ts: 0,
-            detect_flags_tc: 0,
+            guessed_applayer_logged: 0,
+            updated_tc: true,
+            updated_ts: true,
+            flags: 0,
+            detect_progress_ts: 0,
+            detect_progress_tc: 0,
             de_state: std::ptr::null_mut(),
             events: std::ptr::null_mut(),
+            txbits: std::ptr::null_mut(),
         }
     }
 
     /// Create new AppLayerTxData for a transaction in a single
     /// direction.
     pub fn for_direction(direction: Direction) -> Self {
-        let (detect_flags_ts, detect_flags_tc) = match direction {
-            Direction::ToServer => (0, APP_LAYER_TX_SKIP_INSPECT_FLAG),
-            Direction::ToClient => (APP_LAYER_TX_SKIP_INSPECT_FLAG, 0),
+        let (flags, updated_ts, updated_tc) = match direction {
+            Direction::ToServer => (APP_LAYER_TX_SKIP_INSPECT_TC, true, false),
+            Direction::ToClient => (APP_LAYER_TX_SKIP_INSPECT_TS, false, true),
         };
         Self {
-            config: AppLayerTxConfig::new(),
-            logged: LoggerFlags::new(),
+            config: AppLayerTxConfig::default(),
+            logged: 0,
             files_opened: 0,
             files_logged: 0,
             files_stored: 0,
             file_flags: 0,
             file_tx: 0,
-            detect_flags_ts,
-            detect_flags_tc,
+            guessed_applayer_logged: 0,
+            updated_tc,
+            updated_ts,
+            detect_progress_ts: 0,
+            detect_progress_tc: 0,
+            flags,
             de_state: std::ptr::null_mut(),
             events: std::ptr::null_mut(),
+            txbits: std::ptr::null_mut(),
         }
     }
 
@@ -186,23 +249,49 @@ impl AppLayerTxData {
         self.files_opened += 1;
     }
 
-    pub fn set_event(&mut self, event: u8) {
-        core::sc_app_layer_decoder_events_set_event_raw(&mut self.events, event);
+    pub fn set_event(&mut self, _event: u8) {
+        #[cfg(not(test))]
+        unsafe {
+            SCAppLayerDecoderEventsSetEventRaw(&mut self.events, _event);
+        }
     }
 
     pub fn update_file_flags(&mut self, state_flags: u16) {
         if (self.file_flags & state_flags) != state_flags {
             SCLogDebug!("updating tx file_flags {:04x} with state flags {:04x}", self.file_flags, state_flags);
-            self.file_flags |= state_flags;
+            let mut nf = state_flags;
+            // With keyword filestore:both,flow :
+            // There may be some opened unclosed file in one direction without filestore
+            // As such it has tx file_flags had FLOWFILE_NO_STORE_TS or TC
+            // But a new file in the other direction may trigger filestore:both,flow
+            // And thus set state_flags FLOWFILE_STORE_TS
+            // If the file was opened without storing it, do not try to store just the end of it
+            if (self.file_flags & FLOWFILE_NO_STORE_TS) != 0 && (state_flags & FLOWFILE_STORE_TS) != 0 {
+                nf &= !FLOWFILE_STORE_TS;
+            }
+            if (self.file_flags & FLOWFILE_NO_STORE_TC) != 0 && (state_flags & FLOWFILE_STORE_TC) != 0 {
+                nf &= !FLOWFILE_STORE_TC;
+            }
+            self.file_flags |= nf;
         }
     }
+}
+
+// need to keep in sync with C flow.h
+pub const FLOWFILE_NO_STORE_TS: u16 = BIT_U16!(2);
+pub const FLOWFILE_NO_STORE_TC: u16 = BIT_U16!(3);
+pub const FLOWFILE_STORE_TS: u16 = BIT_U16!(12);
+pub const FLOWFILE_STORE_TC: u16 = BIT_U16!(13);
+
+#[no_mangle]
+pub unsafe extern "C" fn SCTxDataUpdateFileFlags(txd: &mut AppLayerTxData, state_flags: u16) {
+    txd.update_file_flags(state_flags);
 }
 
 #[macro_export]
 macro_rules!export_tx_data_get {
     ($name:ident, $type:ty) => {
-        #[no_mangle]
-        pub unsafe extern "C" fn $name(tx: *mut std::os::raw::c_void)
+        unsafe extern "C" fn $name(tx: *mut std::os::raw::c_void)
             -> *mut $crate::applayer::AppLayerTxData
         {
             let tx = &mut *(tx as *mut $type);
@@ -228,8 +317,7 @@ impl AppLayerStateData {
 #[macro_export]
 macro_rules!export_state_data_get {
     ($name:ident, $type:ty) => {
-        #[no_mangle]
-        pub unsafe extern "C" fn $name(state: *mut std::os::raw::c_void)
+        unsafe extern "C" fn $name(state: *mut std::os::raw::c_void)
             -> *mut $crate::applayer::AppLayerStateData
         {
             let state = &mut *(state as *mut $type);
@@ -270,6 +358,14 @@ impl AppLayerResult {
             consumed,
             needed,
         };
+    }
+
+    pub fn is_ok(self) -> bool {
+        self.status == 0
+    }
+
+    pub fn is_err(self) -> bool {
+        self.status == -1
     }
 
     pub fn is_incomplete(self) -> bool {
@@ -367,12 +463,11 @@ pub struct RustParser {
 
     pub flags: u32,
 
-    /// Function to handle the end of data coming on one of the sides
-    /// due to the stream reaching its 'depth' limit.
-    pub truncate: Option<TruncateFn>,
-
     pub get_frame_id_by_name: Option<GetFrameIdByName>,
     pub get_frame_name_by_id: Option<GetFrameNameById>,
+
+    pub get_state_id_by_name: Option<GetStateIdByName>,
+    pub get_state_name_by_id: Option<GetStateNameById>,
 }
 
 /// Create a slice, given a buffer and a length
@@ -381,14 +476,6 @@ pub struct RustParser {
 #[macro_export]
 macro_rules! build_slice {
     ($buf:ident, $len:expr) => ( std::slice::from_raw_parts($buf, $len) );
-}
-
-/// Cast pointer to a variable, as a mutable reference to an object
-///
-/// UNSAFE !
-#[macro_export]
-macro_rules! cast_pointer {
-    ($ptr:ident, $ty:ty) => ( &mut *($ptr as *mut $ty) );
 }
 
 /// helper for the GetTxFilesFn. Not meant to be embedded as the config
@@ -405,68 +492,59 @@ impl AppLayerGetFileState {
     }
 }
 
-pub type ParseFn      = unsafe extern "C" fn (flow: *const Flow,
+pub type ParseFn      = unsafe extern "C" fn (flow: *mut Flow,
                                        state: *mut c_void,
-                                       pstate: *mut c_void,
+                                       pstate: *mut AppLayerParserState,
                                        stream_slice: StreamSlice,
-                                       data: *const c_void) -> AppLayerResult;
+                                       data: *mut c_void) -> AppLayerResult;
 pub type ProbeFn      = unsafe extern "C" fn (flow: *const Flow, flags: u8, input:*const u8, input_len: u32, rdir: *mut u8) -> AppProto;
-pub type StateAllocFn = extern "C" fn (*mut c_void, AppProto) -> *mut c_void;
+pub type StateAllocFn = unsafe extern "C" fn (*mut c_void, AppProto) -> *mut c_void;
 pub type StateFreeFn  = unsafe extern "C" fn (*mut c_void);
 pub type StateTxFreeFn  = unsafe extern "C" fn (*mut c_void, u64);
 pub type StateGetTxFn            = unsafe extern "C" fn (*mut c_void, u64) -> *mut c_void;
 pub type StateGetTxCntFn         = unsafe extern "C" fn (*mut c_void) -> u64;
 pub type StateGetProgressFn = unsafe extern "C" fn (*mut c_void, u8) -> c_int;
-pub type GetEventInfoFn     = unsafe extern "C" fn (*const c_char, *mut c_int, *mut AppLayerEventType) -> c_int;
-pub type GetEventInfoByIdFn = unsafe extern "C" fn (c_int, *mut *const c_char, *mut AppLayerEventType) -> i8;
-pub type LocalStorageNewFn  = extern "C" fn () -> *mut c_void;
-pub type LocalStorageFreeFn = extern "C" fn (*mut c_void);
-pub type GetTxFilesFn       = unsafe extern "C" fn (*mut c_void, *mut c_void, u8) -> AppLayerGetFileState;
+pub type GetEventInfoFn     = unsafe extern "C" fn (*const c_char, event_id: *mut u8, *mut AppLayerEventType) -> c_int;
+pub type GetEventInfoByIdFn = unsafe extern "C" fn (event_id: u8, *mut *const c_char, *mut AppLayerEventType) -> c_int;
+pub type LocalStorageNewFn  = unsafe extern "C" fn () -> *mut c_void;
+pub type LocalStorageFreeFn = unsafe extern "C" fn (*mut c_void);
+pub type GetTxFilesFn       = unsafe extern "C" fn (*mut c_void, u8) -> AppLayerGetFileState;
 pub type GetTxIteratorFn    = unsafe extern "C" fn (ipproto: u8, alproto: AppProto,
                                              state: *mut c_void,
                                              min_tx_id: u64,
                                              max_tx_id: u64,
-                                             istate: &mut u64)
+                                             istate: *mut AppLayerGetTxIterState)
                                              -> AppLayerGetTxIterTuple;
 pub type GetTxDataFn = unsafe extern "C" fn(*mut c_void) -> *mut AppLayerTxData;
 pub type GetStateDataFn = unsafe extern "C" fn(*mut c_void) -> *mut AppLayerStateData;
 pub type ApplyTxConfigFn = unsafe extern "C" fn (*mut c_void, *mut c_void, c_int, AppLayerTxConfig);
-pub type TruncateFn = unsafe extern "C" fn (*mut c_void, u8);
 pub type GetFrameIdByName = unsafe extern "C" fn(*const c_char) -> c_int;
 pub type GetFrameNameById = unsafe extern "C" fn(u8) -> *const c_char;
-
+pub type GetStateIdByName = unsafe extern "C" fn(*const c_char, u8) -> c_int;
+pub type GetStateNameById = unsafe extern "C" fn(c_int, u8) -> *const c_char;
 
 // Defined in app-layer-register.h
-extern {
-    pub fn AppLayerRegisterProtocolDetection(parser: *const RustParser, enable_default: c_int) -> AppProto;
-    pub fn AppLayerRegisterParserAlias(parser_name: *const c_char, alias_name: *const c_char);
+#[allow(unused_doc_comments)]
+/// cbindgen:ignore
+extern "C" {
+    pub fn AppLayerRegisterParser(parser: *const RustParser, alproto: AppProto) -> c_int;
 }
 
-#[allow(non_snake_case)]
-pub unsafe fn AppLayerRegisterParser(parser: *const RustParser, alproto: AppProto) -> c_int {
-    (SC.unwrap().AppLayerRegisterParser)(parser, alproto)
+use suricata_sys::sys::{AppLayerProtocolDetect, SCAppLayerRegisterProtocolDetection};
+
+pub fn applayer_register_protocol_detection(parser: &RustParser, enable_default: c_int) -> AppProto {
+    let det = AppLayerProtocolDetect{
+        name: parser.name,
+        default_port: parser.default_port,
+        ip_proto: parser.ipproto,
+        ProbeTS: parser.probe_ts,
+        ProbeTC: parser.probe_tc,
+        min_depth: parser.min_depth,
+        max_depth: parser.max_depth,
+    };
+    unsafe {SCAppLayerRegisterProtocolDetection(&det, enable_default) }
 }
 
-// Defined in app-layer-detect-proto.h
-extern {
-    pub fn AppLayerProtoDetectPPRegister(ipproto: u8, portstr: *const c_char, alproto: AppProto,
-                                         min_depth: u16, max_depth: u16, dir: u8,
-                                         pparser1: ProbeFn, pparser2: ProbeFn);
-    pub fn AppLayerProtoDetectPPParseConfPorts(ipproto_name: *const c_char, ipproto: u8,
-                                               alproto_name: *const c_char, alproto: AppProto,
-                                               min_depth: u16, max_depth: u16,
-                                               pparser_ts: ProbeFn, pparser_tc: ProbeFn) -> i32;
-    pub fn AppLayerProtoDetectPMRegisterPatternCS(ipproto: u8, alproto: AppProto,
-                                                  pattern: *const c_char, depth: u16,
-                                                  offset: u16, direction: u8) -> c_int;
-    pub fn AppLayerProtoDetectPMRegisterPatternCSwPP(ipproto: u8, alproto: AppProto,
-                                                     pattern: *const c_char, depth: u16,
-                                                     offset: u16, direction: u8, ppfn: ProbeFn,
-                                                     pp_min_depth: u16, pp_max_depth: u16) -> c_int;
-    pub fn AppLayerProtoDetectConfProtoDetectionEnabled(ipproto: *const c_char, proto: *const c_char) -> c_int;
-    pub fn AppLayerProtoDetectConfProtoDetectionEnabledDefault(ipproto: *const c_char, proto: *const c_char, default: bool) -> c_int;
-    pub fn AppLayerRequestProtocolTLSUpgrade(flow: *const Flow) -> bool;
-}
 
 // Defined in app-layer-parser.h
 pub const APP_LAYER_PARSER_NO_INSPECTION : u16 = BIT_U16!(1);
@@ -475,19 +553,14 @@ pub const APP_LAYER_PARSER_NO_INSPECTION_PAYLOAD : u16 = BIT_U16!(3);
 pub const APP_LAYER_PARSER_BYPASS_READY : u16 = BIT_U16!(4);
 pub const APP_LAYER_PARSER_EOF_TS : u16 = BIT_U16!(5);
 pub const APP_LAYER_PARSER_EOF_TC : u16 = BIT_U16!(6);
-pub const APP_LAYER_PARSER_TRUNC_TS : u16 = BIT_U16!(7);
-pub const APP_LAYER_PARSER_TRUNC_TC : u16 = BIT_U16!(8);
 
 pub const APP_LAYER_PARSER_OPT_ACCEPT_GAPS: u32 = BIT_U32!(0);
 
-pub const APP_LAYER_TX_SKIP_INSPECT_FLAG: u64 = BIT_U64!(62);
-
-extern {
-    pub fn AppLayerParserStateSetFlag(state: *mut c_void, flag: u16);
-    pub fn AppLayerParserStateIssetFlag(state: *mut c_void, flag: u16) -> u16;
-    pub fn AppLayerParserSetStreamDepth(ipproto: u8, alproto: AppProto, stream_depth: u32);
-    pub fn AppLayerParserConfParserEnabled(ipproto: *const c_char, proto: *const c_char) -> c_int;
-}
+pub const APP_LAYER_TX_SKIP_INSPECT_TS: u8 = BIT_U8!(0);
+pub const APP_LAYER_TX_SKIP_INSPECT_TC: u8 = BIT_U8!(1);
+pub const _APP_LAYER_TX_INSPECTED_TS: u8 = BIT_U8!(2);
+pub const _APP_LAYER_TX_INSPECTED_TC: u8 = BIT_U8!(3);
+pub const APP_LAYER_TX_ACCEPT: u8 = BIT_U8!(4);
 
 #[repr(C)]
 pub struct AppLayerGetTxIterTuple {
@@ -509,34 +582,11 @@ impl AppLayerGetTxIterTuple {
     }
 }
 
-/// LoggerFlags tracks which loggers have already been executed.
-#[repr(C)]
-#[derive(Default, Debug,PartialEq, Eq)]
-pub struct LoggerFlags {
-    flags: u32,
-}
-
-impl LoggerFlags {
-
-    pub fn new() -> Self {
-        Default::default()
-    }
-
-    pub fn get(&self) -> u32 {
-        self.flags
-    }
-
-    pub fn set(&mut self, bits: u32) {
-        self.flags = bits;
-    }
-
-}
-
 /// AppLayerEvent trait that will be implemented on enums that
 /// derive AppLayerEvent.
 pub trait AppLayerEvent {
     /// Return the enum variant of the given ID.
-    fn from_id(id: i32) -> Option<Self> where Self: std::marker::Sized;
+    fn from_id(id: u8) -> Option<Self> where Self: std::marker::Sized;
 
     /// Convert the enum variant to a C-style string (suffixed with \0).
     fn to_cstring(&self) -> &str;
@@ -545,19 +595,19 @@ pub trait AppLayerEvent {
     fn from_string(s: &str) -> Option<Self> where Self: std::marker::Sized;
 
     /// Return the ID value of the enum variant.
-    fn as_i32(&self) -> i32;
+    fn as_u8(&self) -> u8;
 
     unsafe extern "C" fn get_event_info(
         event_name: *const std::os::raw::c_char,
-        event_id: *mut std::os::raw::c_int,
+        event_id: *mut u8,
         event_type: *mut core::AppLayerEventType,
     ) -> std::os::raw::c_int;
 
     unsafe extern "C" fn get_event_info_by_id(
-        event_id: std::os::raw::c_int,
+        event_id: u8,
         event_name: *mut *const std::os::raw::c_char,
         event_type: *mut core::AppLayerEventType,
-    ) -> i8;
+    ) -> std::os::raw::c_int;
 }
 
 /// Generic `get_info_info` implementation for enums implementing
@@ -578,7 +628,7 @@ pub trait AppLayerEvent {
 #[inline(always)]
 pub unsafe fn get_event_info<T: AppLayerEvent>(
     event_name: *const std::os::raw::c_char,
-    event_id: *mut std::os::raw::c_int,
+    event_id: *mut u8,
     event_type: *mut core::AppLayerEventType,
 ) -> std::os::raw::c_int {
     if event_name.is_null() {
@@ -586,11 +636,13 @@ pub unsafe fn get_event_info<T: AppLayerEvent>(
     }
 
     let event = match CStr::from_ptr(event_name).to_str().map(T::from_string) {
-        Ok(Some(event)) => event.as_i32(),
-        _ => -1,
+        Ok(Some(event)) => event.as_u8(),
+        _ => {
+            return -1;
+        }
     };
     *event_type = core::AppLayerEventType::APP_LAYER_EVENT_TYPE_TRANSACTION;
-    *event_id = event as std::os::raw::c_int;
+    *event_id = event;
     return 0;
 }
 
@@ -598,10 +650,10 @@ pub unsafe fn get_event_info<T: AppLayerEvent>(
 /// AppLayerEvent.
 #[inline(always)]
 pub unsafe fn get_event_info_by_id<T: AppLayerEvent>(
-    event_id: std::os::raw::c_int,
+    event_id: u8,
     event_name: *mut *const std::os::raw::c_char,
     event_type: *mut core::AppLayerEventType,
-) -> i8 {
+) -> std::os::raw::c_int {
     if let Some(e) = T::from_id(event_id) {
         *event_name = e.to_cstring().as_ptr() as *const std::os::raw::c_char;
         *event_type = core::AppLayerEventType::APP_LAYER_EVENT_TYPE_TRANSACTION;
@@ -647,10 +699,10 @@ pub trait State<Tx: Transaction> {
 
 pub unsafe extern "C" fn state_get_tx_iterator<S: State<Tx>, Tx: Transaction>(
     _ipproto: u8, _alproto: AppProto, state: *mut std::os::raw::c_void, min_tx_id: u64,
-    _max_tx_id: u64, istate: &mut u64,
+    _max_tx_id: u64, istate: *mut AppLayerGetTxIterState,
 ) -> AppLayerGetTxIterTuple {
     let state = cast_pointer!(state, S);
-    state.get_transaction_iterator(min_tx_id, istate)
+    state.get_transaction_iterator(min_tx_id, &mut (*istate).un.u64_)
 }
 
 /// AppLayerFrameType trait.
@@ -699,5 +751,85 @@ pub trait AppLayerFrameType {
     /// Converts a variant ID to an FFI safe name.
     extern "C" fn ffi_name_from_id(id: u8) -> *const std::os::raw::c_char where Self: Sized {
         Self::from_u8(id).map(|s| s.to_cstring()).unwrap_or_else(std::ptr::null)
+    }
+}
+
+/// AppLayerState trait.
+///
+/// This is the behavior expected from an enum of state progress. For most instances
+/// this behavior can be derived. This is for protocols which do not need direction,
+/// like SSH (which is symmetric).
+///
+/// Example:
+///
+/// #[derive(AppLayerState)]
+/// enum SomeProtoState {
+///     Start,
+///     Complete,
+/// }
+pub trait AppLayerState {
+    /// Create a state progress variant from a u8.
+    ///
+    /// None will be returned if there is no matching enum variant.
+    fn from_u8(value: u8) -> Option<Self>
+    where
+        Self: Sized;
+
+    /// Return the u8 value of the enum where the first entry has the value of 0.
+    fn as_u8(&self) -> u8;
+
+    /// Create a state progress variant from a &str.
+    ///
+    /// None will be returned if there is no matching enum variant.
+    fn from_str(s: &str) -> Option<Self>
+    where
+        Self: Sized;
+
+    /// Return a pointer to a C string of the enum variant suitable as-is for
+    /// FFI.
+    fn to_cstring(&self, to_server: bool) -> *const c_char;
+
+    /// Converts a C string formatted name to a state progress.
+    unsafe extern "C" fn ffi_id_from_name(name: *const c_char, dir: u8) -> c_int
+    where
+        Self: Sized,
+    {
+        if name.is_null() {
+            return -1;
+        }
+        if let Ok(s) = std::ffi::CStr::from_ptr(name).to_str() {
+            let dir = Direction::from(dir);
+            let s2 = match dir {
+                Direction::ToServer => {
+                    if !s.starts_with("request_") {
+                        return -1;
+                    }
+                    &s["request_".len()..]
+                }
+                Direction::ToClient => {
+                    if !s.starts_with("response_") {
+                        return -1;
+                    }
+                    &s["response_".len()..]
+                }
+            };
+            Self::from_str(s2).map(|t| t.as_u8() as c_int).unwrap_or(-1)
+        } else {
+            -1
+        }
+    }
+
+    /// Converts a variant ID to an FFI name.
+    unsafe extern "C" fn ffi_name_from_id(id: c_int, dir: u8) -> *const c_char
+    where
+        Self: Sized,
+    {
+        if id < 0 || id > c_int::from(u8::MAX) {
+            return std::ptr::null();
+        }
+        if let Some(v) = Self::from_u8(id as u8) {
+            return v.to_cstring(dir == STREAM_TOSERVER);
+        }
+        return std::ptr::null();
     }
 }

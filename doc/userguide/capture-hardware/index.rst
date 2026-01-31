@@ -3,6 +3,7 @@ Using Capture Hardware
 
 .. toctree::
 
+   af-packet
    endace-dag
    napatech
    myricom
@@ -10,3 +11,4 @@ Using Capture Hardware
    netmap
    af-xdp
    dpdk
+   pcap-file

@@ -161,40 +161,22 @@ int FileForceSha256(void)
 void FileForceTrackingEnable(void)
 {
     g_file_force_tracking = 1;
-    g_file_flow_mask |= (FLOWFILE_NO_SIZE_TS|FLOWFILE_NO_SIZE_TC);
 }
 
 /**
  * \brief Function to parse forced file hashing configuration.
  */
-void FileForceHashParseCfg(ConfNode *conf)
+void FileForceHashParseCfg(SCConfNode *conf)
 {
     BUG_ON(conf == NULL);
 
-    ConfNode *forcehash_node = NULL;
-
-    /* legacy option */
-    const char *force_md5 = ConfNodeLookupChildValue(conf, "force-md5");
-    if (force_md5 != NULL) {
-        SCLogWarning("deprecated 'force-md5' option "
-                     "found. Please use 'force-hash: [md5]' instead");
-
-        if (ConfValIsTrue(force_md5)) {
-            if (g_disable_hashing) {
-                SCLogInfo(
-                        "not forcing md5 calculation for logged files: hashing globally disabled");
-            } else {
-                FileForceMd5Enable();
-                SCLogInfo("forcing md5 calculation for logged files");
-            }
-        }
-    }
+    SCConfNode *forcehash_node = NULL;
 
     if (conf != NULL)
-        forcehash_node = ConfNodeLookupChild(conf, "force-hash");
+        forcehash_node = SCConfNodeLookupChild(conf, "force-hash");
 
     if (forcehash_node != NULL) {
-        ConfNode *field = NULL;
+        SCConfNode *field = NULL;
 
         TAILQ_FOREACH(field, &forcehash_node->head, next) {
             if (strcasecmp("md5", field->val) == 0) {
@@ -205,9 +187,7 @@ void FileForceHashParseCfg(ConfNode *conf)
                     FileForceMd5Enable();
                     SCLogConfig("forcing md5 calculation for logged or stored files");
                 }
-            }
-
-            if (strcasecmp("sha1", field->val) == 0) {
+            } else if (strcasecmp("sha1", field->val) == 0) {
                 if (g_disable_hashing) {
                     SCLogInfo("not forcing sha1 calculation for logged files: hashing globally "
                               "disabled");
@@ -215,9 +195,7 @@ void FileForceHashParseCfg(ConfNode *conf)
                     FileForceSha1Enable();
                     SCLogConfig("forcing sha1 calculation for logged or stored files");
                 }
-            }
-
-            if (strcasecmp("sha256", field->val) == 0) {
+            } else if (strcasecmp("sha256", field->val) == 0) {
                 if (g_disable_hashing) {
                     SCLogInfo("not forcing sha256 calculation for logged files: hashing globally "
                               "disabled");
@@ -225,18 +203,25 @@ void FileForceHashParseCfg(ConfNode *conf)
                     FileForceSha256Enable();
                     SCLogConfig("forcing sha256 calculation for logged or stored files");
                 }
+            } else {
+                FatalError("Invalid configuration: force-hash algorithm '%s' must be one of: md5, "
+                           "sha1, sha256",
+                        field->val);
             }
         }
     }
 }
 
-uint16_t FileFlowFlagsToFlags(const uint16_t flow_file_flags, uint8_t direction)
+uint16_t SCFileFlowFlagsToFlags(const uint16_t flow_file_flags, uint8_t direction)
 {
     uint16_t flags = 0;
 
     if (direction == STREAM_TOSERVER) {
-        if ((flow_file_flags & (FLOWFILE_NO_STORE_TS | FLOWFILE_STORE)) == FLOWFILE_NO_STORE_TS) {
+        if ((flow_file_flags & (FLOWFILE_NO_STORE_TS | FLOWFILE_STORE_TS)) ==
+                FLOWFILE_NO_STORE_TS) {
             flags |= FILE_NOSTORE;
+        } else if (flow_file_flags & FLOWFILE_STORE_TS) {
+            flags |= FILE_STORE;
         }
 
         if (flow_file_flags & FLOWFILE_NO_MAGIC_TS) {
@@ -255,8 +240,11 @@ uint16_t FileFlowFlagsToFlags(const uint16_t flow_file_flags, uint8_t direction)
             flags |= FILE_NOSHA256;
         }
     } else {
-        if ((flow_file_flags & (FLOWFILE_NO_STORE_TC | FLOWFILE_STORE)) == FLOWFILE_NO_STORE_TC) {
+        if ((flow_file_flags & (FLOWFILE_NO_STORE_TC | FLOWFILE_STORE_TC)) ==
+                FLOWFILE_NO_STORE_TC) {
             flags |= FILE_NOSTORE;
+        } else if (flow_file_flags & FLOWFILE_STORE_TC) {
+            flags |= FILE_STORE;
         }
 
         if (flow_file_flags & FLOWFILE_NO_MAGIC_TC) {
@@ -275,9 +263,6 @@ uint16_t FileFlowFlagsToFlags(const uint16_t flow_file_flags, uint8_t direction)
             flags |= FILE_NOSHA256;
         }
     }
-    if (flow_file_flags & FLOWFILE_STORE) {
-        flags |= FILE_STORE;
-    }
     DEBUG_VALIDATE_BUG_ON((flags & (FILE_STORE | FILE_NOSTORE)) == (FILE_STORE | FILE_NOSTORE));
 
     SCLogDebug("direction %02x flags %02x", direction, flags);
@@ -286,7 +271,7 @@ uint16_t FileFlowFlagsToFlags(const uint16_t flow_file_flags, uint8_t direction)
 
 uint16_t FileFlowToFlags(const Flow *flow, uint8_t direction)
 {
-    return FileFlowFlagsToFlags(flow->file_flags, direction);
+    return SCFileFlowFlagsToFlags(flow->file_flags, direction);
 }
 
 void FileApplyTxFlags(const AppLayerTxData *txd, const uint8_t direction, File *file)
@@ -294,7 +279,7 @@ void FileApplyTxFlags(const AppLayerTxData *txd, const uint8_t direction, File *
     SCLogDebug("file flags %04x STORE %s NOSTORE %s", file->flags,
             (file->flags & FILE_STORE) ? "true" : "false",
             (file->flags & FILE_NOSTORE) ? "true" : "false");
-    uint16_t update_flags = FileFlowFlagsToFlags(txd->file_flags, direction);
+    uint16_t update_flags = SCFileFlowFlagsToFlags(txd->file_flags, direction);
     DEBUG_VALIDATE_BUG_ON(
             (file->flags & (FILE_STORE | FILE_NOSTORE)) == (FILE_STORE | FILE_NOSTORE));
     if (file->flags & FILE_STORE)
@@ -659,6 +644,9 @@ static int FileStoreNoStoreCheck(File *ff)
 static int AppendData(
         const StreamingBufferConfig *sbcfg, File *file, const uint8_t *data, uint32_t data_len)
 {
+    DEBUG_VALIDATE_BUG_ON(
+            data_len > BIT_U32(26)); // 64MiB as a limit per chunk seems already excessive
+
     SCLogDebug("file %p data_len %u", file, data_len);
     if (StreamingBufferAppendNoTrack(file->sb, sbcfg, data, data_len) != 0) {
         SCLogDebug("file %p StreamingBufferAppendNoTrack failed", file);
@@ -1003,21 +991,9 @@ int FileCloseFilePtr(File *ff, const StreamingBufferConfig *sbcfg, const uint8_t
 
     ff->size += data_len;
     if (data != NULL) {
-        if (ff->flags & FILE_NOSTORE) {
-            /* no storage but hashing */
-            if (ff->md5_ctx)
-                SCMd5Update(ff->md5_ctx, data, data_len);
-            if (ff->sha1_ctx)
-                SCSha1Update(ff->sha1_ctx, data, data_len);
-            if (ff->sha256_ctx) {
-                SCLogDebug("file %p data %p data_len %u", ff, data, data_len);
-                SCSha256Update(ff->sha256_ctx, data, data_len);
-            }
-        } else {
-            if (AppendData(sbcfg, ff, data, data_len) != 0) {
-                ff->state = FILE_STATE_ERROR;
-                SCReturnInt(-1);
-            }
+        if (AppendData(sbcfg, ff, data, data_len) != 0) {
+            ff->state = FILE_STATE_ERROR;
+            SCReturnInt(-1);
         }
     }
 
@@ -1152,12 +1128,10 @@ void FileDisableStoringForTransaction(Flow *f, const uint8_t direction, void *tx
 {
     if (g_file_force_filestore == 0) {
         AppLayerTxData *txd = AppLayerParserGetTxData(f->proto, f->alproto, tx);
-        if (txd != NULL) {
-            if (direction & STREAM_TOSERVER) {
-                txd->file_flags |= FLOWFILE_NO_STORE_TS;
-            } else {
-                txd->file_flags |= FLOWFILE_NO_STORE_TC;
-            }
+        if (direction & STREAM_TOSERVER) {
+            txd->file_flags |= FLOWFILE_NO_STORE_TS;
+        } else {
+            txd->file_flags |= FLOWFILE_NO_STORE_TC;
         }
     }
 }

@@ -129,7 +129,7 @@ int FileSwfDecompression(const uint8_t *buffer, uint32_t buffer_len,
     decompressed_data_len += 8;
 
     /* make sure the inspection buffer has enough space */
-    InspectionBufferCheckAndExpand(out_buffer, decompressed_data_len);
+    SCInspectionBufferCheckAndExpand(out_buffer, decompressed_data_len);
     if (out_buffer->size < decompressed_data_len) {
         DetectEngineSetEvent(det_ctx, FILE_DECODER_EVENT_NO_MEM);
         return 0;
@@ -169,7 +169,10 @@ int FileSwfDecompression(const uint8_t *buffer, uint32_t buffer_len,
          * | LZMA properties | Uncompressed length | Compressed data |
          */
         compressed_data_len += 13;
-        uint8_t compressed_data[compressed_data_len];
+        uint8_t *compressed_data = SCCalloc(1, compressed_data_len);
+        if (compressed_data == NULL) {
+            goto error;
+        }
         /* put lzma properties */
         memcpy(compressed_data, buffer + 12, 5);
         /* put lzma end marker */
@@ -183,6 +186,7 @@ int FileSwfDecompression(const uint8_t *buffer, uint32_t buffer_len,
         r = FileSwfLzmaDecompression(det_ctx,
                                      compressed_data, compressed_data_len,
                                      out_buffer->buf + 8, out_buffer->len - 8);
+        SCFree(compressed_data);
         if (r == 0)
             goto error;
     } else {

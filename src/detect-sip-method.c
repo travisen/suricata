@@ -30,6 +30,7 @@
 
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-prefilter.h"
 #include "detect-content.h"
@@ -51,7 +52,6 @@
 #include "stream-tcp.h"
 
 #include "rust.h"
-#include "app-layer-sip.h"
 
 #define KEYWORD_NAME "sip.method"
 #define KEYWORD_DOC  "sip-keywords.html#sip-method"
@@ -61,19 +61,20 @@ static int g_buffer_id = 0;
 
 static int DetectSipMethodSetup(DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
-    if (DetectBufferSetActiveList(de_ctx, s, g_buffer_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_buffer_id) < 0)
         return -1;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_SIP) < 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_SIP) < 0)
         return -1;
 
     return 0;
 }
 
-static bool DetectSipMethodValidateCallback(const Signature *s, const char **sigerror)
+static bool DetectSipMethodValidateCallback(
+        const Signature *s, const char **sigerror, const DetectBufferType *dbt)
 {
     for (uint32_t x = 0; x < s->init_data->buffer_index; x++) {
-        if (s->init_data->buffers[x].id != (uint32_t)g_buffer_id)
+        if (s->init_data->buffers[x].id != (uint32_t)dbt->id)
             continue;
         const SigMatch *sm = s->init_data->buffers[x].head;
         for (; sm != NULL; sm = sm->next) {
@@ -113,13 +114,12 @@ static InspectionBuffer *GetData(DetectEngineThreadCtx *det_ctx,
         const uint8_t *b = NULL;
         uint32_t b_len = 0;
 
-        if (rs_sip_tx_get_method(txv, &b, &b_len) != 1)
+        if (SCSipTxGetMethod(txv, &b, &b_len) != 1)
             return NULL;
         if (b == NULL || b_len == 0)
             return NULL;
 
-        InspectionBufferSetup(det_ctx, list_id, buffer, b, b_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(det_ctx, list_id, buffer, b, b_len, transforms);
     }
 
     return buffer;
@@ -128,11 +128,11 @@ static InspectionBuffer *GetData(DetectEngineThreadCtx *det_ctx,
 void DetectSipMethodRegister(void)
 {
     /* sip.method sticky buffer */
-    sigmatch_table[DETECT_AL_SIP_METHOD].name = KEYWORD_NAME;
-    sigmatch_table[DETECT_AL_SIP_METHOD].desc = "sticky buffer to match on the SIP method buffer";
-    sigmatch_table[DETECT_AL_SIP_METHOD].url = "/rules/" KEYWORD_DOC;
-    sigmatch_table[DETECT_AL_SIP_METHOD].Setup = DetectSipMethodSetup;
-    sigmatch_table[DETECT_AL_SIP_METHOD].flags |= SIGMATCH_NOOPT;
+    sigmatch_table[DETECT_SIP_METHOD].name = KEYWORD_NAME;
+    sigmatch_table[DETECT_SIP_METHOD].desc = "sticky buffer to match on the SIP method buffer";
+    sigmatch_table[DETECT_SIP_METHOD].url = "/rules/" KEYWORD_DOC;
+    sigmatch_table[DETECT_SIP_METHOD].Setup = DetectSipMethodSetup;
+    sigmatch_table[DETECT_SIP_METHOD].flags |= SIGMATCH_NOOPT;
 
     DetectAppLayerInspectEngineRegister(BUFFER_NAME, ALPROTO_SIP, SIG_FLAG_TOSERVER, 0,
             DetectEngineInspectBufferGeneric, GetData);

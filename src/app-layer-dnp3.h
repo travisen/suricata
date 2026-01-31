@@ -21,8 +21,8 @@
  * DNP3 application layer protocol header file
  */
 
-#ifndef __APP_LAYER_DNP3_H__
-#define __APP_LAYER_DNP3_H__
+#ifndef SURICATA_APP_LAYER_DNP3_H
+#define SURICATA_APP_LAYER_DNP3_H
 
 #include "rust.h"
 #if __BYTE_ORDER == __BIG_ENDIAN
@@ -109,6 +109,8 @@ enum {
     DNP3_DECODER_EVENT_BAD_TRANSPORT_CRC,
     DNP3_DECODER_EVENT_MALFORMED,
     DNP3_DECODER_EVENT_UNKNOWN_OBJECT,
+    DNP3_DECODER_EVENT_TOO_MANY_POINTS,
+    DNP3_DECODER_EVENT_TOO_MANY_OBJECTS,
 };
 
 /**
@@ -257,4 +259,4 @@ void RegisterDNP3Parsers(void);
 void DNP3ParserRegisterTests(void);
 int DNP3PrefixIsSize(uint8_t);
 
-#endif /* __APP_LAYER_DNP3_H__ */
+#endif /* SURICATA_APP_LAYER_DNP3_H */

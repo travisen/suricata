@@ -21,8 +21,8 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __SOURCE_PCAP_H__
-#define __SOURCE_PCAP_H__
+#ifndef SURICATA_SOURCE_PCAP_H
+#define SURICATA_SOURCE_PCAP_H
 
 void TmModuleReceivePcapRegister (void);
 void TmModuleDecodePcapRegister (void);
@@ -32,8 +32,8 @@ void PcapTranslateIPToDevice(char *pcap_dev, size_t len);
 #define LIBPCAP_PROMISC     1
 
 /* per packet Pcap vars */
-typedef struct PcapPacketVars_
-{
+typedef struct PcapPacketVars_ {
+    uint64_t pcap_cnt;
     uint32_t tenant_id;
 } PcapPacketVars;
 
@@ -45,7 +45,7 @@ typedef struct PcapIfaceConfig_
 {
     char iface[PCAP_IFACE_NAME_LENGTH];
     /* number of threads */
-    int threads;
+    uint16_t threads;
     /* socket buffer size */
     int buffer_size;
     /* snapshot length */
@@ -59,4 +59,4 @@ typedef struct PcapIfaceConfig_
     void (*DerefFunc)(void *);
 } PcapIfaceConfig;
 
-#endif /* __SOURCE_PCAP_H__ */
+#endif /* SURICATA_SOURCE_PCAP_H */

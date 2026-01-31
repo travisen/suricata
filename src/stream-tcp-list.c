@@ -191,7 +191,7 @@ static int DoInsertSegment (TcpStream *stream, TcpSegment *seg, TcpSegment **dup
             stream->segs_right_edge = SEG_SEQ_RIGHT_EDGE(seg);
 
         /* insert succeeded, now check if we overlap with someone */
-        if (CheckOverlap(&stream->seg_tree, seg) == true) {
+        if (CheckOverlap(&stream->seg_tree, seg)) {
             SCLogDebug("seg %u has overlap in the tree", seg->seq);
             return 1;
         }
@@ -538,7 +538,7 @@ static int DoHandleData(ThreadVars *tv, TcpReassemblyThreadCtx *ra_ctx,
     /* we had an overlap with different data */
     if (result) {
         StreamTcpSetEvent(p, STREAM_REASSEMBLY_OVERLAP_DIFFERENT_DATA);
-        StatsIncr(tv, ra_ctx->counter_tcp_reass_overlap_diff_data);
+        StatsCounterIncr(&tv->stats, ra_ctx->counter_tcp_reass_overlap_diff_data);
     }
 
     /* insert the temp buffer now that we've (possibly) updated
@@ -546,7 +546,7 @@ static int DoHandleData(ThreadVars *tv, TcpReassemblyThreadCtx *ra_ctx,
     int res = InsertSegmentDataCustom(stream, handle, buf, p->payload_len);
     if (res != SC_OK) {
         if (res == SC_ENOMEM) {
-            StatsIncr(tv, ra_ctx->counter_tcp_segment_memcap);
+            StatsCounterIncr(&tv->stats, ra_ctx->counter_tcp_segment_memcap);
             StreamTcpSetEvent(p, STREAM_REASSEMBLY_INSERT_MEMCAP);
         } else if (res == SC_ELIMIT) {
             StreamTcpSetEvent(p, STREAM_REASSEMBLY_INSERT_LIMIT);
@@ -569,8 +569,7 @@ static int DoHandleData(ThreadVars *tv, TcpReassemblyThreadCtx *ra_ctx,
 static void StreamTcpSegmentAddPacketDataDo(TcpSegment *seg, const Packet *rp, const Packet *pp)
 {
     if (GET_PKT_DATA(rp) != NULL && GET_PKT_LEN(rp) > pp->payload_len) {
-        seg->pcap_hdr_storage->ts.tv_sec = SCTIME_SECS(rp->ts);
-        seg->pcap_hdr_storage->ts.tv_usec = SCTIME_USECS(rp->ts);
+        seg->pcap_hdr_storage->ts = rp->ts;
         seg->pcap_hdr_storage->pktlen = GET_PKT_LEN(rp) - pp->payload_len;
         /*
          * pkt_hdr members are initially allocated 64 bytes of memory. Thus,
@@ -582,8 +581,7 @@ static void StreamTcpSegmentAddPacketDataDo(TcpSegment *seg, const Packet *rp, c
                     seg->pcap_hdr_storage->alloclen, seg->pcap_hdr_storage->pktlen);
             if (tmp_pkt_hdr == NULL) {
                 SCLogDebug("Failed to realloc");
-                seg->pcap_hdr_storage->ts.tv_sec = 0;
-                seg->pcap_hdr_storage->ts.tv_usec = 0;
+                seg->pcap_hdr_storage->ts = SCTIME_INITIALIZER;
                 seg->pcap_hdr_storage->pktlen = 0;
                 return;
             } else {
@@ -594,8 +592,7 @@ static void StreamTcpSegmentAddPacketDataDo(TcpSegment *seg, const Packet *rp, c
         memcpy(seg->pcap_hdr_storage->pkt_hdr, GET_PKT_DATA(rp),
                 (size_t)GET_PKT_LEN(rp) - pp->payload_len);
     } else {
-        seg->pcap_hdr_storage->ts.tv_sec = 0;
-        seg->pcap_hdr_storage->ts.tv_usec = 0;
+        seg->pcap_hdr_storage->ts = SCTIME_INITIALIZER;
         seg->pcap_hdr_storage->pktlen = 0;
     }
 }
@@ -618,7 +615,7 @@ static void StreamTcpSegmentAddPacketData(
         return;
     }
 
-    if (IS_TUNNEL_PKT(p) && !IS_TUNNEL_ROOT_PKT(p)) {
+    if (PacketIsTunnelChild(p)) {
         Packet *rp = p->root;
         StreamTcpSegmentAddPacketDataDo(seg, rp, p);
     } else {
@@ -635,8 +632,7 @@ static void StreamTcpSegmentAddPacketData(
  *  In case of error, this function returns the segment to the pool
  */
 int StreamTcpReassembleInsertSegment(ThreadVars *tv, TcpReassemblyThreadCtx *ra_ctx,
-        TcpStream *stream, TcpSegment *seg, Packet *p,
-        uint32_t pkt_seq, uint8_t *pkt_data, uint16_t pkt_datalen)
+        TcpStream *stream, TcpSegment *seg, Packet *p, uint8_t *pkt_data, uint16_t pkt_datalen)
 {
     SCEnter();
 
@@ -653,11 +649,11 @@ int StreamTcpReassembleInsertSegment(ThreadVars *tv, TcpReassemblyThreadCtx *ra_
         /* no overlap, straight data insert */
         int res = InsertSegmentDataCustom(stream, seg, pkt_data, pkt_datalen);
         if (res != SC_OK) {
-            StatsIncr(tv, ra_ctx->counter_tcp_reass_data_normal_fail);
+            StatsCounterIncr(&tv->stats, ra_ctx->counter_tcp_reass_data_normal_fail);
             StreamTcpRemoveSegmentFromStream(stream, seg);
             StreamTcpSegmentReturntoPool(seg);
             if (res == SC_ENOMEM) {
-                StatsIncr(tv, ra_ctx->counter_tcp_segment_memcap);
+                StatsCounterIncr(&tv->stats, ra_ctx->counter_tcp_segment_memcap);
                 SCReturnInt(-SC_ENOMEM);
             }
             SCReturnInt(-1);
@@ -671,12 +667,12 @@ int StreamTcpReassembleInsertSegment(ThreadVars *tv, TcpReassemblyThreadCtx *ra_
         }
 
         /* XXX should we exclude 'retransmissions' here? */
-        StatsIncr(tv, ra_ctx->counter_tcp_reass_overlap);
+        StatsCounterIncr(&tv->stats, ra_ctx->counter_tcp_reass_overlap);
 
         /* now let's consider the data in the overlap case */
         int res = DoHandleData(tv, ra_ctx, stream, seg, dup_seg, p);
         if (res < 0) {
-            StatsIncr(tv, ra_ctx->counter_tcp_reass_data_overlap_fail);
+            StatsCounterIncr(&tv->stats, ra_ctx->counter_tcp_reass_data_overlap_fail);
 
             if (r == 1) // r == 2 mean seg wasn't added to stream
                 StreamTcpRemoveSegmentFromStream(stream, seg);
@@ -931,7 +927,8 @@ void StreamTcpPruneSession(Flow *f, uint8_t flags)
     const uint64_t left_edge = GetLeftEdge(f, ssn, stream);
     SCLogDebug("buffer left_edge %" PRIu64, left_edge);
     if (left_edge && left_edge > STREAM_BASE_OFFSET(stream)) {
-        uint32_t slide = left_edge - STREAM_BASE_OFFSET(stream);
+        DEBUG_VALIDATE_BUG_ON(left_edge - STREAM_BASE_OFFSET(stream) > UINT32_MAX);
+        uint32_t slide = (uint32_t)(left_edge - STREAM_BASE_OFFSET(stream));
         SCLogDebug("buffer sliding %u to offset %"PRIu64, slide, left_edge);
 
         if (!(ssn->flags & STREAMTCP_FLAG_APP_LAYER_DISABLED)) {

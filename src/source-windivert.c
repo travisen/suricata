@@ -31,7 +31,7 @@
 #include "packet.h"
 #include "util-byte.h"
 #include "util-debug.h"
-#include "util-device.h"
+#include "util-device-private.h"
 #include "util-error.h"
 #include "util-ioctl.h"
 #include "util-privs.h"
@@ -69,6 +69,7 @@ void TmModuleVerdictWinDivertRegister(void)
 {
     tmm_modules[TMM_VERDICTWINDIVERT].name = "VerdictWinDivert";
     tmm_modules[TMM_VERDICTWINDIVERT].ThreadInit = NoWinDivertSupportExit;
+    tmm_modules[TMM_VERDICTWINDIVERT].flags = TM_FLAG_VERDICT_TM;
 }
 
 void TmModuleDecodeWinDivertRegister(void)
@@ -263,8 +264,7 @@ int WinDivertRegisterQueue(bool forward, char *filter_str)
     /* validate the filter string */
     const char *error_str;
     uint32_t error_pos;
-    bool valid = WinDivertHelperCheckFilter(filter_str, layer, &error_str,
-                                            &error_pos);
+    bool valid = WinDivertHelperCompileFilter(filter_str, layer, 0, 0, &error_str, &error_pos);
     if (!valid) {
         SCLogWarning("Invalid filter \"%s\" supplied to WinDivert: %s at position "
                      "%" PRId32 "",
@@ -382,6 +382,7 @@ void TmModuleVerdictWinDivertRegister(void)
     tm_ptr->ThreadInit = VerdictWinDivertThreadInit;
     tm_ptr->Func = VerdictWinDivert;
     tm_ptr->ThreadDeinit = VerdictWinDivertThreadDeinit;
+    tm_ptr->flags = TM_FLAG_VERDICT_TM;
 }
 
 void TmModuleDecodeWinDivertRegister(void)
@@ -418,7 +419,7 @@ TmEcode ReceiveWinDivertLoop(ThreadVars *tv, void *data, void *slot)
             SCReturnInt(TM_ECODE_FAILED);
         }
 
-        StatsSyncCountersIfSignalled(tv);
+        StatsSyncCountersIfSignalled(&tv->stats);
     }
 
     SCReturnInt(TM_ECODE_OK);
@@ -455,13 +456,11 @@ static TmEcode WinDivertRecvHelper(ThreadVars *tv, WinDivertThreadVars *wd_tv)
         /* allocate external, if not already */
         PacketCallocExtPkt(p, MAX_PAYLOAD_SIZE);
 
-        success =
-                WinDivertRecv(wd_tv->filter_handle, p->ext_pkt,
-                              MAX_PAYLOAD_SIZE, &p->windivert_v.addr, &pktlen);
+        success = WinDivertRecv(
+                wd_tv->filter_handle, p->ext_pkt, MAX_PAYLOAD_SIZE, &pktlen, &p->windivert_v.addr);
     } else {
         success = WinDivertRecv(wd_tv->filter_handle, GET_PKT_DIRECT_DATA(p),
-                                GET_PKT_DIRECT_MAX_SIZE(p),
-                                &p->windivert_v.addr, &pktlen);
+                GET_PKT_DIRECT_MAX_SIZE(p), &pktlen, &p->windivert_v.addr);
     }
     SET_PKT_LEN(p, pktlen);
 
@@ -628,12 +627,11 @@ static bool WinDivertIfaceMatchFilter(const char *filter_string, int if_index)
     bool match = false;
 
     WINDIVERT_ADDRESS if_addr = {};
-    if_addr.IfIdx = if_index;
+    if_addr.Network.IfIdx = if_index;
 
     uint8_t dummy[4] = {4, 4, 4, 4};
 
-    match = WinDivertHelperEvalFilter(filter_string, WINDIVERT_LAYER_NETWORK,
-                                      dummy, sizeof(dummy), &if_addr);
+    match = WinDivertHelperEvalFilter(filter_string, dummy, sizeof(dummy), &if_addr);
     if (!match) {
         int err = GetLastError();
         if (err != 0) {
@@ -769,7 +767,7 @@ static TmEcode WinDivertVerdictHelper(ThreadVars *tv, Packet *p)
 
     /* we can't verdict tunnel packets without ensuring all encapsulated
      * packets are verdicted */
-    if (IS_TUNNEL_PKT(p)) {
+    if (PacketIsTunnel(p)) {
         bool finalVerdict = VerdictTunnelPacket(p);
         if (!finalVerdict) {
             SCReturnInt(TM_ECODE_OK);
@@ -793,8 +791,8 @@ static TmEcode WinDivertVerdictHelper(ThreadVars *tv, Packet *p)
         SCReturnInt(TM_ECODE_OK);
     }
 
-    bool success = WinDivertSend(wd_tv->filter_handle, GET_PKT_DATA(p),
-                                 GET_PKT_LEN(p), &p->windivert_v.addr, NULL);
+    bool success = WinDivertSend(
+            wd_tv->filter_handle, GET_PKT_DATA(p), GET_PKT_LEN(p), NULL, &p->windivert_v.addr);
 
     if (unlikely(!success)) {
         WinDivertLogError(GetLastError());

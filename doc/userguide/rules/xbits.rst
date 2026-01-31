@@ -1,7 +1,7 @@
 Xbits Keyword
 =============
 
-Set, unset, toggle and check for bits stored per host or ip_pair.
+Set, unset, toggle and check for bits stored per host, ip_pair or tx.
 
 Syntax::
 
@@ -10,6 +10,15 @@ Syntax::
         [,expire <seconds>];
     xbits:<set|unset|isset|toggle>,<name>,track <ip_src|ip_dst|ip_pair> \
         [,expire <seconds>];
+    xbits:<set|isset>,<name>,track tx;
+
+Transaction support (`tx`)
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Bits stored per app-layer transaction. What counts as a transaction protocol
+is implementation dependent.
+
+See :ref:`Protocols` for a per protocol explanation.
 
 Notes
 ~~~~~
@@ -95,10 +104,10 @@ They drop the traffic and create an 'xbit' 'badssh' for the source ip.
 It expires in an hour::
 
     drop ssh any any -> $MYSERVER 22 (msg:"DROP libssh incoming";   \
-      flow:to_server,established; ssh.softwareversion:"libssh";     \
+      flow:to_server,established; ssh.software; content:"libssh";     \
       xbits:set, badssh, track ip_src, expire 3600; sid:4000000005;)
     drop ssh any any -> $MYSERVER 22 (msg:"DROP PUTTY incoming";    \
-      flow:to_server,established; ssh.softwareversion:"PUTTY";      \
+      flow:to_server,established; ssh.software; content:"PUTTY";      \
       xbits:set, badssh, track ip_src, expire 3600; sid:4000000007;)
 
 Then the following rule simply drops any incoming traffic to that server

@@ -25,6 +25,7 @@
 #include "../util-streaming-buffer.h"
 #include "../util-print.h"
 #include "../util-unittest.h"
+#include "../util-unittest-helper.h"
 
 #define SET_ISN(stream, setseq)                                                                    \
     (stream)->isn = (setseq);                                                                      \
@@ -40,8 +41,11 @@
 static int StreamTcpTest01(void)
 {
     StreamTcpThread stt;
+    TCPHdr tcph;
+    memset(&tcph, 0, sizeof(TCPHdr));
     Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
+    UTHSetTCPHdr(p, &tcph);
     Flow f;
     memset(&f, 0, sizeof(Flow));
     FLOW_INITIALIZE(&f);
@@ -53,7 +57,7 @@ static int StreamTcpTest01(void)
     FAIL_IF_NOT_NULL(f.alparser);
     FAIL_IF_NOT(ssn->state == 0);
     StreamTcpSessionClear(p->flow->protoctx);
-    SCFree(p);
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     PASS;
@@ -87,29 +91,29 @@ static int StreamTcpTest02(void)
     p->flow = &f;
     tcph.th_win = htons(5480);
     tcph.th_flags = TH_SYN;
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpUTInit(&stt.ra_ctx);
 
     FAIL_IF(StreamTcpPacket(&tv, p, &stt, &pq) == -1);
 
-    p->tcph->th_ack = htonl(1);
-    p->tcph->th_flags = TH_SYN | TH_ACK;
+    tcph.th_ack = htonl(1);
+    tcph.th_flags = TH_SYN | TH_ACK;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     FAIL_IF(StreamTcpPacket(&tv, p, &stt, &pq) == -1);
 
-    p->tcph->th_ack = htonl(1);
-    p->tcph->th_seq = htonl(1);
-    p->tcph->th_flags = TH_ACK;
+    tcph.th_ack = htonl(1);
+    tcph.th_seq = htonl(1);
+    tcph.th_flags = TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     FAIL_IF(StreamTcpPacket(&tv, p, &stt, &pq) == -1);
 
-    p->tcph->th_ack = htonl(1);
-    p->tcph->th_seq = htonl(2);
-    p->tcph->th_flags = TH_PUSH | TH_ACK;
+    tcph.th_ack = htonl(1);
+    tcph.th_seq = htonl(2);
+    tcph.th_flags = TH_PUSH | TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x41, 3, 4); /*AAA*/
@@ -121,9 +125,9 @@ static int StreamTcpTest02(void)
     p->flowflags = FLOW_PKT_TOCLIENT;
     FAIL_IF(StreamTcpPacket(&tv, p, &stt, &pq) == -1);
 
-    p->tcph->th_ack = htonl(1);
-    p->tcph->th_seq = htonl(6);
-    p->tcph->th_flags = TH_PUSH | TH_ACK;
+    tcph.th_ack = htonl(1);
+    tcph.th_seq = htonl(6);
+    tcph.th_flags = TH_PUSH | TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x42, 3, 4); /*BBB*/
@@ -138,7 +142,7 @@ static int StreamTcpTest02(void)
     StreamTcpSessionClear(p->flow->protoctx);
     // StreamTcpUTClearSession(p->flow->protoctx);
 
-    SCFree(p);
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     PASS;
@@ -175,23 +179,23 @@ static int StreamTcpTest03(void)
     tcph.th_seq = htonl(10);
     tcph.th_ack = htonl(20);
     tcph.th_flags = TH_SYN | TH_ACK;
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
     int ret = 0;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(20);
-    p->tcph->th_ack = htonl(11);
-    p->tcph->th_flags = TH_ACK;
+    tcph.th_seq = htonl(20);
+    tcph.th_ack = htonl(11);
+    tcph.th_flags = TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(19);
-    p->tcph->th_ack = htonl(11);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(19);
+    tcph.th_ack = htonl(11);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
@@ -212,7 +216,7 @@ static int StreamTcpTest03(void)
 
     ret = 1;
 end:
-    SCFree(p);
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     return ret;
@@ -249,16 +253,16 @@ static int StreamTcpTest04(void)
     tcph.th_seq = htonl(10);
     tcph.th_ack = htonl(20);
     tcph.th_flags = TH_ACK;
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
 
     int ret = 0;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(9);
-    p->tcph->th_ack = htonl(19);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(9);
+    tcph.th_ack = htonl(19);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
@@ -279,7 +283,7 @@ static int StreamTcpTest04(void)
 
     ret = 1;
 end:
-    SCFree(p);
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     return ret;
@@ -317,7 +321,7 @@ static int StreamTcpTest05(void)
     tcph.th_seq = htonl(10);
     tcph.th_ack = htonl(20);
     tcph.th_flags = TH_ACK | TH_PUSH;
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
 
     StreamTcpCreateTestPacket(payload, 0x41, 3, 4); /*AAA*/
     p->payload = payload;
@@ -326,9 +330,9 @@ static int StreamTcpTest05(void)
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(20);
-    p->tcph->th_ack = htonl(13);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(20);
+    tcph.th_ack = htonl(13);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     StreamTcpCreateTestPacket(payload, 0x42, 3, 4); /*BBB*/
@@ -338,9 +342,9 @@ static int StreamTcpTest05(void)
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(13);
-    p->tcph->th_ack = htonl(23);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(13);
+    tcph.th_ack = htonl(23);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x43, 3, 4); /*CCC*/
@@ -350,9 +354,9 @@ static int StreamTcpTest05(void)
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(19);
-    p->tcph->th_ack = htonl(16);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(19);
+    tcph.th_ack = htonl(16);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     StreamTcpCreateTestPacket(payload, 0x44, 3, 4); /*DDD*/
@@ -377,7 +381,7 @@ static int StreamTcpTest05(void)
 
     ret = 1;
 end:
-    SCFree(p);
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     return ret;
@@ -414,7 +418,7 @@ static int StreamTcpTest06(void)
     StreamTcpUTInit(&stt.ra_ctx);
 
     tcph.th_flags = TH_FIN;
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
 
     /* StreamTcpPacket returns -1 on unsolicited FIN */
     if (StreamTcpPacket(&tv, p, &stt, &pq) != -1) {
@@ -427,7 +431,7 @@ static int StreamTcpTest06(void)
         goto end;
     }
 
-    p->tcph->th_flags = TH_RST;
+    tcph.th_flags = TH_RST;
     /* StreamTcpPacket returns -1 on unsolicited RST */
     if (StreamTcpPacket(&tv, p, &stt, &pq) != -1) {
         printf("StreamTcpPacket failed (2): ");
@@ -441,7 +445,7 @@ static int StreamTcpTest06(void)
 
     ret = 1;
 end:
-    SCFree(p);
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     return ret;
@@ -479,30 +483,30 @@ static int StreamTcpTest07(void)
     tcph.th_seq = htonl(10);
     tcph.th_ack = htonl(20);
     tcph.th_flags = TH_ACK | TH_PUSH;
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
 
-    p->tcpvars.ts_set = true;
-    p->tcpvars.ts_val = 10;
-    p->tcpvars.ts_ecr = 11;
+    p->l4.vars.tcp.ts_set = true;
+    p->l4.vars.tcp.ts_val = 10;
+    p->l4.vars.tcp.ts_ecr = 11;
 
     p->payload = payload;
     p->payload_len = 1;
 
     FAIL_IF(StreamTcpPacket(&tv, p, &stt, &pq) == -1);
 
-    p->tcph->th_seq = htonl(11);
-    p->tcph->th_ack = htonl(23);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(11);
+    tcph.th_ack = htonl(23);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOSERVER;
 
-    p->tcpvars.ts_val = 2;
+    p->l4.vars.tcp.ts_val = 2;
 
     FAIL_IF(StreamTcpPacket(&tv, p, &stt, &pq) != -1);
 
     FAIL_IF(((TcpSession *)(p->flow->protoctx))->client.next_seq != 11);
 
     StreamTcpSessionClear(p->flow->protoctx);
-    SCFree(p);
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     PASS;
@@ -540,23 +544,23 @@ static int StreamTcpTest08(void)
     tcph.th_seq = htonl(10);
     tcph.th_ack = htonl(20);
     tcph.th_flags = TH_ACK | TH_PUSH;
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
 
-    p->tcpvars.ts_set = true;
-    p->tcpvars.ts_val = 10;
-    p->tcpvars.ts_ecr = 11;
+    p->l4.vars.tcp.ts_set = true;
+    p->l4.vars.tcp.ts_val = 10;
+    p->l4.vars.tcp.ts_ecr = 11;
 
     p->payload = payload;
     p->payload_len = 1;
 
     FAIL_IF(StreamTcpPacket(&tv, p, &stt, &pq) == -1);
 
-    p->tcph->th_seq = htonl(11);
-    p->tcph->th_ack = htonl(20);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(11);
+    tcph.th_ack = htonl(20);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOSERVER;
 
-    p->tcpvars.ts_val = 12;
+    p->l4.vars.tcp.ts_val = 12;
 
     FAIL_IF(StreamTcpPacket(&tv, p, &stt, &pq) == -1);
 
@@ -564,7 +568,7 @@ static int StreamTcpTest08(void)
 
     StreamTcpSessionClear(p->flow->protoctx);
 
-    SCFree(p);
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     PASS;
@@ -602,16 +606,16 @@ static int StreamTcpTest09(void)
     tcph.th_seq = htonl(10);
     tcph.th_ack = htonl(20);
     tcph.th_flags = TH_ACK | TH_PUSH;
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
 
     p->payload = payload;
     p->payload_len = 1;
 
     FAIL_IF(StreamTcpPacket(&tv, p, &stt, &pq) == -1);
 
-    p->tcph->th_seq = htonl(12);
-    p->tcph->th_ack = htonl(23);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(12);
+    tcph.th_ack = htonl(23);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     FAIL_IF(p->flow->protoctx == NULL);
@@ -620,9 +624,9 @@ static int StreamTcpTest09(void)
 
     FAIL_IF(StreamTcpPacket(&tv, p, &stt, &pq) == -1);
 
-    p->tcph->th_seq = htonl(11);
-    p->tcph->th_ack = htonl(23);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(11);
+    tcph.th_ack = htonl(23);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     FAIL_IF(StreamTcpPacket(&tv, p, &stt, &pq) == -1);
@@ -634,7 +638,7 @@ static int StreamTcpTest09(void)
     FAIL_IF(TCPSEG_RB_NEXT(seg) != NULL);
 
     StreamTcpSessionClear(p->flow->protoctx);
-    SCFree(p);
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     PASS;
@@ -670,20 +674,20 @@ static int StreamTcpTest10(void)
     tcph.th_seq = htonl(10);
     tcph.th_ack = 0;
     tcph.th_flags = TH_SYN;
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
 
     FAIL_IF(StreamTcpPacket(&tv, p, &stt, &pq) == -1);
 
-    p->tcph->th_seq = htonl(11);
-    p->tcph->th_ack = htonl(11);
-    p->tcph->th_flags = TH_ACK;
+    tcph.th_seq = htonl(11);
+    tcph.th_ack = htonl(11);
+    tcph.th_flags = TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     FAIL_IF(StreamTcpPacket(&tv, p, &stt, &pq) == -1);
 
-    p->tcph->th_seq = htonl(11);
-    p->tcph->th_ack = htonl(11);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(11);
+    tcph.th_ack = htonl(11);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x42, 3, 4); /*BBB*/
@@ -692,9 +696,9 @@ static int StreamTcpTest10(void)
 
     FAIL_IF(StreamTcpPacket(&tv, p, &stt, &pq) == -1);
 
-    p->tcph->th_seq = htonl(6);
-    p->tcph->th_ack = htonl(11);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(6);
+    tcph.th_ack = htonl(11);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x42, 3, 4); /*BBB*/
@@ -713,7 +717,7 @@ static int StreamTcpTest10(void)
 
     StreamTcpSessionClear(p->flow->protoctx);
 
-    SCFree(p);
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     PASS;
@@ -749,20 +753,20 @@ static int StreamTcpTest11(void)
     tcph.th_seq = htonl(10);
     tcph.th_ack = htonl(1);
     tcph.th_flags = TH_SYN | TH_ACK;
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
 
     FAIL_IF(StreamTcpPacket(&tv, p, &stt, &pq) == -1);
 
-    p->tcph->th_seq = htonl(11);
-    p->tcph->th_ack = htonl(1);
-    p->tcph->th_flags = TH_ACK;
+    tcph.th_seq = htonl(11);
+    tcph.th_ack = htonl(1);
+    tcph.th_flags = TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     FAIL_IF(StreamTcpPacket(&tv, p, &stt, &pq) == -1);
 
-    p->tcph->th_seq = htonl(11);
-    p->tcph->th_ack = htonl(1);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(11);
+    tcph.th_ack = htonl(1);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x42, 3, 4); /*BBB*/
@@ -771,9 +775,9 @@ static int StreamTcpTest11(void)
 
     FAIL_IF(StreamTcpPacket(&tv, p, &stt, &pq) == -1);
 
-    p->tcph->th_seq = htonl(2);
-    p->tcph->th_ack = htonl(1);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(2);
+    tcph.th_ack = htonl(1);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x42, 3, 4); /*BBB*/
@@ -790,7 +794,7 @@ static int StreamTcpTest11(void)
     FAIL_IF(ssn->client.next_seq != 14);
 
     StreamTcpSessionClear(p->flow->protoctx);
-    SCFree(p);
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     PASS;
@@ -827,15 +831,15 @@ static int StreamTcpTest12(void)
     tcph.th_seq = htonl(10);
     tcph.th_ack = htonl(11);
     tcph.th_flags = TH_ACK;
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
     int ret = 0;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(10);
-    p->tcph->th_ack = htonl(11);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(10);
+    tcph.th_ack = htonl(11);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x42, 3, 4); /*BBB*/
@@ -845,9 +849,9 @@ static int StreamTcpTest12(void)
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(6);
-    p->tcph->th_ack = htonl(11);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(6);
+    tcph.th_ack = htonl(11);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x42, 3, 4); /*BBB*/
@@ -883,7 +887,7 @@ static int StreamTcpTest12(void)
 
     ret = 1;
 end:
-    SCFree(p);
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     return ret;
@@ -921,15 +925,15 @@ static int StreamTcpTest13(void)
     tcph.th_seq = htonl(10);
     tcph.th_ack = htonl(11);
     tcph.th_flags = TH_ACK;
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
     int ret = 0;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(10);
-    p->tcph->th_ack = htonl(11);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(10);
+    tcph.th_ack = htonl(11);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x42, 3, 4); /*BBB*/
@@ -939,9 +943,9 @@ static int StreamTcpTest13(void)
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(6);
-    p->tcph->th_ack = htonl(11);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(6);
+    tcph.th_ack = htonl(11);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x42, 3, 4); /*BBB*/
@@ -966,9 +970,9 @@ static int StreamTcpTest13(void)
         goto end;
     }
 
-    p->tcph->th_seq = htonl(11);
-    p->tcph->th_ack = htonl(9);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(11);
+    tcph.th_ack = htonl(9);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     StreamTcpCreateTestPacket(payload, 0x42, 3, 4); /*BBB*/
@@ -989,7 +993,7 @@ static int StreamTcpTest13(void)
 
     ret = 1;
 end:
-    SCFree(p);
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     return ret;
@@ -1070,7 +1074,7 @@ static const char *StreamTcpParseOSPolicy(char *conf_var_name)
         goto end;
     }
 
-    if (ConfGet(conf_var_full_name, &conf_var_value) != 1) {
+    if (SCConfGet(conf_var_full_name, &conf_var_value) != 1) {
         SCLogError("Error in getting conf value for conf name %s", conf_var_full_name);
         goto end;
     }
@@ -1120,9 +1124,9 @@ static int StreamTcpTest14(void)
     StreamTcpUTInit(&stt.ra_ctx);
 
     /* Load the config string into parser */
-    ConfCreateContextBackup();
-    ConfInit();
-    ConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
+    SCConfCreateContextBackup();
+    SCConfInit();
+    SCConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
 
     /* Get the IP address as string and add it to Host info tree for lookups */
     ip_addr = StreamTcpParseOSPolicy(os_policy_name);
@@ -1135,10 +1139,10 @@ static int StreamTcpTest14(void)
     tcph.th_seq = htonl(10);
     tcph.th_ack = htonl(20);
     tcph.th_flags = TH_ACK | TH_PUSH;
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
     p->dst.family = AF_INET;
     p->dst.address.address_un_data32[0] = addr.s_addr;
-    p->ip4h = &ipv4h;
+    UTHSetIPV4Hdr(p, &ipv4h);
 
     StreamTcpCreateTestPacket(payload, 0x41, 3, sizeof(payload)); /*AAA*/
     p->payload = payload;
@@ -1147,9 +1151,9 @@ static int StreamTcpTest14(void)
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(20);
-    p->tcph->th_ack = htonl(13);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(20);
+    tcph.th_ack = htonl(13);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     StreamTcpCreateTestPacket(payload, 0x42, 3, sizeof(payload)); /*BBB*/
@@ -1159,9 +1163,9 @@ static int StreamTcpTest14(void)
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(15);
-    p->tcph->th_ack = htonl(23);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(15);
+    tcph.th_ack = htonl(23);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x43, 3, sizeof(payload)); /*CCC*/
@@ -1171,9 +1175,9 @@ static int StreamTcpTest14(void)
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(14);
-    p->tcph->th_ack = htonl(23);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(14);
+    tcph.th_ack = htonl(23);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x43, 3, sizeof(payload)); /*CCC*/
@@ -1184,9 +1188,9 @@ static int StreamTcpTest14(void)
         goto end;
 
     addr.s_addr = inet_addr("192.168.0.2");
-    p->tcph->th_seq = htonl(25);
-    p->tcph->th_ack = htonl(13);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(25);
+    tcph.th_ack = htonl(13);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOCLIENT;
     p->dst.address.address_un_data32[0] = addr.s_addr;
 
@@ -1197,9 +1201,9 @@ static int StreamTcpTest14(void)
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(24);
-    p->tcph->th_ack = htonl(13);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(24);
+    tcph.th_ack = htonl(13);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     StreamTcpCreateTestPacket(payload, 0x44, 3, sizeof(payload)); /*DDD*/
@@ -1238,9 +1242,9 @@ static int StreamTcpTest14(void)
 
     ret = 1;
 end:
-    ConfDeInit();
-    ConfRestoreContextBackup();
-    SCFree(p);
+    SCConfDeInit();
+    SCConfRestoreContextBackup();
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     return ret;
@@ -1277,14 +1281,14 @@ static int StreamTcp4WHSTest01(void)
     tcph.th_seq = htonl(10);
     tcph.th_ack = 0;
     tcph.th_flags = TH_SYN;
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(20);
-    p->tcph->th_ack = 0;
-    p->tcph->th_flags = TH_SYN;
+    tcph.th_seq = htonl(20);
+    tcph.th_ack = 0;
+    tcph.th_flags = TH_SYN;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
@@ -1295,17 +1299,17 @@ static int StreamTcp4WHSTest01(void)
         goto end;
     }
 
-    p->tcph->th_seq = htonl(10);
-    p->tcph->th_ack = htonl(21); /* the SYN/ACK uses the SEQ from the first SYN pkt */
-    p->tcph->th_flags = TH_SYN | TH_ACK;
+    tcph.th_seq = htonl(10);
+    tcph.th_ack = htonl(21); /* the SYN/ACK uses the SEQ from the first SYN pkt */
+    tcph.th_flags = TH_SYN | TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(21);
-    p->tcph->th_ack = htonl(10);
-    p->tcph->th_flags = TH_ACK;
+    tcph.th_seq = htonl(21);
+    tcph.th_ack = htonl(10);
+    tcph.th_flags = TH_ACK;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
@@ -1319,7 +1323,7 @@ static int StreamTcp4WHSTest01(void)
     ret = 1;
 end:
     StreamTcpSessionClear(p->flow->protoctx);
-    SCFree(p);
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     return ret;
@@ -1357,14 +1361,14 @@ static int StreamTcp4WHSTest02(void)
     tcph.th_seq = htonl(10);
     tcph.th_ack = 0;
     tcph.th_flags = TH_SYN;
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(20);
-    p->tcph->th_ack = 0;
-    p->tcph->th_flags = TH_SYN;
+    tcph.th_seq = htonl(20);
+    tcph.th_ack = 0;
+    tcph.th_flags = TH_SYN;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
@@ -1375,9 +1379,9 @@ static int StreamTcp4WHSTest02(void)
         goto end;
     }
 
-    p->tcph->th_seq = htonl(30);
-    p->tcph->th_ack = htonl(21); /* the SYN/ACK uses the SEQ from the first SYN pkt */
-    p->tcph->th_flags = TH_SYN | TH_ACK;
+    tcph.th_seq = htonl(30);
+    tcph.th_ack = htonl(21); /* the SYN/ACK uses the SEQ from the first SYN pkt */
+    tcph.th_flags = TH_SYN | TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) != -1) {
@@ -1388,7 +1392,7 @@ static int StreamTcp4WHSTest02(void)
     ret = 1;
 end:
     StreamTcpSessionClear(p->flow->protoctx);
-    SCFree(p);
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     return ret;
@@ -1426,14 +1430,14 @@ static int StreamTcp4WHSTest03(void)
     tcph.th_seq = htonl(10);
     tcph.th_ack = 0;
     tcph.th_flags = TH_SYN;
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(20);
-    p->tcph->th_ack = 0;
-    p->tcph->th_flags = TH_SYN;
+    tcph.th_seq = htonl(20);
+    tcph.th_ack = 0;
+    tcph.th_flags = TH_SYN;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
@@ -1444,17 +1448,17 @@ static int StreamTcp4WHSTest03(void)
         goto end;
     }
 
-    p->tcph->th_seq = htonl(30);
-    p->tcph->th_ack = htonl(11);
-    p->tcph->th_flags = TH_SYN | TH_ACK;
+    tcph.th_seq = htonl(30);
+    tcph.th_ack = htonl(11);
+    tcph.th_flags = TH_SYN | TH_ACK;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(11);
-    p->tcph->th_ack = htonl(31);
-    p->tcph->th_flags = TH_ACK;
+    tcph.th_seq = htonl(11);
+    tcph.th_ack = htonl(31);
+    tcph.th_flags = TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
@@ -1468,7 +1472,7 @@ static int StreamTcp4WHSTest03(void)
     ret = 1;
 end:
     StreamTcpSessionClear(p->flow->protoctx);
-    SCFree(p);
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     return ret;
@@ -1510,9 +1514,9 @@ static int StreamTcpTest15(void)
     StreamTcpUTInit(&stt.ra_ctx);
 
     /* Load the config string into parser */
-    ConfCreateContextBackup();
-    ConfInit();
-    ConfYamlLoadString(dummy_conf_string1, strlen(dummy_conf_string1));
+    SCConfCreateContextBackup();
+    SCConfInit();
+    SCConfYamlLoadString(dummy_conf_string1, strlen(dummy_conf_string1));
 
     /* Get the IP address as string and add it to Host info tree for lookups */
     ip_addr = StreamTcpParseOSPolicy(os_policy_name);
@@ -1525,10 +1529,10 @@ static int StreamTcpTest15(void)
     tcph.th_seq = htonl(10);
     tcph.th_ack = htonl(20);
     tcph.th_flags = TH_ACK | TH_PUSH;
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
     p->dst.family = AF_INET;
     p->dst.address.address_un_data32[0] = addr.s_addr;
-    p->ip4h = &ipv4h;
+    UTHSetIPV4Hdr(p, &ipv4h);
 
     StreamTcpCreateTestPacket(payload, 0x41, 3, sizeof(payload)); /*AAA*/
     p->payload = payload;
@@ -1537,9 +1541,9 @@ static int StreamTcpTest15(void)
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(20);
-    p->tcph->th_ack = htonl(13);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(20);
+    tcph.th_ack = htonl(13);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     StreamTcpCreateTestPacket(payload, 0x42, 3, sizeof(payload)); /*BBB*/
@@ -1549,9 +1553,9 @@ static int StreamTcpTest15(void)
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(15);
-    p->tcph->th_ack = htonl(23);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(15);
+    tcph.th_ack = htonl(23);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x43, 3, sizeof(payload)); /*CCC*/
@@ -1561,9 +1565,9 @@ static int StreamTcpTest15(void)
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(14);
-    p->tcph->th_ack = htonl(23);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(14);
+    tcph.th_ack = htonl(23);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x43, 3, sizeof(payload)); /*CCC*/
@@ -1574,9 +1578,9 @@ static int StreamTcpTest15(void)
         goto end;
 
     addr.s_addr = inet_addr("192.168.1.20");
-    p->tcph->th_seq = htonl(25);
-    p->tcph->th_ack = htonl(13);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(25);
+    tcph.th_ack = htonl(13);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOCLIENT;
     p->dst.address.address_un_data32[0] = addr.s_addr;
 
@@ -1587,9 +1591,9 @@ static int StreamTcpTest15(void)
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(24);
-    p->tcph->th_ack = htonl(13);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(24);
+    tcph.th_ack = htonl(13);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     StreamTcpCreateTestPacket(payload, 0x44, 3, sizeof(payload)); /*DDD*/
@@ -1628,9 +1632,9 @@ static int StreamTcpTest15(void)
 
     ret = 1;
 end:
-    ConfDeInit();
-    ConfRestoreContextBackup();
-    SCFree(p);
+    SCConfDeInit();
+    SCConfRestoreContextBackup();
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     return ret;
@@ -1672,9 +1676,9 @@ static int StreamTcpTest16(void)
     StreamTcpUTInit(&stt.ra_ctx);
 
     /* Load the config string into parser */
-    ConfCreateContextBackup();
-    ConfInit();
-    ConfYamlLoadString(dummy_conf_string1, strlen(dummy_conf_string1));
+    SCConfCreateContextBackup();
+    SCConfInit();
+    SCConfYamlLoadString(dummy_conf_string1, strlen(dummy_conf_string1));
 
     /* Get the IP address as string and add it to Host info tree for lookups */
     ip_addr = StreamTcpParseOSPolicy(os_policy_name);
@@ -1687,10 +1691,10 @@ static int StreamTcpTest16(void)
     tcph.th_seq = htonl(10);
     tcph.th_ack = htonl(20);
     tcph.th_flags = TH_ACK | TH_PUSH;
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
     p->dst.family = AF_INET;
     p->dst.address.address_un_data32[0] = addr.s_addr;
-    p->ip4h = &ipv4h;
+    UTHSetIPV4Hdr(p, &ipv4h);
 
     StreamTcpCreateTestPacket(payload, 0x41, 3, sizeof(payload)); /*AAA*/
     p->payload = payload;
@@ -1699,9 +1703,9 @@ static int StreamTcpTest16(void)
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(20);
-    p->tcph->th_ack = htonl(13);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(20);
+    tcph.th_ack = htonl(13);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     StreamTcpCreateTestPacket(payload, 0x42, 3, sizeof(payload)); /*BBB*/
@@ -1711,9 +1715,9 @@ static int StreamTcpTest16(void)
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(15);
-    p->tcph->th_ack = htonl(23);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(15);
+    tcph.th_ack = htonl(23);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x43, 3, sizeof(payload)); /*CCC*/
@@ -1723,9 +1727,9 @@ static int StreamTcpTest16(void)
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(14);
-    p->tcph->th_ack = htonl(23);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(14);
+    tcph.th_ack = htonl(23);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x43, 3, sizeof(payload)); /*CCC*/
@@ -1736,9 +1740,9 @@ static int StreamTcpTest16(void)
         goto end;
 
     addr.s_addr = inet_addr("192.168.1.1");
-    p->tcph->th_seq = htonl(25);
-    p->tcph->th_ack = htonl(13);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(25);
+    tcph.th_ack = htonl(13);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOCLIENT;
     p->dst.address.address_un_data32[0] = addr.s_addr;
 
@@ -1749,9 +1753,9 @@ static int StreamTcpTest16(void)
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(24);
-    p->tcph->th_ack = htonl(13);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(24);
+    tcph.th_ack = htonl(13);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     StreamTcpCreateTestPacket(payload, 0x44, 3, sizeof(payload)); /*DDD*/
@@ -1790,9 +1794,9 @@ static int StreamTcpTest16(void)
 
     ret = 1;
 end:
-    ConfDeInit();
-    ConfRestoreContextBackup();
-    SCFree(p);
+    SCConfDeInit();
+    SCConfRestoreContextBackup();
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     return ret;
@@ -1835,9 +1839,9 @@ static int StreamTcpTest17(void)
     StreamTcpUTInit(&stt.ra_ctx);
 
     /* Load the config string into parser */
-    ConfCreateContextBackup();
-    ConfInit();
-    ConfYamlLoadString(dummy_conf_string1, strlen(dummy_conf_string1));
+    SCConfCreateContextBackup();
+    SCConfInit();
+    SCConfYamlLoadString(dummy_conf_string1, strlen(dummy_conf_string1));
 
     /* Get the IP address as string and add it to Host info tree for lookups */
     ip_addr = StreamTcpParseOSPolicy(os_policy_name);
@@ -1850,10 +1854,10 @@ static int StreamTcpTest17(void)
     tcph.th_seq = htonl(10);
     tcph.th_ack = htonl(20);
     tcph.th_flags = TH_ACK | TH_PUSH;
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
     p->dst.family = AF_INET;
     p->dst.address.address_un_data32[0] = addr.s_addr;
-    p->ip4h = &ipv4h;
+    UTHSetIPV4Hdr(p, &ipv4h);
 
     StreamTcpCreateTestPacket(payload, 0x41, 3, sizeof(payload)); /*AAA*/
     p->payload = payload;
@@ -1862,9 +1866,9 @@ static int StreamTcpTest17(void)
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(20);
-    p->tcph->th_ack = htonl(13);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(20);
+    tcph.th_ack = htonl(13);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     StreamTcpCreateTestPacket(payload, 0x42, 3, sizeof(payload)); /*BBB*/
@@ -1874,9 +1878,9 @@ static int StreamTcpTest17(void)
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(15);
-    p->tcph->th_ack = htonl(23);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(15);
+    tcph.th_ack = htonl(23);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x43, 3, sizeof(payload)); /*CCC*/
@@ -1886,9 +1890,9 @@ static int StreamTcpTest17(void)
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(14);
-    p->tcph->th_ack = htonl(23);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(14);
+    tcph.th_ack = htonl(23);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x43, 3, sizeof(payload)); /*CCC*/
@@ -1899,9 +1903,9 @@ static int StreamTcpTest17(void)
         goto end;
 
     addr.s_addr = inet_addr("10.1.1.1");
-    p->tcph->th_seq = htonl(25);
-    p->tcph->th_ack = htonl(13);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(25);
+    tcph.th_ack = htonl(13);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOCLIENT;
     p->dst.address.address_un_data32[0] = addr.s_addr;
 
@@ -1912,9 +1916,9 @@ static int StreamTcpTest17(void)
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_seq = htonl(24);
-    p->tcph->th_ack = htonl(13);
-    p->tcph->th_flags = TH_ACK | TH_PUSH;
+    tcph.th_seq = htonl(24);
+    tcph.th_ack = htonl(13);
+    tcph.th_flags = TH_ACK | TH_PUSH;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     StreamTcpCreateTestPacket(payload, 0x44, 3, sizeof(payload)); /*DDD*/
@@ -1953,9 +1957,9 @@ static int StreamTcpTest17(void)
 
     ret = 1;
 end:
-    ConfDeInit();
-    ConfRestoreContextBackup();
-    SCFree(p);
+    SCConfDeInit();
+    SCConfRestoreContextBackup();
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     return ret;
@@ -1983,16 +1987,16 @@ static int StreamTcpTest18(void)
     SCHInfoCleanResources();
 
     /* Load the config string into parser */
-    ConfCreateContextBackup();
-    ConfInit();
-    ConfYamlLoadString(dummy_conf_string1, strlen(dummy_conf_string1));
+    SCConfCreateContextBackup();
+    SCConfInit();
+    SCConfYamlLoadString(dummy_conf_string1, strlen(dummy_conf_string1));
 
     /* Get the IP address as string and add it to Host info tree for lookups */
     ip_addr = StreamTcpParseOSPolicy(os_policy_name);
     SCHInfoAddHostOSInfo(os_policy_name, ip_addr, -1);
 
     p->dst.family = AF_INET;
-    p->ip4h = &ipv4h;
+    UTHSetIPV4Hdr(p, &ipv4h);
     addr.s_addr = inet_addr("192.168.1.1");
     p->dst.address.address_un_data32[0] = addr.s_addr;
     StreamTcpSetOSPolicy(&stream, p);
@@ -2002,9 +2006,9 @@ static int StreamTcpTest18(void)
 
     ret = 1;
 end:
-    ConfDeInit();
-    ConfRestoreContextBackup();
-    SCFree(p);
+    SCConfDeInit();
+    SCConfRestoreContextBackup();
+    PacketFree(p);
     StreamTcpUTDeinit(stt.ra_ctx);
     return ret;
 }
@@ -2030,16 +2034,16 @@ static int StreamTcpTest19(void)
     SCHInfoCleanResources();
 
     /* Load the config string into parser */
-    ConfCreateContextBackup();
-    ConfInit();
-    ConfYamlLoadString(dummy_conf_string1, strlen(dummy_conf_string1));
+    SCConfCreateContextBackup();
+    SCConfInit();
+    SCConfYamlLoadString(dummy_conf_string1, strlen(dummy_conf_string1));
 
     /* Get the IP address as string and add it to Host info tree for lookups */
     ip_addr = StreamTcpParseOSPolicy(os_policy_name);
     SCHInfoAddHostOSInfo(os_policy_name, ip_addr, -1);
 
     p->dst.family = AF_INET;
-    p->ip4h = &ipv4h;
+    UTHSetIPV4Hdr(p, &ipv4h);
     addr.s_addr = inet_addr("192.168.0.30");
     p->dst.address.address_un_data32[0] = addr.s_addr;
     StreamTcpSetOSPolicy(&stream, p);
@@ -2052,9 +2056,9 @@ static int StreamTcpTest19(void)
 
     ret = 1;
 end:
-    ConfDeInit();
-    ConfRestoreContextBackup();
-    SCFree(p);
+    SCConfDeInit();
+    SCConfRestoreContextBackup();
+    PacketFree(p);
     StreamTcpUTDeinit(stt.ra_ctx);
     return ret;
 }
@@ -2080,16 +2084,16 @@ static int StreamTcpTest20(void)
     SCHInfoCleanResources();
 
     /* Load the config string into parser */
-    ConfCreateContextBackup();
-    ConfInit();
-    ConfYamlLoadString(dummy_conf_string1, strlen(dummy_conf_string1));
+    SCConfCreateContextBackup();
+    SCConfInit();
+    SCConfYamlLoadString(dummy_conf_string1, strlen(dummy_conf_string1));
 
     /* Get the IP address as string and add it to Host info tree for lookups */
     ip_addr = StreamTcpParseOSPolicy(os_policy_name);
     SCHInfoAddHostOSInfo(os_policy_name, ip_addr, -1);
 
     p->dst.family = AF_INET;
-    p->ip4h = &ipv4h;
+    UTHSetIPV4Hdr(p, &ipv4h);
     addr.s_addr = inet_addr("192.168.0.1");
     p->dst.address.address_un_data32[0] = addr.s_addr;
     StreamTcpSetOSPolicy(&stream, p);
@@ -2102,9 +2106,9 @@ static int StreamTcpTest20(void)
 
     ret = 1;
 end:
-    ConfDeInit();
-    ConfRestoreContextBackup();
-    SCFree(p);
+    SCConfDeInit();
+    SCConfRestoreContextBackup();
+    PacketFree(p);
     StreamTcpUTDeinit(stt.ra_ctx);
     return ret;
 }
@@ -2130,16 +2134,16 @@ static int StreamTcpTest21(void)
     SCHInfoCleanResources();
 
     /* Load the config string into parser */
-    ConfCreateContextBackup();
-    ConfInit();
-    ConfYamlLoadString(dummy_conf_string1, strlen(dummy_conf_string1));
+    SCConfCreateContextBackup();
+    SCConfInit();
+    SCConfYamlLoadString(dummy_conf_string1, strlen(dummy_conf_string1));
 
     /* Get the IP address as string and add it to Host info tree for lookups */
     ip_addr = StreamTcpParseOSPolicy(os_policy_name);
     SCHInfoAddHostOSInfo(os_policy_name, ip_addr, -1);
 
     p->dst.family = AF_INET;
-    p->ip4h = &ipv4h;
+    UTHSetIPV4Hdr(p, &ipv4h);
     addr.s_addr = inet_addr("192.168.1.30");
     p->dst.address.address_un_data32[0] = addr.s_addr;
     StreamTcpSetOSPolicy(&stream, p);
@@ -2152,9 +2156,9 @@ static int StreamTcpTest21(void)
 
     ret = 1;
 end:
-    ConfDeInit();
-    ConfRestoreContextBackup();
-    SCFree(p);
+    SCConfDeInit();
+    SCConfRestoreContextBackup();
+    PacketFree(p);
     StreamTcpUTDeinit(stt.ra_ctx);
     return ret;
 }
@@ -2180,16 +2184,16 @@ static int StreamTcpTest22(void)
     SCHInfoCleanResources();
 
     /* Load the config string into parser */
-    ConfCreateContextBackup();
-    ConfInit();
-    ConfYamlLoadString(dummy_conf_string1, strlen(dummy_conf_string1));
+    SCConfCreateContextBackup();
+    SCConfInit();
+    SCConfYamlLoadString(dummy_conf_string1, strlen(dummy_conf_string1));
 
     /* Get the IP address as string and add it to Host info tree for lookups */
     ip_addr = StreamTcpParseOSPolicy(os_policy_name);
     SCHInfoAddHostOSInfo(os_policy_name, ip_addr, -1);
 
     p->dst.family = AF_INET;
-    p->ip4h = &ipv4h;
+    UTHSetIPV4Hdr(p, &ipv4h);
     addr.s_addr = inet_addr("123.231.2.1");
     p->dst.address.address_un_data32[0] = addr.s_addr;
     StreamTcpSetOSPolicy(&stream, p);
@@ -2202,9 +2206,9 @@ static int StreamTcpTest22(void)
 
     ret = 1;
 end:
-    ConfDeInit();
-    ConfRestoreContextBackup();
-    SCFree(p);
+    SCConfDeInit();
+    SCConfRestoreContextBackup();
+    PacketFree(p);
     StreamTcpUTDeinit(stt.ra_ctx);
     return ret;
 }
@@ -2237,25 +2241,25 @@ static int StreamTcpTest23(void)
     p->flow = &f;
     tcph.th_win = 5480;
     tcph.th_flags = TH_PUSH | TH_ACK;
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
     p->flowflags = FLOW_PKT_TOSERVER;
     p->payload = packet;
     SET_ISN(&ssn.client, 3184324452UL);
 
-    p->tcph->th_seq = htonl(3184324453UL);
-    p->tcph->th_ack = htonl(3373419609UL);
+    tcph.th_seq = htonl(3184324453UL);
+    tcph.th_ack = htonl(3373419609UL);
     p->payload_len = 2;
 
     FAIL_IF(StreamTcpReassembleHandleSegment(&tv, stt.ra_ctx, &ssn, &ssn.client, p) == -1);
 
-    p->tcph->th_seq = htonl(3184324455UL);
-    p->tcph->th_ack = htonl(3373419621UL);
+    tcph.th_seq = htonl(3184324455UL);
+    tcph.th_ack = htonl(3373419621UL);
     p->payload_len = 2;
 
     FAIL_IF(StreamTcpReassembleHandleSegment(&tv, stt.ra_ctx, &ssn, &ssn.client, p) == -1);
 
-    p->tcph->th_seq = htonl(3184324453UL);
-    p->tcph->th_ack = htonl(3373419621UL);
+    tcph.th_seq = htonl(3184324453UL);
+    tcph.th_ack = htonl(3373419621UL);
     p->payload_len = 6;
 
     FAIL_IF(StreamTcpReassembleHandleSegment(&tv, stt.ra_ctx, &ssn, &ssn.client, p) == -1);
@@ -2265,7 +2269,7 @@ static int StreamTcpTest23(void)
     FAIL_IF(TCP_SEG_LEN(seg) != 2);
 
     StreamTcpUTClearSession(&ssn);
-    SCFree(p);
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     FAIL_IF(SC_ATOMIC_GET(st_memuse) > 0);
@@ -2299,26 +2303,26 @@ static int StreamTcpTest24(void)
     p->flow = &f;
     tcph.th_win = 5480;
     tcph.th_flags = TH_PUSH | TH_ACK;
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
     p->flowflags = FLOW_PKT_TOSERVER;
     p->payload = packet;
     // ssn.client.ra_app_base_seq = ssn.client.ra_raw_base_seq = ssn.client.last_ack = 3184324453UL;
     SET_ISN(&ssn.client, 3184324453UL);
 
-    p->tcph->th_seq = htonl(3184324455UL);
-    p->tcph->th_ack = htonl(3373419621UL);
+    tcph.th_seq = htonl(3184324455UL);
+    tcph.th_ack = htonl(3373419621UL);
     p->payload_len = 4;
 
     FAIL_IF(StreamTcpReassembleHandleSegment(&tv, stt.ra_ctx, &ssn, &ssn.client, p) == -1);
 
-    p->tcph->th_seq = htonl(3184324459UL);
-    p->tcph->th_ack = htonl(3373419633UL);
+    tcph.th_seq = htonl(3184324459UL);
+    tcph.th_ack = htonl(3373419633UL);
     p->payload_len = 2;
 
     FAIL_IF(StreamTcpReassembleHandleSegment(&tv, stt.ra_ctx, &ssn, &ssn.client, p) == -1);
 
-    p->tcph->th_seq = htonl(3184324459UL);
-    p->tcph->th_ack = htonl(3373419657UL);
+    tcph.th_seq = htonl(3184324459UL);
+    tcph.th_ack = htonl(3373419657UL);
     p->payload_len = 4;
 
     FAIL_IF(StreamTcpReassembleHandleSegment(&tv, stt.ra_ctx, &ssn, &ssn.client, p) == -1);
@@ -2328,7 +2332,7 @@ static int StreamTcpTest24(void)
     FAIL_IF(TCP_SEG_LEN(seg) != 4);
 
     StreamTcpUTClearSession(&ssn);
-    SCFree(p);
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     FAIL_IF(SC_ATOMIC_GET(st_memuse) > 0);
@@ -2362,31 +2366,31 @@ static int StreamTcpTest25(void)
     p->flow = &f;
     tcph.th_win = htons(5480);
     tcph.th_flags = TH_SYN | TH_CWR;
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
     p->flowflags = FLOW_PKT_TOSERVER;
     StreamTcpUTInit(&stt.ra_ctx);
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_ack = htonl(1);
-    p->tcph->th_flags = TH_SYN | TH_ACK;
+    tcph.th_ack = htonl(1);
+    tcph.th_flags = TH_SYN | TH_ACK;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1 || (TcpSession *)p->flow->protoctx == NULL)
         goto end;
 
-    p->tcph->th_ack = htonl(1);
-    p->tcph->th_seq = htonl(1);
-    p->tcph->th_flags = TH_ACK;
+    tcph.th_ack = htonl(1);
+    tcph.th_seq = htonl(1);
+    tcph.th_flags = TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1 || (TcpSession *)p->flow->protoctx == NULL)
         goto end;
 
-    p->tcph->th_ack = htonl(1);
-    p->tcph->th_seq = htonl(2);
-    p->tcph->th_flags = TH_PUSH | TH_ACK;
+    tcph.th_ack = htonl(1);
+    tcph.th_seq = htonl(2);
+    tcph.th_flags = TH_PUSH | TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x41, 3, 4); /*AAA*/
@@ -2400,9 +2404,9 @@ static int StreamTcpTest25(void)
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1 || (TcpSession *)p->flow->protoctx == NULL)
         goto end;
 
-    p->tcph->th_ack = htonl(1);
-    p->tcph->th_seq = htonl(6);
-    p->tcph->th_flags = TH_PUSH | TH_ACK;
+    tcph.th_ack = htonl(1);
+    tcph.th_seq = htonl(6);
+    tcph.th_flags = TH_PUSH | TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x42, 3, 4); /*BBB*/
@@ -2420,7 +2424,7 @@ static int StreamTcpTest25(void)
 
     ret = 1;
 end:
-    SCFree(p);
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     return ret;
@@ -2453,7 +2457,7 @@ static int StreamTcpTest26(void)
     p->flow = &f;
     tcph.th_win = htons(5480);
     tcph.th_flags = TH_SYN | TH_ECN;
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpUTInit(&stt.ra_ctx);
@@ -2461,24 +2465,24 @@ static int StreamTcpTest26(void)
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_ack = htonl(1);
-    p->tcph->th_flags = TH_SYN | TH_ACK;
+    tcph.th_ack = htonl(1);
+    tcph.th_flags = TH_SYN | TH_ACK;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1 || (TcpSession *)p->flow->protoctx == NULL)
         goto end;
 
-    p->tcph->th_ack = htonl(1);
-    p->tcph->th_seq = htonl(1);
-    p->tcph->th_flags = TH_ACK;
+    tcph.th_ack = htonl(1);
+    tcph.th_seq = htonl(1);
+    tcph.th_flags = TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1 || (TcpSession *)p->flow->protoctx == NULL)
         goto end;
 
-    p->tcph->th_ack = htonl(1);
-    p->tcph->th_seq = htonl(2);
-    p->tcph->th_flags = TH_PUSH | TH_ACK;
+    tcph.th_ack = htonl(1);
+    tcph.th_seq = htonl(2);
+    tcph.th_flags = TH_PUSH | TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x41, 3, 4); /*AAA*/
@@ -2492,9 +2496,9 @@ static int StreamTcpTest26(void)
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1 || (TcpSession *)p->flow->protoctx == NULL)
         goto end;
 
-    p->tcph->th_ack = htonl(1);
-    p->tcph->th_seq = htonl(6);
-    p->tcph->th_flags = TH_PUSH | TH_ACK;
+    tcph.th_ack = htonl(1);
+    tcph.th_seq = htonl(6);
+    tcph.th_flags = TH_PUSH | TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x42, 3, 4); /*BBB*/
@@ -2512,7 +2516,7 @@ static int StreamTcpTest26(void)
 
     ret = 1;
 end:
-    SCFree(p);
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     return ret;
@@ -2545,7 +2549,7 @@ static int StreamTcpTest27(void)
     p->flow = &f;
     tcph.th_win = htons(5480);
     tcph.th_flags = TH_SYN | TH_CWR | TH_ECN;
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpUTInit(&stt.ra_ctx);
@@ -2553,24 +2557,24 @@ static int StreamTcpTest27(void)
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
-    p->tcph->th_ack = htonl(1);
-    p->tcph->th_flags = TH_SYN | TH_ACK;
+    tcph.th_ack = htonl(1);
+    tcph.th_flags = TH_SYN | TH_ACK;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1 || (TcpSession *)p->flow->protoctx == NULL)
         goto end;
 
-    p->tcph->th_ack = htonl(1);
-    p->tcph->th_seq = htonl(1);
-    p->tcph->th_flags = TH_ACK;
+    tcph.th_ack = htonl(1);
+    tcph.th_seq = htonl(1);
+    tcph.th_flags = TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1 || (TcpSession *)p->flow->protoctx == NULL)
         goto end;
 
-    p->tcph->th_ack = htonl(1);
-    p->tcph->th_seq = htonl(2);
-    p->tcph->th_flags = TH_PUSH | TH_ACK;
+    tcph.th_ack = htonl(1);
+    tcph.th_seq = htonl(2);
+    tcph.th_flags = TH_PUSH | TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x41, 3, 4); /*AAA*/
@@ -2584,9 +2588,9 @@ static int StreamTcpTest27(void)
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1 || (TcpSession *)p->flow->protoctx == NULL)
         goto end;
 
-    p->tcph->th_ack = htonl(1);
-    p->tcph->th_seq = htonl(6);
-    p->tcph->th_flags = TH_PUSH | TH_ACK;
+    tcph.th_ack = htonl(1);
+    tcph.th_seq = htonl(6);
+    tcph.th_flags = TH_PUSH | TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x42, 3, 4); /*BBB*/
@@ -2604,7 +2608,7 @@ static int StreamTcpTest27(void)
 
     ret = 1;
 end:
-    SCFree(p);
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     return ret;
@@ -2662,7 +2666,7 @@ static int StreamTcpTest37(void)
     p->flow = &f;
     tcph.th_win = htons(5480);
     tcph.th_flags = TH_SYN;
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpUTInit(&stt.ra_ctx);
@@ -2672,8 +2676,8 @@ static int StreamTcpTest37(void)
         goto end;
     }
 
-    p->tcph->th_ack = htonl(1);
-    p->tcph->th_flags = TH_SYN | TH_ACK;
+    tcph.th_ack = htonl(1);
+    tcph.th_flags = TH_SYN | TH_ACK;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1 || (TcpSession *)p->flow->protoctx == NULL) {
@@ -2681,9 +2685,9 @@ static int StreamTcpTest37(void)
         goto end;
     }
 
-    p->tcph->th_ack = htonl(1);
-    p->tcph->th_seq = htonl(1);
-    p->tcph->th_flags = TH_ACK;
+    tcph.th_ack = htonl(1);
+    tcph.th_seq = htonl(1);
+    tcph.th_flags = TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1 || (TcpSession *)p->flow->protoctx == NULL) {
@@ -2696,9 +2700,9 @@ static int StreamTcpTest37(void)
         goto end;
     }
 
-    p->tcph->th_ack = htonl(2);
-    p->tcph->th_seq = htonl(4);
-    p->tcph->th_flags = TH_ACK | TH_FIN;
+    tcph.th_ack = htonl(2);
+    tcph.th_seq = htonl(4);
+    tcph.th_flags = TH_ACK | TH_FIN;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1 || (TcpSession *)p->flow->protoctx == NULL) {
@@ -2711,9 +2715,9 @@ static int StreamTcpTest37(void)
         goto end;
     }
 
-    p->tcph->th_ack = htonl(1);
-    p->tcph->th_seq = htonl(1);
-    p->tcph->th_flags = TH_PUSH | TH_ACK;
+    tcph.th_ack = htonl(1);
+    tcph.th_seq = htonl(1);
+    tcph.th_flags = TH_PUSH | TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x41, 3, 4); /*AAA*/
@@ -2725,9 +2729,9 @@ static int StreamTcpTest37(void)
         goto end;
     }
 
-    p->tcph->th_ack = htonl(4);
-    p->tcph->th_seq = htonl(2);
-    p->tcph->th_flags = TH_ACK;
+    tcph.th_ack = htonl(4);
+    tcph.th_seq = htonl(2);
+    tcph.th_flags = TH_ACK;
     p->payload_len = 0;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
@@ -2743,7 +2747,7 @@ static int StreamTcpTest37(void)
 
     ret = 1;
 end:
-    SCFree(p);
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     return ret;
@@ -2779,7 +2783,7 @@ static int StreamTcpTest38(void)
     p->flow = &f;
     tcph.th_win = htons(5480);
     tcph.th_flags = TH_SYN;
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpUTInit(&stt.ra_ctx);
@@ -2788,8 +2792,8 @@ static int StreamTcpTest38(void)
         goto end;
     }
 
-    p->tcph->th_ack = htonl(1);
-    p->tcph->th_flags = TH_SYN | TH_ACK;
+    tcph.th_ack = htonl(1);
+    tcph.th_flags = TH_SYN | TH_ACK;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1) {
@@ -2797,9 +2801,9 @@ static int StreamTcpTest38(void)
         goto end;
     }
 
-    p->tcph->th_ack = htonl(1);
-    p->tcph->th_seq = htonl(1);
-    p->tcph->th_flags = TH_ACK;
+    tcph.th_ack = htonl(1);
+    tcph.th_seq = htonl(1);
+    tcph.th_flags = TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1) {
@@ -2807,9 +2811,9 @@ static int StreamTcpTest38(void)
         goto end;
     }
 
-    p->tcph->th_ack = htonl(29847);
-    p->tcph->th_seq = htonl(2);
-    p->tcph->th_flags = TH_PUSH | TH_ACK;
+    tcph.th_ack = htonl(29847);
+    tcph.th_seq = htonl(2);
+    tcph.th_flags = TH_PUSH | TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x41, 3, 4); /*AAA*/
@@ -2829,9 +2833,9 @@ static int StreamTcpTest38(void)
         goto end;
     }
 
-    p->tcph->th_ack = htonl(1);
-    p->tcph->th_seq = htonl(1);
-    p->tcph->th_flags = TH_PUSH | TH_ACK;
+    tcph.th_ack = htonl(1);
+    tcph.th_seq = htonl(1);
+    tcph.th_flags = TH_PUSH | TH_ACK;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     StreamTcpCreateTestPacket(payload, 0x41, 127, 128); /*AAA*/
@@ -2849,9 +2853,9 @@ static int StreamTcpTest38(void)
         goto end;
     }
 
-    p->tcph->th_ack = htonl(256); // in window, but beyond next_seq
-    p->tcph->th_seq = htonl(5);
-    p->tcph->th_flags = TH_PUSH | TH_ACK;
+    tcph.th_ack = htonl(256); // in window, but beyond next_seq
+    tcph.th_seq = htonl(5);
+    tcph.th_flags = TH_PUSH | TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x41, 3, 4); /*AAA*/
@@ -2871,9 +2875,9 @@ static int StreamTcpTest38(void)
         goto end;
     }
 
-    p->tcph->th_ack = htonl(128);
-    p->tcph->th_seq = htonl(8);
-    p->tcph->th_flags = TH_PUSH | TH_ACK;
+    tcph.th_ack = htonl(128);
+    tcph.th_seq = htonl(8);
+    tcph.th_flags = TH_PUSH | TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x41, 3, 4); /*AAA*/
@@ -2897,7 +2901,7 @@ static int StreamTcpTest38(void)
 
 end:
     StreamTcpSessionClear(p->flow->protoctx);
-    SCFree(p);
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     return ret;
@@ -2932,7 +2936,7 @@ static int StreamTcpTest39(void)
     p->flow = &f;
     tcph.th_win = htons(5480);
     tcph.th_flags = TH_SYN;
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
     p->flowflags = FLOW_PKT_TOSERVER;
     int ret = 0;
 
@@ -2943,8 +2947,8 @@ static int StreamTcpTest39(void)
         goto end;
     }
 
-    p->tcph->th_ack = htonl(1);
-    p->tcph->th_flags = TH_SYN | TH_ACK;
+    tcph.th_ack = htonl(1);
+    tcph.th_flags = TH_SYN | TH_ACK;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1) {
@@ -2952,9 +2956,9 @@ static int StreamTcpTest39(void)
         goto end;
     }
 
-    p->tcph->th_ack = htonl(1);
-    p->tcph->th_seq = htonl(1);
-    p->tcph->th_flags = TH_ACK;
+    tcph.th_ack = htonl(1);
+    tcph.th_seq = htonl(1);
+    tcph.th_flags = TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1) {
@@ -2962,9 +2966,9 @@ static int StreamTcpTest39(void)
         goto end;
     }
 
-    p->tcph->th_ack = htonl(1);
-    p->tcph->th_seq = htonl(1);
-    p->tcph->th_flags = TH_PUSH | TH_ACK;
+    tcph.th_ack = htonl(1);
+    tcph.th_seq = htonl(1);
+    tcph.th_flags = TH_PUSH | TH_ACK;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     StreamTcpCreateTestPacket(payload, 0x41, 3, 4); /*AAA*/
@@ -2982,9 +2986,9 @@ static int StreamTcpTest39(void)
         goto end;
     }
 
-    p->tcph->th_ack = htonl(4);
-    p->tcph->th_seq = htonl(2);
-    p->tcph->th_flags = TH_PUSH | TH_ACK;
+    tcph.th_ack = htonl(4);
+    tcph.th_seq = htonl(2);
+    tcph.th_flags = TH_PUSH | TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     StreamTcpCreateTestPacket(payload, 0x41, 3, 4); /*AAA*/
@@ -3004,9 +3008,9 @@ static int StreamTcpTest39(void)
         goto end;
     }
 
-    p->tcph->th_seq = htonl(4);
-    p->tcph->th_ack = htonl(5);
-    p->tcph->th_flags = TH_PUSH | TH_ACK;
+    tcph.th_seq = htonl(4);
+    tcph.th_ack = htonl(5);
+    tcph.th_flags = TH_PUSH | TH_ACK;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     StreamTcpCreateTestPacket(payload, 0x41, 3, 4); /*AAA*/
@@ -3030,7 +3034,7 @@ static int StreamTcpTest39(void)
 
 end:
     StreamTcpSessionClear(p->flow->protoctx);
-    SCFree(p);
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     return ret;
@@ -3058,7 +3062,7 @@ static int StreamTcpTest42(void)
     StreamTcpUTInit(&stt.ra_ctx);
 
     FLOW_INITIALIZE(&f);
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
     tcph.th_win = htons(5480);
     p->flow = &f;
 
@@ -3071,27 +3075,27 @@ static int StreamTcpTest42(void)
         goto end;
 
     /* SYN/ACK */
-    p->tcph->th_seq = htonl(500);
-    p->tcph->th_ack = htonl(101);
-    p->tcph->th_flags = TH_SYN | TH_ACK;
+    tcph.th_seq = htonl(500);
+    tcph.th_ack = htonl(101);
+    tcph.th_flags = TH_SYN | TH_ACK;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
     /* SYN/ACK */
-    p->tcph->th_seq = htonl(1000);
-    p->tcph->th_ack = htonl(101);
-    p->tcph->th_flags = TH_SYN | TH_ACK;
+    tcph.th_seq = htonl(1000);
+    tcph.th_ack = htonl(101);
+    tcph.th_flags = TH_SYN | TH_ACK;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
     /* ACK */
-    p->tcph->th_ack = htonl(501);
-    p->tcph->th_seq = htonl(101);
-    p->tcph->th_flags = TH_ACK;
+    tcph.th_ack = htonl(501);
+    tcph.th_seq = htonl(101);
+    tcph.th_flags = TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
@@ -3117,7 +3121,7 @@ static int StreamTcpTest42(void)
 
     ret = 1;
 end:
-    SCFree(p);
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     return ret;
@@ -3145,7 +3149,7 @@ static int StreamTcpTest43(void)
     StreamTcpUTInit(&stt.ra_ctx);
 
     FLOW_INITIALIZE(&f);
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
     tcph.th_win = htons(5480);
     p->flow = &f;
 
@@ -3158,27 +3162,27 @@ static int StreamTcpTest43(void)
         goto end;
 
     /* SYN/ACK */
-    p->tcph->th_seq = htonl(500);
-    p->tcph->th_ack = htonl(101);
-    p->tcph->th_flags = TH_SYN | TH_ACK;
+    tcph.th_seq = htonl(500);
+    tcph.th_ack = htonl(101);
+    tcph.th_flags = TH_SYN | TH_ACK;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
     /* SYN/ACK */
-    p->tcph->th_seq = htonl(1000);
-    p->tcph->th_ack = htonl(101);
-    p->tcph->th_flags = TH_SYN | TH_ACK;
+    tcph.th_seq = htonl(1000);
+    tcph.th_ack = htonl(101);
+    tcph.th_flags = TH_SYN | TH_ACK;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
     /* ACK */
-    p->tcph->th_ack = htonl(1001);
-    p->tcph->th_seq = htonl(101);
-    p->tcph->th_flags = TH_ACK;
+    tcph.th_ack = htonl(1001);
+    tcph.th_seq = htonl(101);
+    tcph.th_flags = TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
@@ -3204,7 +3208,7 @@ static int StreamTcpTest43(void)
 
     ret = 1;
 end:
-    SCFree(p);
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     return ret;
@@ -3232,7 +3236,7 @@ static int StreamTcpTest44(void)
     StreamTcpUTInit(&stt.ra_ctx);
 
     FLOW_INITIALIZE(&f);
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
     tcph.th_win = htons(5480);
     p->flow = &f;
 
@@ -3245,27 +3249,27 @@ static int StreamTcpTest44(void)
         goto end;
 
     /* SYN/ACK */
-    p->tcph->th_seq = htonl(500);
-    p->tcph->th_ack = htonl(101);
-    p->tcph->th_flags = TH_SYN | TH_ACK;
+    tcph.th_seq = htonl(500);
+    tcph.th_ack = htonl(101);
+    tcph.th_flags = TH_SYN | TH_ACK;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
     /* SYN/ACK */
-    p->tcph->th_seq = htonl(1000);
-    p->tcph->th_ack = htonl(101);
-    p->tcph->th_flags = TH_SYN | TH_ACK;
+    tcph.th_seq = htonl(1000);
+    tcph.th_ack = htonl(101);
+    tcph.th_flags = TH_SYN | TH_ACK;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
     /* ACK */
-    p->tcph->th_ack = htonl(3001);
-    p->tcph->th_seq = htonl(101);
-    p->tcph->th_flags = TH_ACK;
+    tcph.th_ack = htonl(3001);
+    tcph.th_seq = htonl(101);
+    tcph.th_flags = TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) != -1)
@@ -3287,7 +3291,7 @@ static int StreamTcpTest44(void)
 
     ret = 1;
 end:
-    SCFree(p);
+    PacketFree(p);
     FLOW_DESTROY(&f);
     StreamTcpUTDeinit(stt.ra_ctx);
     return ret;
@@ -3316,7 +3320,7 @@ static int StreamTcpTest45(void)
     stream_config.max_synack_queued = 2;
 
     FLOW_INITIALIZE(&f);
-    p->tcph = &tcph;
+    UTHSetTCPHdr(p, &tcph);
     tcph.th_win = htons(5480);
     p->flow = &f;
 
@@ -3329,45 +3333,45 @@ static int StreamTcpTest45(void)
         goto end;
 
     /* SYN/ACK */
-    p->tcph->th_seq = htonl(500);
-    p->tcph->th_ack = htonl(101);
-    p->tcph->th_flags = TH_SYN | TH_ACK;
+    tcph.th_seq = htonl(500);
+    tcph.th_ack = htonl(101);
+    tcph.th_flags = TH_SYN | TH_ACK;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
     /* SYN/ACK */
-    p->tcph->th_seq = htonl(1000);
-    p->tcph->th_ack = htonl(101);
-    p->tcph->th_flags = TH_SYN | TH_ACK;
+    tcph.th_seq = htonl(1000);
+    tcph.th_ack = htonl(101);
+    tcph.th_flags = TH_SYN | TH_ACK;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
     /* SYN/ACK */
-    p->tcph->th_seq = htonl(2000);
-    p->tcph->th_ack = htonl(101);
-    p->tcph->th_flags = TH_SYN | TH_ACK;
+    tcph.th_seq = htonl(2000);
+    tcph.th_ack = htonl(101);
+    tcph.th_flags = TH_SYN | TH_ACK;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
         goto end;
 
     /* SYN/ACK */
-    p->tcph->th_seq = htonl(3000);
-    p->tcph->th_ack = htonl(101);
-    p->tcph->th_flags = TH_SYN | TH_ACK;
+    tcph.th_seq = htonl(3000);
+    tcph.th_ack = htonl(101);
+    tcph.th_flags = TH_SYN | TH_ACK;
     p->flowflags = FLOW_PKT_TOCLIENT;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) != -1)
         goto end;
 
     /* ACK */
-    p->tcph->th_ack = htonl(1001);
-    p->tcph->th_seq = htonl(101);
-    p->tcph->th_flags = TH_ACK;
+    tcph.th_ack = htonl(1001);
+    tcph.th_seq = htonl(101);
+    tcph.th_flags = TH_ACK;
     p->flowflags = FLOW_PKT_TOSERVER;
 
     if (StreamTcpPacket(&tv, p, &stt, &pq) == -1)
@@ -3393,7 +3397,7 @@ static int StreamTcpTest45(void)
 
     ret = 1;
 end:
-    SCFree(p);
+    PacketFree(p);
     StreamTcpUTDeinit(stt.ra_ctx);
     return ret;
 }

@@ -15,6 +15,7 @@
  * 02110-1301, USA.
  */
 
+#![deny(warnings)]
 #![allow(clippy::uninlined_format_args)]
 
 extern crate proc_macro;
@@ -23,6 +24,7 @@ use proc_macro::TokenStream;
 
 mod applayerevent;
 mod applayerframetype;
+mod applayerstate;
 mod stringenum;
 
 /// The `AppLayerEvent` derive macro generates a `AppLayerEvent` trait
@@ -52,7 +54,12 @@ pub fn derive_app_layer_frame_type(input: TokenStream) -> TokenStream {
     applayerframetype::derive_app_layer_frame_type(input)
 }
 
-#[proc_macro_derive(EnumStringU8, attributes(name))]
+#[proc_macro_derive(AppLayerState, attributes(suricata))]
+pub fn derive_app_layer_state(input: TokenStream) -> TokenStream {
+    applayerstate::derive_app_layer_state(input)
+}
+
+#[proc_macro_derive(EnumStringU8, attributes(name, suricata))]
 pub fn derive_enum_string_u8(input: TokenStream) -> TokenStream {
     stringenum::derive_enum_string::<u8>(input, "u8")
 }
@@ -62,7 +69,7 @@ pub fn derive_enum_string_u16(input: TokenStream) -> TokenStream {
     stringenum::derive_enum_string::<u16>(input, "u16")
 }
 
-#[proc_macro_derive(EnumStringU32, attributes(name))]
+#[proc_macro_derive(EnumStringU32, attributes(name, suricata))]
 pub fn derive_enum_string_u32(input: TokenStream) -> TokenStream {
     stringenum::derive_enum_string::<u32>(input, "u32")
 }

@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2020 Open Information Security Foundation
+/* Copyright (C) 2007-2025 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -72,14 +72,15 @@ static int g_tls_generic_list_id = 0;
  */
 void DetectTlsVersionRegister (void)
 {
-    sigmatch_table[DETECT_AL_TLS_VERSION].name = "tls.version";
-    sigmatch_table[DETECT_AL_TLS_VERSION].desc = "match on TLS/SSL version";
-    sigmatch_table[DETECT_AL_TLS_VERSION].url = "/rules/tls-keywords.html#tls-version";
-    sigmatch_table[DETECT_AL_TLS_VERSION].AppLayerTxMatch = DetectTlsVersionMatch;
-    sigmatch_table[DETECT_AL_TLS_VERSION].Setup = DetectTlsVersionSetup;
-    sigmatch_table[DETECT_AL_TLS_VERSION].Free  = DetectTlsVersionFree;
+    sigmatch_table[DETECT_TLS_VERSION].name = "tls.version";
+    sigmatch_table[DETECT_TLS_VERSION].desc = "match on TLS/SSL version";
+    sigmatch_table[DETECT_TLS_VERSION].url = "/rules/tls-keywords.html#tls-version";
+    sigmatch_table[DETECT_TLS_VERSION].AppLayerTxMatch = DetectTlsVersionMatch;
+    sigmatch_table[DETECT_TLS_VERSION].Setup = DetectTlsVersionSetup;
+    sigmatch_table[DETECT_TLS_VERSION].Free = DetectTlsVersionFree;
+    sigmatch_table[DETECT_TLS_VERSION].flags = SIGMATCH_SUPPORT_FIREWALL;
 #ifdef UNITTESTS
-    sigmatch_table[DETECT_AL_TLS_VERSION].RegisterTests = DetectTlsVersionRegisterTests;
+    sigmatch_table[DETECT_TLS_VERSION].RegisterTests = DetectTlsVersionRegisterTests;
 #endif
 
     DetectSetupParseRegexes(PARSE_REGEX, &parse_regex);
@@ -105,13 +106,12 @@ static int DetectTlsVersionMatch (DetectEngineThreadCtx *det_ctx,
     SCEnter();
 
     const DetectTlsVersionData *tls_data = (const DetectTlsVersionData *)m;
-    SSLState *ssl_state = (SSLState *)state;
+    const SSLState *ssl_state = (SSLState *)state;
     if (ssl_state == NULL) {
         SCLogDebug("no tls state, no match");
         SCReturnInt(0);
     }
 
-    int ret = 0;
     uint16_t version = 0;
     SCLogDebug("looking for tls_data->ver 0x%02X (flags 0x%02X)", tls_data->ver, flags);
 
@@ -130,11 +130,7 @@ static int DetectTlsVersionMatch (DetectEngineThreadCtx *det_ctx,
         }
     }
 
-    if (tls_data->ver == version) {
-        ret = 1;
-    }
-
-    SCReturnInt(ret);
+    SCReturnInt((tls_data->ver == version));
 }
 
 /**
@@ -231,30 +227,27 @@ error:
  */
 static int DetectTlsVersionSetup (DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
-    DetectTlsVersionData *tls = NULL;
-
-    if (DetectSignatureSetAppProto(s, ALPROTO_TLS) != 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_TLS) != 0)
         return -1;
 
-    tls = DetectTlsVersionParse(de_ctx, str);
+    DetectTlsVersionData *tls = DetectTlsVersionParse(de_ctx, str);
     if (tls == NULL)
-        goto error;
+        return -1;
 
+    /* keyword supports multiple hooks, so attach to the hook specified in the rule. */
+    int list = g_tls_generic_list_id;
     /* Okay so far so good, lets get this into a SigMatch
      * and put it in the Signature. */
+    if (s->init_data->hook.type == SIGNATURE_HOOK_TYPE_APP) {
+        list = s->init_data->hook.sm_list;
+    }
 
-    if (SigMatchAppendSMToList(de_ctx, s, DETECT_AL_TLS_VERSION, (SigMatchCtx *)tls,
-                g_tls_generic_list_id) == NULL) {
-        goto error;
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_TLS_VERSION, (SigMatchCtx *)tls, list) == NULL) {
+        DetectTlsVersionFree(de_ctx, tls);
+        return -1;
     }
 
     return 0;
-
-error:
-    if (tls != NULL)
-        DetectTlsVersionFree(de_ctx, tls);
-    return -1;
-
 }
 
 /**

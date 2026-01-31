@@ -25,6 +25,7 @@
 
 #include "suricata-common.h"
 #include "device-storage.h"
+#include "util-device-private.h"
 #include "util-storage.h"
 #include "util-unittest.h"
 
@@ -96,16 +97,6 @@ void *LiveDevGetStorageById(LiveDevice *d, LiveDevStorageId id)
  */
 
 /* Start of "private" function */
-
-void *LiveDevAllocStorageById(LiveDevice *d, LiveDevStorageId id)
-{
-    return StorageAllocByIdPrealloc(d->storage, STORAGE_DEVICE, id.id);
-}
-
-void LiveDevFreeStorageById(LiveDevice *d, LiveDevStorageId id)
-{
-    StorageFreeById(d->storage, STORAGE_DEVICE, id.id);
-}
 
 void LiveDevFreeStorage(LiveDevice *d)
 {

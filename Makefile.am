@@ -7,12 +7,18 @@ EXTRA_DIST = ChangeLog COPYING LICENSE suricata.yaml.in \
              $(SURICATA_UPDATE_DIR) \
 	     lua \
 	     acsite.m4 \
-	     scripts/generate-images.sh
-SUBDIRS = $(HTP_DIR) rust src qa rules doc contrib etc python ebpf \
+	     scripts/generate-images.sh \
+	     scripts/docs-almalinux9-minimal-build.sh \
+	     scripts/docs-ubuntu-debian-minimal-build.sh \
+       scripts/evedoc.py \
+	     examples/plugins
+SUBDIRS = rust src plugins qa rules doc etc python ebpf \
           $(SURICATA_UPDATE_DIR)
-DIST_SUBDIRS = examples/plugins/c-json-filetype $(SUBDIRS)
+DIST_SUBDIRS = $(SUBDIRS) examples/lib/simple examples/lib/custom
 
 CLEANFILES = stamp-h[0-9]*
+
+DISTCLEANFILES = compile_commands.json
 
 install-data-am:
 	@echo "Run 'make install-conf' if you want to install initial configuration files. Or 'make install-full' to install configuration and rules";
@@ -33,6 +39,7 @@ install-conf:
 	install -d "$(DESTDIR)$(e_rundir)"
 	install -m 770 -d "$(DESTDIR)$(e_localstatedir)"
 	install -m 770 -d "$(DESTDIR)$(e_datadir)"
+	install -m 770 -d "$(DESTDIR)$(e_sghcachedir)"
 
 install-rules:
 if INSTALL_SURICATA_UPDATE
@@ -49,7 +56,7 @@ endif
 	@echo "You can now start suricata by running as root something like:"
 	@echo "  $(DESTDIR)$(bindir)/suricata -c $(DESTDIR)$(e_sysconfdir)suricata.yaml -i eth0"
 	@echo ""
-	@echo "If a library like libhtp.so is not found, you can run suricata with:"
+	@echo "If a shared library is not found, you can add library paths with:"
 	@echo "  LD_LIBRARY_PATH="$(DESTDIR)$(prefix)/lib" "$(DESTDIR)$(bindir)/suricata" -c "$(DESTDIR)$(e_sysconfdir)suricata.yaml" -i eth0"
 	@echo ""
 	@echo "The Emerging Threats Open rules are now installed. Rules can be"
@@ -66,3 +73,16 @@ install-library:
 
 install-headers:
 	cd src && $(MAKE) $@
+
+compile-commands:
+if HAVE_CLANG
+	$(MAKE) -C src clean
+	TMP_DIR=$$(mktemp -d --suffix=.suricata-compile-commands) && \
+	$(MAKE) EXTRA_CFLAGS="-MJ $$TMP_DIR/\$$*.json" && \
+	echo '[' > $(top_builddir)/compile_commands.json && \
+	cat $$TMP_DIR/*.json >> $(top_builddir)/compile_commands.json && \
+	echo ']' >> $(top_builddir)/compile_commands.json && \
+	rm -rf $$TMP_DIR
+else
+	@echo "clang compile_commands.json generation not supported with current compiler"
+endif

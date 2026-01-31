@@ -38,7 +38,7 @@
 #include "util-error.h"
 #include "util-privs.h"
 #include "util-datalink.h"
-#include "util-device.h"
+#include "util-device-private.h"
 #include "util-optimize.h"
 #include "util-checksum.h"
 #include "util-ioctl.h"
@@ -89,9 +89,9 @@ typedef struct PcapThreadVars_
     uint64_t pkts;
     uint64_t bytes;
 
-    uint16_t capture_kernel_packets;
-    uint16_t capture_kernel_drops;
-    uint16_t capture_kernel_ifdrops;
+    StatsCounterId capture_kernel_packets;
+    StatsCounterId capture_kernel_drops;
+    StatsCounterId capture_kernel_ifdrops;
 
     ThreadVars *tv;
     TmSlot *slot;
@@ -166,7 +166,7 @@ void TmModuleDecodePcapRegister (void)
 static inline void UpdatePcapStatsValue64(uint64_t *last, uint32_t current32)
 {
     /* uint64_t -> uint32_t is defined behaviour. It slices lower 32bits. */
-    uint32_t last32 = *last;
+    uint32_t last32 = (uint32_t)*last;
 
     /* Branchless code as wrap-around is defined for unsigned */
     *last += (uint32_t)(current32 - last32);
@@ -198,13 +198,11 @@ static inline void PcapDumpCounters(PcapThreadVars *ptv)
     if (likely((pcap_stats(ptv->pcap_handle, &pcap_s) >= 0))) {
         UpdatePcapStats64(&ptv->last_stats64, &pcap_s);
 
-        StatsSetUI64(ptv->tv, ptv->capture_kernel_packets,
-                ptv->last_stats64.ps_recv);
-        StatsSetUI64(
-                ptv->tv, ptv->capture_kernel_drops, ptv->last_stats64.ps_drop);
+        StatsCounterSetI64(&ptv->tv->stats, ptv->capture_kernel_packets, ptv->last_stats64.ps_recv);
+        StatsCounterSetI64(&ptv->tv->stats, ptv->capture_kernel_drops, ptv->last_stats64.ps_drop);
         (void)SC_ATOMIC_SET(ptv->livedev->drop, ptv->last_stats64.ps_drop);
-        StatsSetUI64(ptv->tv, ptv->capture_kernel_ifdrops,
-                ptv->last_stats64.ps_ifdrop);
+        StatsCounterSetI64(
+                &ptv->tv->stats, ptv->capture_kernel_ifdrops, ptv->last_stats64.ps_ifdrop);
     }
 }
 
@@ -422,7 +420,7 @@ static TmEcode ReceivePcapLoop(ThreadVars *tv, void *data, void *slot)
             int dbreak = 0;
             SCLogError("error code %" PRId32 " %s", r, pcap_geterr(ptv->pcap_handle));
             do {
-                usleep(PCAP_RECONNECT_TIMEOUT);
+                SleepUsec(PCAP_RECONNECT_TIMEOUT);
                 if (suricata_ctl_flags != 0) {
                     dbreak = 1;
                     break;
@@ -437,11 +435,11 @@ static TmEcode ReceivePcapLoop(ThreadVars *tv, void *data, void *slot)
             SCReturnInt(TM_ECODE_FAILED);
         }
 
-        StatsSyncCountersIfSignalled(tv);
+        StatsSyncCountersIfSignalled(&tv->stats);
     }
 
     PcapDumpCounters(ptv);
-    StatsSyncCountersIfSignalled(tv);
+    StatsSyncCountersIfSignalled(&tv->stats);
     SCReturnInt(TM_ECODE_OK);
 }
 
@@ -535,12 +533,9 @@ static TmEcode ReceivePcapThreadInit(ThreadVars *tv, const void *initdata, void 
 
     pcapconfig->DerefFunc(pcapconfig);
 
-    ptv->capture_kernel_packets = StatsRegisterCounter("capture.kernel_packets",
-            ptv->tv);
-    ptv->capture_kernel_drops = StatsRegisterCounter("capture.kernel_drops",
-            ptv->tv);
-    ptv->capture_kernel_ifdrops = StatsRegisterCounter("capture.kernel_ifdrops",
-            ptv->tv);
+    ptv->capture_kernel_packets = StatsRegisterCounter("capture.kernel_packets", &ptv->tv->stats);
+    ptv->capture_kernel_drops = StatsRegisterCounter("capture.kernel_drops", &ptv->tv->stats);
+    ptv->capture_kernel_ifdrops = StatsRegisterCounter("capture.kernel_ifdrops", &ptv->tv->stats);
 
     *data = (void *)ptv;
     SCReturnInt(TM_ECODE_OK);

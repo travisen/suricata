@@ -16,10 +16,10 @@
  */
 use super::error::QuicError;
 use super::frames::Frame;
-use nom7::bytes::complete::take;
-use nom7::combinator::{all_consuming, map};
-use nom7::number::complete::{be_u24, be_u32, be_u8};
-use nom7::IResult;
+use nom8::bytes::complete::take;
+use nom8::combinator::map;
+use nom8::number::complete::{be_u24, be_u32, be_u8};
+use nom8::{IResult, Parser};
 use std::convert::TryFrom;
 
 /*
@@ -214,7 +214,7 @@ impl QuicHeader {
             let version;
             if (flags.raw & QUIC_FLAG_VERSION) != 0 {
                 let (_, version_buf1) = take(4_usize)(rest)?;
-                let (rest1, version1) = map(be_u32, QuicVersion)(rest)?;
+                let (rest1, version1) = map(be_u32, QuicVersion).parse(rest)?;
                 rest = rest1;
                 version = version1;
                 version_buf = version_buf1;
@@ -247,7 +247,7 @@ impl QuicHeader {
                     },
                 ));
             } else {
-                return Err(nom7::Err::Error(QuicError::InvalidPacket));
+                return Err(nom8::Err::Error(QuicError::InvalidPacket));
             }
         } else if !flags.is_long {
             // Decode short header
@@ -267,12 +267,12 @@ impl QuicHeader {
                     },
                 ));
             } else {
-                return Err(nom7::Err::Error(QuicError::InvalidPacket));
+                return Err(nom8::Err::Error(QuicError::InvalidPacket));
             }
         } else {
             // Decode Long header
             let (_, version_buf) = take(4_usize)(rest)?;
-            let (rest, version) = map(be_u32, QuicVersion)(rest)?;
+            let (rest, version) = map(be_u32, QuicVersion).parse(rest)?;
 
             let ty = if version == QuicVersion(0) {
                 QuicType::VersionNegotiation
@@ -285,7 +285,7 @@ impl QuicHeader {
                         0x7d => QuicType::Handshake,
                         0x7c => QuicType::ZeroRTT,
                         _ => {
-                            return Err(nom7::Err::Error(QuicError::InvalidPacket));
+                            return Err(nom8::Err::Error(QuicError::InvalidPacket));
                         }
                     }
                 } else if version == QuicVersion::V2 {
@@ -295,7 +295,7 @@ impl QuicHeader {
                         0x03 => QuicType::Handshake,
                         0x00 => QuicType::Retry,
                         _ => {
-                            return Err(nom7::Err::Error(QuicError::InvalidPacket));
+                            return Err(nom8::Err::Error(QuicError::InvalidPacket));
                         }
                     }
                 } else {
@@ -306,7 +306,7 @@ impl QuicHeader {
                         0x02 => QuicType::Handshake,
                         0x03 => QuicType::Retry,
                         _ => {
-                            return Err(nom7::Err::Error(QuicError::InvalidPacket));
+                            return Err(nom8::Err::Error(QuicError::InvalidPacket));
                         }
                     }
                 }
@@ -357,22 +357,26 @@ impl QuicHeader {
                         rest
                     }
                 }
+                QuicType::Retry => {
+                    // opaque retry token and 16 bytes retry integrity tag
+                    &rest[rest.len()..]
+                }
                 _ => rest,
             };
             let (rest, length) = if has_length {
                 let (rest2, plength) = quic_var_uint(rest)?;
                 if plength > rest2.len() as u64 {
-                    return Err(nom7::Err::Error(QuicError::InvalidPacket));
+                    return Err(nom8::Err::Error(QuicError::InvalidPacket));
                 }
                 if let Ok(length) = u16::try_from(plength) {
                     (rest2, length)
                 } else {
-                    return Err(nom7::Err::Error(QuicError::InvalidPacket));
+                    return Err(nom8::Err::Error(QuicError::InvalidPacket));
                 }
             } else if let Ok(length) = u16::try_from(rest.len()) {
                 (rest, length)
             } else {
-                return Err(nom7::Err::Error(QuicError::InvalidPacket));
+                return Err(nom8::Err::Error(QuicError::InvalidPacket));
             };
 
             Ok((
@@ -392,8 +396,10 @@ impl QuicHeader {
 }
 
 impl QuicData {
-    pub(crate) fn from_bytes(input: &[u8]) -> Result<QuicData, QuicError> {
-        let (_, frames) = all_consuming(Frame::decode_frames)(input)?;
+    pub(crate) fn from_bytes(
+        input: &[u8], past_frag: &[u8], past_fraglen: u32,
+    ) -> Result<QuicData, QuicError> {
+        let (_, frames) = Frame::decode_frames(input, past_frag, past_fraglen)?;
         Ok(QuicData { frames })
     }
 }
@@ -467,7 +473,8 @@ mod tests {
             header
         );
 
-        let data = QuicData::from_bytes(rest).unwrap();
+        let past_frag = Vec::new();
+        let data = QuicData::from_bytes(rest, &past_frag, 0).unwrap();
         assert_eq!(
             QuicData {
                 frames: vec![Frame::Stream(Stream {

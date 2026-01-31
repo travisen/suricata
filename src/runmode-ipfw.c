@@ -39,7 +39,7 @@
 #include "util-affinity.h"
 #include "util-runmodes.h"
 #include "source-ipfw.h"
-#include "util-device.h"
+#include "util-device-private.h"
 
 const char *RunModeIpsIPFWGetDefaultMode(void)
 {
@@ -53,8 +53,6 @@ void RunModeIpsIPFWRegister(void)
 
     RunModeRegisterNewRunMode(RUNMODE_IPFW, "workers",
             "Multi queue IPFW IPS mode with one thread per queue", RunModeIpsIPFWWorker, NULL);
-
-    return;
 }
 
 int RunModeIpsIPFWAutoFp(void)

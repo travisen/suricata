@@ -35,7 +35,7 @@
 #include "util-conf.h"
 #include "util-privs.h"
 #include "util-debug.h"
-#include "util-device.h"
+#include "util-device-private.h"
 #include "util-ebpf.h"
 #include "util-signal.h"
 #include "util-buffer.h"
@@ -106,7 +106,7 @@ typedef struct UnixCommand_ {
 static int UnixNew(UnixCommand * this)
 {
     struct sockaddr_un addr;
-    int len;
+    socklen_t len;
     int ret;
     int on = 1;
     char sockettarget[PATH_MAX];
@@ -121,7 +121,7 @@ static int UnixNew(UnixCommand * this)
     TAILQ_INIT(&this->clients);
 
     int check_dir = 0;
-    if (ConfGet("unix-command.filename", &socketname) == 1) {
+    if (SCConfGet("unix-command.filename", &socketname) == 1) {
         if (PathIsAbsolute(socketname)) {
             strlcpy(sockettarget, socketname, sizeof(sockettarget));
         } else {
@@ -161,7 +161,7 @@ static int UnixNew(UnixCommand * this)
     addr.sun_family = AF_UNIX;
     strlcpy(addr.sun_path, sockettarget, sizeof(addr.sun_path));
     addr.sun_path[sizeof(addr.sun_path) - 1] = 0;
-    len = strlen(addr.sun_path) + sizeof(addr.sun_family) + 1;
+    len = (socklen_t)(strlen(addr.sun_path) + sizeof(addr.sun_family) + 1);
 
     /* create socket */
     this->socket = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -252,9 +252,10 @@ static void UnixClientFree(UnixClient *c)
 static void UnixCommandClose(UnixCommand  *this, int fd)
 {
     UnixClient *item;
+    UnixClient *safe = NULL;
     int found = 0;
 
-    TAILQ_FOREACH(item, &this->clients, next) {
+    TAILQ_FOREACH_SAFE (item, &this->clients, next, safe) {
         if (item->fd == fd) {
             found = 1;
             break;
@@ -300,7 +301,7 @@ static int UnixCommandSendJSONToClient(UnixClient *client, json_t *js)
         if (MEMBUFFER_OFFSET(client->mbuf) + 1 >= MEMBUFFER_SIZE(client->mbuf)) {
             MemBufferExpand(&client->mbuf, 1);
         }
-        MemBufferWriteRaw(client->mbuf, "\n", 1);
+        MemBufferWriteString(client->mbuf, "\n");
     }
 
     if (send(client->fd, (const char *)MEMBUFFER_BUFFER(client->mbuf),
@@ -335,7 +336,7 @@ static int UnixCommandAccept(UnixCommand *this)
     json_error_t jerror;
     int client;
     int client_version;
-    int ret;
+    ssize_t ret;
     UnixClient *uclient = NULL;
 
     /* accept client socket */
@@ -519,7 +520,7 @@ static int UnixCommandExecute(UnixCommand * this, char *command, UnixClient *cli
     }
 
     if (UnixCommandSendJSONToClient(client, server_msg) != 0) {
-        goto error;
+        goto error_cmd;
     }
 
     json_decref(jsoncmd);
@@ -537,7 +538,7 @@ error:
 static void UnixCommandRun(UnixCommand * this, UnixClient *client)
 {
     char buffer[4096];
-    int ret;
+    ssize_t ret;
     if (client->version <= UNIX_PROTO_V1) {
         ret = recv(client->fd, buffer, sizeof(buffer) - 1, 0);
         if (ret <= 0) {
@@ -553,6 +554,7 @@ static void UnixCommandRun(UnixCommand * this, UnixClient *client)
             SCLogError("Command server: client command is too long, "
                        "disconnect him.");
             UnixCommandClose(this, client->fd);
+            return;
         }
         buffer[ret] = 0;
     } else {
@@ -574,6 +576,7 @@ static void UnixCommandRun(UnixCommand * this, UnixClient *client)
                 SCLogInfo("Command server: client command is too long, "
                         "disconnect him.");
                 UnixCommandClose(this, client->fd);
+                return;
             }
             if (buffer[ret - 1] == '\n') {
                 buffer[ret-1] = 0;
@@ -695,7 +698,7 @@ static TmEcode UnixManagerUptimeCommand(json_t *cmd,
                                  json_t *server_msg, void *data)
 {
     SCEnter();
-    int uptime;
+    time_t uptime;
     UnixCommand *ucmd = (UnixCommand *)data;
 
     uptime = time(NULL) - ucmd->start_timestamp;
@@ -885,7 +888,7 @@ static TmEcode UnixManagerConfGetCommand(json_t *cmd,
     }
 
     variable = (char *)json_string_value(jarg);
-    if (ConfGet(variable, &confval) != 1) {
+    if (SCConfGet(variable, &confval) != 1) {
         json_object_set_new(server_msg, "message", json_string("Unable to get value"));
         SCReturnInt(TM_ECODE_FAILED);
     }
@@ -1061,7 +1064,7 @@ int UnixManagerInit(void)
 {
     if (UnixNew(&command) == 0) {
         int failure_fatal = 0;
-        if (ConfGetBool("engine.init-failure-fatal", &failure_fatal) != 1) {
+        if (SCConfGetBool("engine.init-failure-fatal", &failure_fatal) != 1) {
             SCLogDebug("ConfGetBool could not load the value.");
         }
         if (failure_fatal) {
@@ -1112,6 +1115,8 @@ int UnixManagerInit(void)
     UnixManagerRegisterCommand("dataset-add", UnixSocketDatasetAdd, &command, UNIX_CMD_TAKE_ARGS);
     UnixManagerRegisterCommand("dataset-remove", UnixSocketDatasetRemove, &command, UNIX_CMD_TAKE_ARGS);
     UnixManagerRegisterCommand(
+            "dataset-add-json", UnixSocketDatajsonAdd, &command, UNIX_CMD_TAKE_ARGS);
+    UnixManagerRegisterCommand(
             "get-flow-stats-by-id", UnixSocketGetFlowStatsById, &command, UNIX_CMD_TAKE_ARGS);
     UnixManagerRegisterCommand("dataset-dump", UnixSocketDatasetDump, NULL, 0);
     UnixManagerRegisterCommand(
@@ -1144,12 +1149,8 @@ static TmEcode UnixManagerThreadDeinit(ThreadVars *t, void *data)
 
 static TmEcode UnixManager(ThreadVars *th_v, void *thread_data)
 {
-    int ret;
-
     /* set the thread name */
     SCLogDebug("%s started...", th_v->name);
-
-    StatsSetupPrivate(th_v);
 
     /* Set the threads capability */
     th_v->cap_flags = 0;
@@ -1158,7 +1159,7 @@ static TmEcode UnixManager(ThreadVars *th_v, void *thread_data)
     TmThreadsSetFlag(th_v, THV_INIT_DONE | THV_RUNNING);
 
     while (1) {
-        ret = UnixMain(&command);
+        int ret = UnixMain(&command);
         if (ret == 0) {
             SCLogError("Fatal error on unix socket");
         }
@@ -1170,7 +1171,7 @@ static TmEcode UnixManager(ThreadVars *th_v, void *thread_data)
                 close(item->fd);
                 SCFree(item);
             }
-            StatsSyncCounters(th_v);
+            StatsSyncCounters(&th_v->stats);
             break;
         }
 
@@ -1178,7 +1179,6 @@ static TmEcode UnixManager(ThreadVars *th_v, void *thread_data)
     }
     return TM_ECODE_OK;
 }
-
 
 /** \brief Spawn the unix socket manager thread
  *
@@ -1205,7 +1205,6 @@ void UnixManagerThreadSpawn(int mode)
             FatalError("Unix socket init failed");
         }
     }
-    return;
 }
 
 // TODO can't think of a good name
@@ -1268,7 +1267,6 @@ again:
     }
 
     SCMutexUnlock(&tv_root_lock);
-    return;
 }
 
 #else /* BUILD_UNIX_SOCKET */
@@ -1276,17 +1274,14 @@ again:
 void UnixManagerThreadSpawn(int mode)
 {
     SCLogError("Unix socket is not compiled");
-    return;
 }
 
 void UnixSocketKillSocketThread(void)
 {
-    return;
 }
 
 void UnixManagerThreadSpawnNonRunmode(const bool unix_socket_enabled)
 {
-    return;
 }
 
 #endif /* BUILD_UNIX_SOCKET */

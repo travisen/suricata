@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2021 Open Information Security Foundation
+/* Copyright (C) 2007-2025 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -22,79 +22,12 @@
  * \author Jeff Lucovsky <jeff@lucovsky.org>
  */
 
-#ifndef __APP_LAYER_FTP_H__
-#define __APP_LAYER_FTP_H__
+#ifndef SURICATA_APP_LAYER_FTP_H
+#define SURICATA_APP_LAYER_FTP_H
 
 #include "rust.h"
 
-enum {
-    FTP_STATE_IN_PROGRESS,
-    FTP_STATE_PORT_DONE,
-    FTP_STATE_FINISHED,
-};
-
-typedef enum {
-    FTP_COMMAND_UNKNOWN = 0,
-    FTP_COMMAND_ABOR,
-    FTP_COMMAND_ACCT,
-    FTP_COMMAND_ALLO,
-    FTP_COMMAND_APPE,
-    FTP_COMMAND_AUTH_TLS,
-    FTP_COMMAND_CDUP,
-    FTP_COMMAND_CHMOD,
-    FTP_COMMAND_CWD,
-    FTP_COMMAND_DELE,
-    FTP_COMMAND_EPSV,
-    FTP_COMMAND_HELP,
-    FTP_COMMAND_IDLE,
-    FTP_COMMAND_LIST,
-    FTP_COMMAND_MAIL,
-    FTP_COMMAND_MDTM,
-    FTP_COMMAND_MKD,
-    FTP_COMMAND_MLFL,
-    FTP_COMMAND_MODE,
-    FTP_COMMAND_MRCP,
-    FTP_COMMAND_MRSQ,
-    FTP_COMMAND_MSAM,
-    FTP_COMMAND_MSND,
-    FTP_COMMAND_MSOM,
-    FTP_COMMAND_NLST,
-    FTP_COMMAND_NOOP,
-    FTP_COMMAND_PASS,
-    FTP_COMMAND_PASV,
-    FTP_COMMAND_PORT,
-    FTP_COMMAND_PWD,
-    FTP_COMMAND_QUIT,
-    FTP_COMMAND_REIN,
-    FTP_COMMAND_REST,
-    FTP_COMMAND_RETR,
-    FTP_COMMAND_RMD,
-    FTP_COMMAND_RNFR,
-    FTP_COMMAND_RNTO,
-    FTP_COMMAND_SITE,
-    FTP_COMMAND_SIZE,
-    FTP_COMMAND_SMNT,
-    FTP_COMMAND_STAT,
-    FTP_COMMAND_STOR,
-    FTP_COMMAND_STOU,
-    FTP_COMMAND_STRU,
-    FTP_COMMAND_SYST,
-    FTP_COMMAND_TYPE,
-    FTP_COMMAND_UMASK,
-    FTP_COMMAND_USER,
-    FTP_COMMAND_EPRT,
-
-    /* must be last */
-    FTP_COMMAND_MAX
-    /** \todo more if missing.. */
-} FtpRequestCommand;
-
-typedef struct FtpCommand_ {
-    const char *command_name;
-    FtpRequestCommand command;
-    const uint8_t command_length;
-} FtpCommand;
-extern const FtpCommand FtpCommands[FTP_COMMAND_MAX + 1];
+struct FtpCommand;
 
 typedef uint32_t FtpRequestCommandArgOfs;
 
@@ -108,12 +41,21 @@ typedef struct FtpLineState_ {
     bool lf_found;
 } FtpLineState;
 
-typedef struct FTPString_ {
-    uint8_t *str;
-    uint32_t len;
-    bool truncated;
-    TAILQ_ENTRY(FTPString_) next;
-} FTPString;
+typedef struct FTPResponseWrapper_ {
+    FTPResponseLine *response;
+    TAILQ_ENTRY(FTPResponseWrapper_) next;
+} FTPResponseWrapper;
+
+/*
+ * These are the values for the table index value and the FTP command
+ * enum value. These *should* be the same if the enum and command insertion
+ * order remain the same. However, we store each value to protect against
+ * drift between enum and insertion order.
+ */
+typedef struct FtpCommandInfo_ {
+    uint8_t command_index;
+    FtpRequestCommand command_code;
+} FtpCommandInfo;
 
 typedef struct FTPTransaction_  {
     /** id of this tx, starting at 0 */
@@ -127,7 +69,7 @@ typedef struct FTPTransaction_  {
     bool request_truncated;
 
     /* for the command description */
-    const FtpCommand *command_descriptor;
+    FtpCommandInfo command_descriptor;
 
     uint16_t dyn_port; /* dynamic port, if applicable */
     bool done; /* transaction complete? */
@@ -136,7 +78,7 @@ typedef struct FTPTransaction_  {
     uint8_t direction;
 
     /* Handle multiple responses */
-    TAILQ_HEAD(, FTPString_) response_list;
+    TAILQ_HEAD(, FTPResponseWrapper_) response_list;
 
     TAILQ_ENTRY(FTPTransaction_) next;
 } FTPTransaction;
@@ -163,11 +105,6 @@ typedef struct FtpState_ {
     AppLayerStateData state_data;
 } FtpState;
 
-enum {
-    FTPDATA_STATE_IN_PROGRESS,
-    FTPDATA_STATE_FINISHED,
-};
-
 /** FTP Data State for app layer parser */
 typedef struct FtpDataState_ {
     uint8_t *input;
@@ -184,13 +121,12 @@ typedef struct FtpDataState_ {
 
 void RegisterFTPParsers(void);
 void FTPParserRegisterTests(void);
-void FTPAtExitPrintStats(void);
 void FTPParserCleanup(void);
+int FTPSetMemcap(uint64_t size);
 uint64_t FTPMemuseGlobalCounter(void);
 uint64_t FTPMemcapGlobalCounter(void);
 
 uint16_t JsonGetNextLineFromBuffer(const char *buffer, const uint16_t len);
-bool EveFTPDataAddMetadata(void *vtx, JsonBuilder *jb);
+bool EveFTPDataAddMetadata(void *vtx, SCJsonBuilder *jb);
 
-#endif /* __APP_LAYER_FTP_H__ */
-
+#endif /* SURICATA_APP_LAYER_FTP_H */

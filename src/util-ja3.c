@@ -64,6 +64,8 @@ void Ja3BufferFree(JA3Buffer **buffer)
     *buffer = NULL;
 }
 
+#ifdef HAVE_JA3
+
 /**
  * \internal
  * \brief Resize buffer if it is full.
@@ -265,7 +267,7 @@ InspectionBuffer *Ja3DetectGetHash(DetectEngineThreadCtx *det_ctx,
         uint32_t b_len = 0;
         const uint8_t *b = NULL;
 
-        if (rs_quic_tx_get_ja3(txv, &b, &b_len) != 1)
+        if (!SCQuicTxGetJa3(txv, STREAM_TOSERVER | STREAM_TOCLIENT, &b, &b_len))
             return NULL;
         if (b == NULL || b_len == 0)
             return NULL;
@@ -276,7 +278,7 @@ InspectionBuffer *Ja3DetectGetHash(DetectEngineThreadCtx *det_ctx,
 
         InspectionBufferSetup(det_ctx, list_id, buffer, NULL, 0);
         InspectionBufferCopy(buffer, ja3_hash, SC_MD5_HEX_LEN);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferApplyTransforms(det_ctx, buffer, transforms);
     }
     return buffer;
 }
@@ -290,13 +292,38 @@ InspectionBuffer *Ja3DetectGetString(DetectEngineThreadCtx *det_ctx,
         uint32_t b_len = 0;
         const uint8_t *b = NULL;
 
-        if (rs_quic_tx_get_ja3(txv, &b, &b_len) != 1)
+        if (!SCQuicTxGetJa3(txv, STREAM_TOSERVER | STREAM_TOCLIENT, &b, &b_len))
             return NULL;
         if (b == NULL || b_len == 0)
             return NULL;
 
-        InspectionBufferSetup(det_ctx, list_id, buffer, b, b_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(det_ctx, list_id, buffer, b, b_len, transforms);
     }
     return buffer;
 }
+
+#else /* HAVE_JA3 */
+
+/* Stubs for when JA3 is disabled */
+
+int Ja3BufferAppendBuffer(JA3Buffer **buffer1, JA3Buffer **buffer2)
+{
+    return 0;
+}
+
+int Ja3BufferAddValue(JA3Buffer **buffer, uint32_t value)
+{
+    return 0;
+}
+
+char *Ja3GenerateHash(JA3Buffer *buffer)
+{
+    return NULL;
+}
+
+int Ja3IsDisabled(const char *type)
+{
+    return true;
+}
+
+#endif /* HAVE_JA3 */

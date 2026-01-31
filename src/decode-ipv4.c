@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2013 Open Information Security Foundation
+/* Copyright (C) 2007-2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -218,7 +218,6 @@ static int IPV4OptValidateCIPSO(Packet *p, const IPV4Opt *o)
 
         /* Tag header must fit within option length */
         if (unlikely(len < 2)) {
-            //printf("CIPSO tag header too large %" PRIu16 " < 2\n", len);
             ENGINE_SET_INVALID_EVENT(p, IPV4_OPT_MALFORMED);
             return -1;
         }
@@ -229,7 +228,6 @@ static int IPV4OptValidateCIPSO(Packet *p, const IPV4Opt *o)
 
         /* Tag length must fit within the option length */
         if (unlikely(tlen > len)) {
-            //printf("CIPSO tag len too large %" PRIu8 " > %" PRIu16 "\n", tlen, len);
             ENGINE_SET_INVALID_EVENT(p, IPV4_OPT_MALFORMED);
             return -1;
         }
@@ -242,7 +240,6 @@ static int IPV4OptValidateCIPSO(Packet *p, const IPV4Opt *o)
             case 7:
                 /* Tag is at least 4 and at most the remainder of option len */
                 if (unlikely((tlen < 4) || (tlen > len))) {
-                    //printf("CIPSO tag %" PRIu8 " bad tlen=%" PRIu8 " len=%" PRIu8 "\n", ttype, tlen, len);
                     ENGINE_SET_INVALID_EVENT(p, IPV4_OPT_MALFORMED);
                     return -1;
                 }
@@ -251,7 +248,6 @@ static int IPV4OptValidateCIPSO(Packet *p, const IPV4Opt *o)
                  * type 7, which has no such field.
                  */
                 if (unlikely((ttype != 7) && (*tag != 0))) {
-                    //printf("CIPSO tag %" PRIu8 " ao=%" PRIu8 "\n", ttype, tlen);
                     ENGINE_SET_INVALID_EVENT(p, IPV4_OPT_MALFORMED);
                     return -1;
                 }
@@ -267,7 +263,6 @@ static int IPV4OptValidateCIPSO(Packet *p, const IPV4Opt *o)
                 ENGINE_SET_INVALID_EVENT(p,IPV4_OPT_MALFORMED);
                 return -1;
             default:
-                //printf("CIPSO tag %" PRIu8 " unknown tag\n", ttype);
                 ENGINE_SET_INVALID_EVENT(p, IPV4_OPT_MALFORMED);
                 /** \todo May not want to return error here on unknown tag type (at least not for 3|4) */
                 return -1;
@@ -318,14 +313,14 @@ static int DecodeIPV4Options(Packet *p, const uint8_t *pkt, uint16_t len, IPV4Op
 
     while (plen)
     {
-        p->ip4vars.opt_cnt++;
+        p->l3.vars.ip4.opt_cnt++;
 
         /* single byte options */
         if (*pkt == IPV4_OPT_EOL) {
             /** \todo What if more data exist after EOL (possible covert channel or data leakage)? */
             SCLogDebug("IPV4OPT %" PRIu8 " len 1 @ %d/%d",
                    *pkt, (len - plen), (len - 1));
-            p->ip4vars.opts_set |= IPV4_OPT_FLAG_EOL;
+            p->l3.vars.ip4.opts_set |= IPV4_OPT_FLAG_EOL;
             break;
         } else if (*pkt == IPV4_OPT_NOP) {
             SCLogDebug("IPV4OPT %" PRIu8 " len 1 @ %d/%d",
@@ -333,9 +328,9 @@ static int DecodeIPV4Options(Packet *p, const uint8_t *pkt, uint16_t len, IPV4Op
             pkt++;
             plen--;
 
-            p->ip4vars.opts_set |= IPV4_OPT_FLAG_NOP;
+            p->l3.vars.ip4.opts_set |= IPV4_OPT_FLAG_NOP;
 
-        /* multibyte options */
+            /* multibyte options */
         } else {
             if (unlikely(plen < 2)) {
                 /** \todo What if padding is non-zero (possible covert channel or data leakage)? */
@@ -370,7 +365,7 @@ static int DecodeIPV4Options(Packet *p, const uint8_t *pkt, uint16_t len, IPV4Op
                         /* Warn - we can keep going */
                     } else if (IPV4OptValidateTimestamp(p, &opt) == 0) {
                         opts->o_ts = opt;
-                        p->ip4vars.opts_set |= IPV4_OPT_FLAG_TS;
+                        p->l3.vars.ip4.opts_set |= IPV4_OPT_FLAG_TS;
                     }
                     break;
                 case IPV4_OPT_RR:
@@ -379,7 +374,7 @@ static int DecodeIPV4Options(Packet *p, const uint8_t *pkt, uint16_t len, IPV4Op
                         /* Warn - we can keep going */
                     } else if (IPV4OptValidateRoute(p, &opt) == 0) {
                         opts->o_rr = opt;
-                        p->ip4vars.opts_set |= IPV4_OPT_FLAG_RR;
+                        p->l3.vars.ip4.opts_set |= IPV4_OPT_FLAG_RR;
                     }
                     break;
                 case IPV4_OPT_QS:
@@ -388,7 +383,7 @@ static int DecodeIPV4Options(Packet *p, const uint8_t *pkt, uint16_t len, IPV4Op
                         /* Warn - we can keep going */
                     } else if (IPV4OptValidateGeneric(p, &opt) == 0) {
                         opts->o_qs = opt;
-                        p->ip4vars.opts_set |= IPV4_OPT_FLAG_QS;
+                        p->l3.vars.ip4.opts_set |= IPV4_OPT_FLAG_QS;
                     }
                     break;
                 case IPV4_OPT_SEC:
@@ -397,7 +392,7 @@ static int DecodeIPV4Options(Packet *p, const uint8_t *pkt, uint16_t len, IPV4Op
                         /* Warn - we can keep going */
                     } else if (IPV4OptValidateGeneric(p, &opt) == 0) {
                         opts->o_sec = opt;
-                        p->ip4vars.opts_set |= IPV4_OPT_FLAG_SEC;
+                        p->l3.vars.ip4.opts_set |= IPV4_OPT_FLAG_SEC;
                     }
                     break;
                 case IPV4_OPT_LSRR:
@@ -406,7 +401,7 @@ static int DecodeIPV4Options(Packet *p, const uint8_t *pkt, uint16_t len, IPV4Op
                         /* Warn - we can keep going */
                     } else if (IPV4OptValidateRoute(p, &opt) == 0) {
                         opts->o_lsrr = opt;
-                        p->ip4vars.opts_set |= IPV4_OPT_FLAG_LSRR;
+                        p->l3.vars.ip4.opts_set |= IPV4_OPT_FLAG_LSRR;
                     }
                     break;
                 case IPV4_OPT_ESEC:
@@ -415,7 +410,7 @@ static int DecodeIPV4Options(Packet *p, const uint8_t *pkt, uint16_t len, IPV4Op
                         /* Warn - we can keep going */
                     } else if (IPV4OptValidateGeneric(p, &opt) == 0) {
                         opts->o_esec = opt;
-                        p->ip4vars.opts_set |= IPV4_OPT_FLAG_ESEC;
+                        p->l3.vars.ip4.opts_set |= IPV4_OPT_FLAG_ESEC;
                     }
                     break;
                 case IPV4_OPT_CIPSO:
@@ -424,7 +419,7 @@ static int DecodeIPV4Options(Packet *p, const uint8_t *pkt, uint16_t len, IPV4Op
                         /* Warn - we can keep going */
                     } else if (IPV4OptValidateCIPSO(p, &opt) == 0) {
                         opts->o_cipso = opt;
-                        p->ip4vars.opts_set |= IPV4_OPT_FLAG_CIPSO;
+                        p->l3.vars.ip4.opts_set |= IPV4_OPT_FLAG_CIPSO;
                     }
                     break;
                 case IPV4_OPT_SID:
@@ -433,7 +428,7 @@ static int DecodeIPV4Options(Packet *p, const uint8_t *pkt, uint16_t len, IPV4Op
                         /* Warn - we can keep going */
                     } else if (IPV4OptValidateGeneric(p, &opt) == 0) {
                         opts->o_sid = opt;
-                        p->ip4vars.opts_set |= IPV4_OPT_FLAG_SID;
+                        p->l3.vars.ip4.opts_set |= IPV4_OPT_FLAG_SID;
                     }
                     break;
                 case IPV4_OPT_SSRR:
@@ -442,7 +437,7 @@ static int DecodeIPV4Options(Packet *p, const uint8_t *pkt, uint16_t len, IPV4Op
                         /* Warn - we can keep going */
                     } else if (IPV4OptValidateRoute(p, &opt) == 0) {
                         opts->o_ssrr = opt;
-                        p->ip4vars.opts_set |= IPV4_OPT_FLAG_SSRR;
+                        p->l3.vars.ip4.opts_set |= IPV4_OPT_FLAG_SSRR;
                     }
                     break;
                 case IPV4_OPT_RTRALT:
@@ -451,7 +446,7 @@ static int DecodeIPV4Options(Packet *p, const uint8_t *pkt, uint16_t len, IPV4Op
                         /* Warn - we can keep going */
                     } else if (IPV4OptValidateGeneric(p, &opt) == 0) {
                         opts->o_rtralt = opt;
-                        p->ip4vars.opts_set |= IPV4_OPT_FLAG_RTRALT;
+                        p->l3.vars.ip4.opts_set |= IPV4_OPT_FLAG_RTRALT;
                     }
                     break;
                 default:
@@ -470,57 +465,57 @@ static int DecodeIPV4Options(Packet *p, const uint8_t *pkt, uint16_t len, IPV4Op
     return 0;
 }
 
-static int DecodeIPV4Packet(Packet *p, const uint8_t *pkt, uint16_t len)
+static const IPV4Hdr *DecodeIPV4Packet(Packet *p, const uint8_t *pkt, uint16_t len)
 {
     if (unlikely(len < IPV4_HEADER_LEN)) {
         ENGINE_SET_INVALID_EVENT(p, IPV4_PKT_TOO_SMALL);
-        return -1;
+        return NULL;
     }
 
     if (unlikely(IP_GET_RAW_VER(pkt) != 4)) {
         SCLogDebug("wrong ip version %d",IP_GET_RAW_VER(pkt));
         ENGINE_SET_INVALID_EVENT(p, IPV4_WRONG_IP_VER);
-        return -1;
+        return NULL;
     }
 
-    p->ip4h = (IPV4Hdr *)pkt;
+    const IPV4Hdr *ip4h = PacketSetIPV4(p, pkt);
 
-    if (unlikely(IPV4_GET_HLEN(p) < IPV4_HEADER_LEN)) {
+    if (unlikely(IPV4_GET_RAW_HLEN(ip4h) < IPV4_HEADER_LEN)) {
         ENGINE_SET_INVALID_EVENT(p, IPV4_HLEN_TOO_SMALL);
-        return -1;
+        return NULL;
     }
 
-    if (unlikely(IPV4_GET_IPLEN(p) < IPV4_GET_HLEN(p))) {
+    if (unlikely(IPV4_GET_RAW_IPLEN(ip4h) < IPV4_GET_RAW_HLEN(ip4h))) {
         ENGINE_SET_INVALID_EVENT(p, IPV4_IPLEN_SMALLER_THAN_HLEN);
-        return -1;
+        return NULL;
     }
 
-    if (unlikely(len < IPV4_GET_IPLEN(p))) {
+    if (unlikely(len < IPV4_GET_RAW_IPLEN(ip4h))) {
         ENGINE_SET_INVALID_EVENT(p, IPV4_TRUNC_PKT);
-        return -1;
+        return NULL;
     }
 
     /* set the address struct */
-    SET_IPV4_SRC_ADDR(p,&p->src);
-    SET_IPV4_DST_ADDR(p,&p->dst);
+    SET_IPV4_SRC_ADDR(ip4h, &p->src);
+    SET_IPV4_DST_ADDR(ip4h, &p->dst);
 
     /* save the options len */
-    uint8_t ip_opt_len = IPV4_GET_HLEN(p) - IPV4_HEADER_LEN;
+    uint8_t ip_opt_len = IPV4_GET_RAW_HLEN(ip4h) - IPV4_HEADER_LEN;
     if (ip_opt_len > 0) {
         IPV4Options opts;
         memset(&opts, 0x00, sizeof(opts));
         if (DecodeIPV4Options(p, pkt + IPV4_HEADER_LEN, ip_opt_len, &opts) < 0) {
-            return -1;
+            return NULL;
         }
     }
 
-    return 0;
+    return ip4h;
 }
 
 int DecodeIPV4(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
         const uint8_t *pkt, uint16_t len)
 {
-    StatsIncr(tv, dtv->counter_ipv4);
+    StatsCounterIncr(&tv->stats, dtv->counter_ipv4);
 
     SCLogDebug("pkt %p len %"PRIu16"", pkt, len);
 
@@ -528,15 +523,16 @@ int DecodeIPV4(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
         return TM_ECODE_FAILED;
     }
     /* do the actual decoding */
-    if (unlikely(DecodeIPV4Packet (p, pkt, len) < 0)) {
+    const IPV4Hdr *ip4h = DecodeIPV4Packet(p, pkt, len);
+    if (unlikely(ip4h == NULL)) {
         SCLogDebug("decoding IPv4 packet failed");
-        CLEAR_IPV4_PACKET((p));
+        PacketClearL3(p);
         return TM_ECODE_FAILED;
     }
-    p->proto = IPV4_GET_IPPROTO(p);
+    p->proto = IPV4_GET_RAW_IPPROTO(ip4h);
 
     /* If a fragment, pass off for re-assembly. */
-    if (unlikely(IPV4_GET_IPOFFSET(p) > 0 || IPV4_GET_MF(p) == 1)) {
+    if (unlikely(IPV4_GET_RAW_FRAGOFFSET(ip4h) > 0 || IPV4_GET_RAW_FLAG_MF(ip4h))) {
         Packet *rp = Defrag(tv, dtv, p);
         if (rp != NULL) {
             PacketEnqueueNoLock(&tv->decode_pq, rp);
@@ -553,62 +549,73 @@ int DecodeIPV4(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
         char s[16], d[16];
         PrintInet(AF_INET, (const void *)GET_IPV4_SRC_ADDR_PTR(p), s, sizeof(s));
         PrintInet(AF_INET, (const void *)GET_IPV4_DST_ADDR_PTR(p), d, sizeof(d));
-        SCLogDebug("IPV4 %s->%s PROTO: %" PRIu32 " OFFSET: %" PRIu32 " RF: %" PRIu32 " DF: %" PRIu32 " MF: %" PRIu32 " ID: %" PRIu32 "", s,d,
-                IPV4_GET_IPPROTO(p), IPV4_GET_IPOFFSET(p), IPV4_GET_RF(p),
-                IPV4_GET_DF(p), IPV4_GET_MF(p), IPV4_GET_IPID(p));
+        SCLogDebug("IPV4 %s->%s PROTO: %" PRIu32 " OFFSET: %" PRIu32 " RF: %" PRIu8 " DF: %" PRIu8
+                   " MF: %" PRIu8 " ID: %" PRIu32 "",
+                s, d, IPV4_GET_RAW_IPPROTO(ip4h), IPV4_GET_RAW_IPOFFSET(ip4h),
+                IPV4_GET_RAW_FLAG_RF(ip4h), IPV4_GET_RAW_FLAG_DF(ip4h), IPV4_GET_RAW_FLAG_MF(ip4h),
+                IPV4_GET_RAW_IPID(ip4h));
     }
 #endif /* DEBUG */
 
+    const uint8_t *data = pkt + IPV4_GET_RAW_HLEN(ip4h);
+    const uint16_t data_len = IPV4_GET_RAW_IPLEN(ip4h) - IPV4_GET_RAW_HLEN(ip4h);
+
     /* check what next decoder to invoke */
-    switch (IPV4_GET_IPPROTO(p)) {
+    switch (p->proto) {
         case IPPROTO_TCP:
-            DecodeTCP(tv, dtv, p, pkt + IPV4_GET_HLEN(p),
-                      IPV4_GET_IPLEN(p) - IPV4_GET_HLEN(p));
+            DecodeTCP(tv, dtv, p, data, data_len);
             break;
         case IPPROTO_UDP:
-            DecodeUDP(tv, dtv, p, pkt + IPV4_GET_HLEN(p),
-                      IPV4_GET_IPLEN(p) - IPV4_GET_HLEN(p));
+            DecodeUDP(tv, dtv, p, data, data_len);
             break;
         case IPPROTO_ICMP:
-            DecodeICMPV4(tv, dtv, p, pkt + IPV4_GET_HLEN(p),
-                         IPV4_GET_IPLEN(p) - IPV4_GET_HLEN(p));
+            DecodeICMPV4(tv, dtv, p, data, data_len);
             break;
         case IPPROTO_GRE:
-            DecodeGRE(tv, dtv, p, pkt + IPV4_GET_HLEN(p),
-                      IPV4_GET_IPLEN(p) - IPV4_GET_HLEN(p));
+            DecodeGRE(tv, dtv, p, data, data_len);
             break;
         case IPPROTO_SCTP:
-            DecodeSCTP(tv, dtv, p, pkt + IPV4_GET_HLEN(p),
-                      IPV4_GET_IPLEN(p) - IPV4_GET_HLEN(p));
+            DecodeSCTP(tv, dtv, p, data, data_len);
             break;
-
         case IPPROTO_ESP:
-            DecodeESP(tv, dtv, p, pkt + IPV4_GET_HLEN(p), IPV4_GET_IPLEN(p) - IPV4_GET_HLEN(p));
+            DecodeESP(tv, dtv, p, data, data_len);
             break;
-
-        case IPPROTO_IPV6:
-            {
-                /* spawn off tunnel packet */
-                Packet *tp = PacketTunnelPktSetup(tv, dtv, p, pkt + IPV4_GET_HLEN(p),
-                        IPV4_GET_IPLEN(p) - IPV4_GET_HLEN(p),
-                        DECODE_TUNNEL_IPV6);
-                if (tp != NULL) {
-                    PKT_SET_SRC(tp, PKT_SRC_DECODER_IPV4);
-                    PacketEnqueueNoLock(&tv->decode_pq,tp);
-                }
-                FlowSetupPacket(p);
-                break;
+        case IPPROTO_IPV6: {
+            /* spawn off tunnel packet */
+            Packet *tp = PacketTunnelPktSetup(tv, dtv, p, data, data_len, DECODE_TUNNEL_IPV6);
+            if (tp != NULL) {
+                PKT_SET_SRC(tp, PKT_SRC_DECODER_IPV4);
+                PacketEnqueueNoLock(&tv->decode_pq, tp);
+                StatsCounterIncr(&tv->stats, dtv->counter_ipv6inipv4);
             }
+            FlowSetupPacket(p);
+            break;
+        }
+        case IPPROTO_IPIP: {
+            /* spawn off tunnel packet */
+            Packet *tp = PacketTunnelPktSetup(tv, dtv, p, data, data_len, DECODE_TUNNEL_IPV4);
+            if (tp != NULL) {
+                PKT_SET_SRC(tp, PKT_SRC_DECODER_IPV4);
+                PacketEnqueueNoLock(&tv->decode_pq, tp);
+                StatsCounterIncr(&tv->stats, dtv->counter_ipv4inipv4);
+            }
+            FlowSetupPacket(p);
+            break;
+        }
         case IPPROTO_IP:
             /* check PPP VJ uncompressed packets and decode tcp dummy */
-            if(p->ppph != NULL && SCNtohs(p->ppph->protocol) == PPP_VJ_UCOMP)    {
-                DecodeTCP(tv, dtv, p, pkt + IPV4_GET_HLEN(p),
-                          IPV4_GET_IPLEN(p) -  IPV4_GET_HLEN(p));
+            if (p->flags & PKT_PPP_VJ_UCOMP) {
+                DecodeTCP(tv, dtv, p, data, data_len);
             }
             break;
         case IPPROTO_ICMPV6:
             ENGINE_SET_INVALID_EVENT(p, IPV4_WITH_ICMPV6);
             break;
+
+        default:
+            SCLogDebug("unknown protocol type: %" PRIx8 "", p->proto);
+            StatsCounterIncr(&tv->stats, dtv->counter_ipv4_unknown_proto);
+            ENGINE_SET_EVENT(p, IPV4_PROTO_UNKNOWN);
     }
 
     return TM_ECODE_OK;
@@ -630,7 +637,7 @@ static int DecodeIPV4OptionsNONETest01(void)
     DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts);
     FAIL_IF(p->flags & PKT_IS_INVALID);
 
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -646,7 +653,7 @@ static int DecodeIPV4OptionsEOLTest01(void)
     memset(&opts, 0x00, sizeof(opts));
     DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts);
     FAIL_IF(p->flags & PKT_IS_INVALID);
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -662,7 +669,7 @@ static int DecodeIPV4OptionsNOPTest01(void)
     memset(&opts, 0x00, sizeof(opts));
     DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts);
     FAIL_IF(p->flags & PKT_IS_INVALID);
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -684,7 +691,7 @@ static int DecodeIPV4OptionsRRTest01(void)
     DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts);
     FAIL_IF(p->flags & PKT_IS_INVALID);
     FAIL_IF(opts.o_rr.type != IPV4_OPT_RR);
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -706,7 +713,7 @@ static int DecodeIPV4OptionsRRTest02(void)
     FAIL_IF(DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts) != -1);
     FAIL_IF((p->flags & PKT_IS_INVALID) == 0);
     FAIL_IF(opts.o_rr.type != 0);
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -728,7 +735,7 @@ static int DecodeIPV4OptionsRRTest03(void)
     DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts);
     FAIL_IF((p->flags & PKT_IS_INVALID) == 0);
     FAIL_IF(opts.o_rr.type != 0);
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -750,7 +757,7 @@ static int DecodeIPV4OptionsRRTest04(void)
     DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts);
     FAIL_IF((p->flags & PKT_IS_INVALID) == 0);
     FAIL_IF(opts.o_rr.type != 0);
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -768,7 +775,7 @@ static int DecodeIPV4OptionsQSTest01(void)
     DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts);
     FAIL_IF(p->flags & PKT_IS_INVALID);
     FAIL_IF(opts.o_qs.type != IPV4_OPT_QS);
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -786,7 +793,7 @@ static int DecodeIPV4OptionsQSTest02(void)
     DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts);
     FAIL_IF((p->flags & PKT_IS_INVALID) == 0);
     FAIL_IF(opts.o_qs.type != 0);
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -808,7 +815,7 @@ static int DecodeIPV4OptionsTSTest01(void)
     DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts);
     FAIL_IF(p->flags & PKT_IS_INVALID);
     FAIL_IF(opts.o_ts.type != IPV4_OPT_TS);
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -830,7 +837,7 @@ static int DecodeIPV4OptionsTSTest02(void)
     DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts);
     FAIL_IF((p->flags & PKT_IS_INVALID) == 0);
     FAIL_IF(opts.o_ts.type != 0);
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -852,7 +859,7 @@ static int DecodeIPV4OptionsTSTest03(void)
     DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts);
     FAIL_IF((p->flags & PKT_IS_INVALID) == 0);
     FAIL_IF(opts.o_ts.type != 0);
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -874,7 +881,7 @@ static int DecodeIPV4OptionsTSTest04(void)
     DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts);
     FAIL_IF((p->flags & PKT_IS_INVALID) == 0);
     FAIL_IF(opts.o_ts.type != 0);
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -893,7 +900,7 @@ static int DecodeIPV4OptionsSECTest01(void)
     DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts);
     FAIL_IF(p->flags & PKT_IS_INVALID);
     FAIL_IF(opts.o_sec.type != IPV4_OPT_SEC);
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -910,7 +917,7 @@ static int DecodeIPV4OptionsSECTest02(void)
     DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts);
     FAIL_IF((p->flags & PKT_IS_INVALID) == 0);
     FAIL_IF(opts.o_sec.type != 0);
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -927,7 +934,7 @@ static int DecodeIPV4OptionsESECTest01(void)
     DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts);
     FAIL_IF(p->flags & PKT_IS_INVALID);
     FAIL_IF(opts.o_esec.type != IPV4_OPT_ESEC);
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -944,7 +951,7 @@ static int DecodeIPV4OptionsESECTest02(void)
     DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts);
     FAIL_IF((p->flags & PKT_IS_INVALID) == 0);
     FAIL_IF(opts.o_esec.type != 0);
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -966,7 +973,7 @@ static int DecodeIPV4OptionsLSRRTest01(void)
     DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts);
     FAIL_IF(p->flags & PKT_IS_INVALID);
     FAIL_IF(opts.o_lsrr.type != IPV4_OPT_LSRR);
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -988,7 +995,7 @@ static int DecodeIPV4OptionsLSRRTest02(void)
     DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts);
     FAIL_IF((p->flags & PKT_IS_INVALID) == 0);
     FAIL_IF(opts.o_lsrr.type != 0);
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -1010,7 +1017,7 @@ static int DecodeIPV4OptionsLSRRTest03(void)
     DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts);
     FAIL_IF((p->flags & PKT_IS_INVALID) == 0);
     FAIL_IF(opts.o_lsrr.type != 0);
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -1032,7 +1039,7 @@ static int DecodeIPV4OptionsLSRRTest04(void)
     DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts);
     FAIL_IF((p->flags & PKT_IS_INVALID) == 0);
     FAIL_IF(opts.o_lsrr.type != 0);
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -1052,7 +1059,7 @@ static int DecodeIPV4OptionsCIPSOTest01(void)
     DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts);
     FAIL_IF(p->flags & PKT_IS_INVALID);
     FAIL_IF(opts.o_cipso.type != IPV4_OPT_CIPSO);
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -1070,7 +1077,7 @@ static int DecodeIPV4OptionsSIDTest01(void)
     DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts);
     FAIL_IF(p->flags & PKT_IS_INVALID);
     FAIL_IF(opts.o_sid.type != IPV4_OPT_SID);
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -1088,7 +1095,7 @@ static int DecodeIPV4OptionsSIDTest02(void)
     DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts);
     FAIL_IF((p->flags & PKT_IS_INVALID) == 0);
     FAIL_IF(opts.o_sid.type != 0);
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -1110,7 +1117,7 @@ static int DecodeIPV4OptionsSSRRTest01(void)
     DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts);
     FAIL_IF(p->flags & PKT_IS_INVALID);
     FAIL_IF(opts.o_ssrr.type != IPV4_OPT_SSRR);
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -1132,7 +1139,7 @@ static int DecodeIPV4OptionsSSRRTest02(void)
     DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts);
     FAIL_IF((p->flags & PKT_IS_INVALID) == 0);
     FAIL_IF(opts.o_ssrr.type != 0);
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -1154,7 +1161,7 @@ static int DecodeIPV4OptionsSSRRTest03(void)
     DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts);
     FAIL_IF((p->flags & PKT_IS_INVALID) == 0);
     FAIL_IF(opts.o_ssrr.type != 0);
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -1176,7 +1183,7 @@ static int DecodeIPV4OptionsSSRRTest04(void)
     DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts);
     FAIL_IF((p->flags & PKT_IS_INVALID) == 0);
     FAIL_IF(opts.o_ssrr.type != 0);
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -1194,7 +1201,7 @@ static int DecodeIPV4OptionsRTRALTTest01(void)
     DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts);
     FAIL_IF(p->flags & PKT_IS_INVALID);
     FAIL_IF(opts.o_rtralt.type != IPV4_OPT_RTRALT);
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -1212,7 +1219,7 @@ static int DecodeIPV4OptionsRTRALTTest02(void)
     DecodeIPV4Options(p, raw_opts, sizeof(raw_opts), &opts);
     FAIL_IF((p->flags & PKT_IS_INVALID) == 0);
     FAIL_IF(opts.o_rtralt.type != 0);
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -1285,11 +1292,9 @@ static int DecodeIPV4DefragTest01(void)
     };
 
     Packet *p = PacketGetFromAlloc();
-    if (unlikely(p == NULL))
-        return 0;
+    FAIL_IF_NULL(p);
     ThreadVars tv;
     DecodeThreadVars dtv;
-    int result = 1;
 
     memset(&tv, 0, sizeof(ThreadVars));
     memset(&dtv, 0, sizeof(DecodeThreadVars));
@@ -1300,71 +1305,34 @@ static int DecodeIPV4DefragTest01(void)
     PacketCopyData(p, pkt1, sizeof(pkt1));
     DecodeIPV4(&tv, &dtv, p, GET_PKT_DATA(p) + ETHERNET_HEADER_LEN,
                GET_PKT_LEN(p) - ETHERNET_HEADER_LEN);
-    if (p->tcph != NULL) {
-        printf("tcp header should be NULL for ip fragment, but it isn't\n");
-        result = 0;
-        goto end;
-    }
+    FAIL_IF(PacketIsTCP(p));
     PacketRecycle(p);
 
     PacketCopyData(p, pkt2, sizeof(pkt2));
     DecodeIPV4(&tv, &dtv, p, GET_PKT_DATA(p) + ETHERNET_HEADER_LEN,
                GET_PKT_LEN(p) - ETHERNET_HEADER_LEN);
-    if (p->tcph != NULL) {
-        printf("tcp header should be NULL for ip fragment, but it isn't\n");
-        result = 0;
-        goto end;
-    }
+    FAIL_IF(PacketIsTCP(p));
     PacketRecycle(p);
 
     PacketCopyData(p, pkt3, sizeof(pkt3));
     DecodeIPV4(&tv, &dtv, p, GET_PKT_DATA(p) + ETHERNET_HEADER_LEN,
                GET_PKT_LEN(p) - ETHERNET_HEADER_LEN);
-    if (p->tcph != NULL) {
-        printf("tcp header should be NULL for ip fragment, but it isn't\n");
-        result = 0;
-        goto end;
-    }
+    FAIL_IF(PacketIsTCP(p));
     Packet *tp = PacketDequeueNoLock(&tv.decode_pq);
-    if (tp == NULL) {
-        printf("Failed to get defragged pseudo packet\n");
-        result = 0;
-        goto end;
-    }
-    if (tp->recursion_level != p->recursion_level) {
-        printf("defragged pseudo packet's and parent packet's recursion "
-               "level don't match\n %d != %d",
-               tp->recursion_level, p->recursion_level);
-        result = 0;
-        goto end;
-    }
-    if (tp->ip4h == NULL || tp->tcph == NULL) {
-        printf("pseudo packet's ip header and tcp header shouldn't be NULL, "
-               "but it is\n");
-        result = 0;
-        goto end;
-    }
-    if (GET_PKT_LEN(tp) != sizeof(tunnel_pkt)) {
-        printf("defragged pseudo packet's and parent packet's pkt lens "
-               "don't match\n %u != %"PRIuMAX,
-               GET_PKT_LEN(tp), (uintmax_t)sizeof(tunnel_pkt));
-        result = 0;
-        goto end;
-    }
-    if (memcmp(GET_PKT_DATA(tp), tunnel_pkt, sizeof(tunnel_pkt)) != 0) {
-            result = 0;
-            goto end;
-    }
-
+    FAIL_IF_NULL(tp);
+    FAIL_IF(tp->recursion_level != p->recursion_level);
+    FAIL_IF_NOT(PacketIsIPv4(tp));
+    FAIL_IF_NOT(PacketIsTCP(tp));
+    FAIL_IF(GET_PKT_LEN(tp) != sizeof(tunnel_pkt));
+    FAIL_IF(memcmp(GET_PKT_DATA(tp), tunnel_pkt, sizeof(tunnel_pkt)) != 0);
     PacketRecycle(tp);
-    SCFree(tp);
+    PacketFree(tp);
 
-end:
     DefragDestroy();
     PacketRecycle(p);
     FlowShutdown();
-    SCFree(p);
-    return result;
+    PacketFree(p);
+    PASS;
 }
 
 /**
@@ -1420,11 +1388,9 @@ static int DecodeIPV4DefragTest02(void)
     };
 
     Packet *p = PacketGetFromAlloc();
-    if (unlikely(p == NULL))
-        return 0;
+    FAIL_IF_NULL(p);
     ThreadVars tv;
     DecodeThreadVars dtv;
-    int result = 0;
 
     memset(&tv, 0, sizeof(ThreadVars));
     memset(&dtv, 0, sizeof(DecodeThreadVars));
@@ -1435,66 +1401,35 @@ static int DecodeIPV4DefragTest02(void)
     PacketCopyData(p, pkt1, sizeof(pkt1));
     DecodeIPV4(&tv, &dtv, p, GET_PKT_DATA(p) + ETHERNET_HEADER_LEN,
                GET_PKT_LEN(p) - ETHERNET_HEADER_LEN);
-    if (p->tcph != NULL) {
-        printf("tcp header should be NULL for ip fragment, but it isn't\n");
-        goto end;
-    }
+    FAIL_IF(PacketIsTCP(p));
     PacketRecycle(p);
 
     PacketCopyData(p, pkt2, sizeof(pkt2));
     DecodeIPV4(&tv, &dtv, p, GET_PKT_DATA(p) + ETHERNET_HEADER_LEN,
                GET_PKT_LEN(p) - ETHERNET_HEADER_LEN);
-    if (p->tcph != NULL) {
-        printf("tcp header should be NULL for ip fragment, but it isn't\n");
-        goto end;
-    }
+    FAIL_IF(PacketIsTCP(p));
     PacketRecycle(p);
 
     p->recursion_level = 3;
     PacketCopyData(p, pkt3, sizeof(pkt3));
     DecodeIPV4(&tv, &dtv, p, GET_PKT_DATA(p) + ETHERNET_HEADER_LEN,
                GET_PKT_LEN(p) - ETHERNET_HEADER_LEN);
-    if (p->tcph != NULL) {
-        printf("tcp header should be NULL for ip fragment, but it isn't\n");
-        goto end;
-    }
+    FAIL_IF(PacketIsTCP(p));
     Packet *tp = PacketDequeueNoLock(&tv.decode_pq);
-    if (tp == NULL) {
-        printf("Failed to get defragged pseudo packet\n");
-        goto end;
-    }
-    if (tp->recursion_level != p->recursion_level) {
-        printf("defragged pseudo packet's and parent packet's recursion "
-               "level don't match %d != %d: ",
-               tp->recursion_level, p->recursion_level);
-        goto end;
-    }
-    if (tp->ip4h == NULL || tp->tcph == NULL) {
-        printf("pseudo packet's ip header and tcp header shouldn't be NULL, "
-               "but it is\n");
-        goto end;
-    }
-    if (GET_PKT_LEN(tp) != sizeof(tunnel_pkt)) {
-        printf("defragged pseudo packet's and parent packet's pkt lens "
-               "don't match %u != %"PRIuMAX": ",
-               GET_PKT_LEN(tp), (uintmax_t)sizeof(tunnel_pkt));
-        goto end;
-    }
-
-    if (memcmp(GET_PKT_DATA(tp), tunnel_pkt, sizeof(tunnel_pkt)) != 0) {
-        goto end;
-    }
-
-    result = 1;
+    FAIL_IF_NULL(tp);
+    FAIL_IF(tp->recursion_level != p->recursion_level);
+    FAIL_IF_NOT(PacketIsIPv4(tp));
+    FAIL_IF_NOT(PacketIsTCP(tp));
+    FAIL_IF(GET_PKT_LEN(tp) != sizeof(tunnel_pkt));
+    FAIL_IF(memcmp(GET_PKT_DATA(tp), tunnel_pkt, sizeof(tunnel_pkt)) != 0);
     PacketRecycle(tp);
-    SCFree(tp);
+    PacketFree(tp);
 
-end:
     DefragDestroy();
     PacketRecycle(p);
     FlowShutdown();
-    SCFree(p);
-    return result;
+    PacketFree(p);
+    PASS;
 }
 
 /**
@@ -1545,12 +1480,9 @@ static int DecodeIPV4DefragTest03(void)
     };
 
     Packet *p = PacketGetFromAlloc();
-    if (unlikely(p == NULL))
-        return 0;
+    FAIL_IF_NULL(p);
     ThreadVars tv;
     DecodeThreadVars dtv;
-    int result = 1;
-
     memset(&tv, 0, sizeof(ThreadVars));
     memset(&dtv, 0, sizeof(DecodeThreadVars));
 
@@ -1560,96 +1492,44 @@ static int DecodeIPV4DefragTest03(void)
     PacketCopyData(p, pkt, sizeof(pkt));
     DecodeIPV4(&tv, &dtv, p, GET_PKT_DATA(p) + ETHERNET_HEADER_LEN,
                GET_PKT_LEN(p) - ETHERNET_HEADER_LEN);
-    if (p->tcph == NULL) {
-        printf("tcp header shouldn't be NULL, but it is\n");
-        result = 0;
-        goto end;
-    }
-    if (!(p->flags & PKT_WANTS_FLOW)) {
-        printf("packet flow shouldn't be NULL\n");
-        result = 0;
-        goto end;
-    }
+    FAIL_IF_NOT(PacketIsTCP(p));
+    FAIL_IF(!(p->flags & PKT_WANTS_FLOW));
     PacketRecycle(p);
 
     PacketCopyData(p, pkt1, sizeof(pkt1));
     DecodeIPV4(&tv, &dtv, p, GET_PKT_DATA(p) + ETHERNET_HEADER_LEN,
                GET_PKT_LEN(p) - ETHERNET_HEADER_LEN);
-    if (p->tcph != NULL) {
-        printf("tcp header should be NULL for ip fragment, but it isn't\n");
-        result = 0;
-        goto end;
-    }
+    FAIL_IF(PacketIsTCP(p));
     PacketRecycle(p);
 
     PacketCopyData(p, pkt2, sizeof(pkt2));
     DecodeIPV4(&tv, &dtv, p, GET_PKT_DATA(p) + ETHERNET_HEADER_LEN,
                GET_PKT_LEN(p) - ETHERNET_HEADER_LEN);
-    if (p->tcph != NULL) {
-        printf("tcp header should be NULL for ip fragment, but it isn't\n");
-        result = 0;
-        goto end;
-    }
+    FAIL_IF(PacketIsTCP(p));
     PacketRecycle(p);
 
     PacketCopyData(p, pkt3, sizeof(pkt3));
     DecodeIPV4(&tv, &dtv, p, GET_PKT_DATA(p) + ETHERNET_HEADER_LEN,
                GET_PKT_LEN(p) - ETHERNET_HEADER_LEN);
-    if (p->tcph != NULL) {
-        printf("tcp header should be NULL for ip fragment, but it isn't\n");
-        result = 0;
-        goto end;
-    }
+    FAIL_IF(PacketIsTCP(p));
 
     Packet *tp = PacketDequeueNoLock(&tv.decode_pq);
-    if (tp == NULL) {
-        printf("Failed to get defragged pseudo packet\n");
-        result = 0;
-        goto end;
-    }
-    if (!(tp->flags & PKT_WANTS_FLOW)) {
-        result = 0;
-        goto end;
-    }
-    if (tp->flow_hash != p->flow_hash) {
-        result = 0;
-        goto end;
-    }
-    if (tp->recursion_level != p->recursion_level) {
-        printf("defragged pseudo packet's and parent packet's recursion "
-               "level don't match\n %d != %d",
-               tp->recursion_level, p->recursion_level);
-        result = 0;
-        goto end;
-    }
-    if (tp->ip4h == NULL || tp->tcph == NULL) {
-        printf("pseudo packet's ip header and tcp header shouldn't be NULL, "
-               "but it is\n");
-        result = 0;
-        goto end;
-    }
-    if (GET_PKT_LEN(tp) != sizeof(tunnel_pkt)) {
-        printf("defragged pseudo packet's and parent packet's pkt lens "
-               "don't match\n %u != %"PRIuMAX,
-               GET_PKT_LEN(tp), (uintmax_t)sizeof(tunnel_pkt));
-        result = 0;
-        goto end;
-    }
-
-    if (memcmp(GET_PKT_DATA(tp), tunnel_pkt, sizeof(tunnel_pkt)) != 0) {
-            result = 0;
-            goto end;
-    }
-
+    FAIL_IF_NULL(tp);
+    FAIL_IF(!(tp->flags & PKT_WANTS_FLOW));
+    FAIL_IF(tp->flow_hash != p->flow_hash);
+    FAIL_IF(tp->recursion_level != p->recursion_level);
+    FAIL_IF_NOT(PacketIsIPv4(tp));
+    FAIL_IF_NOT(PacketIsTCP(tp));
+    FAIL_IF(GET_PKT_LEN(tp) != sizeof(tunnel_pkt));
+    FAIL_IF(memcmp(GET_PKT_DATA(tp), tunnel_pkt, sizeof(tunnel_pkt)) != 0);
     PacketRecycle(tp);
-    SCFree(tp);
+    PacketFree(tp);
 
-end:
     DefragDestroy();
     PacketRecycle(p);
     FlowShutdown();
-    SCFree(p);
-    return result;
+    PacketFree(p);
+    PASS;
 }
 
 /**
@@ -1676,7 +1556,7 @@ static int DecodeEthernetTestIPv4Opt(void)
 
     DecodeEthernet(&tv, &dtv, p, raw_eth, sizeof(raw_eth));
 
-    SCFree(p);
+    PacketFree(p);
     DefragDestroy();
     PASS;
 }

@@ -30,6 +30,7 @@
 #include "detect.h"
 
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-state.h"
 #include "detect-engine-file.h"
@@ -99,7 +100,8 @@ void DetectFilenameRegister(void)
     sigmatch_table[DETECT_FILE_NAME].desc = "sticky buffer to match on the file name";
     sigmatch_table[DETECT_FILE_NAME].url = "/rules/file-keywords.html#filename";
     sigmatch_table[DETECT_FILE_NAME].Setup = DetectFilenameSetupSticky;
-    sigmatch_table[DETECT_FILE_NAME].flags = SIGMATCH_NOOPT|SIGMATCH_INFO_STICKY_BUFFER;
+    sigmatch_table[DETECT_FILE_NAME].flags = SIGMATCH_OPTIONAL_OPT | SIGMATCH_INFO_STICKY_BUFFER |
+                                             SIGMATCH_SUPPORT_DIR | SIGMATCH_INFO_MULTI_BUFFER;
 
     DetectBufferTypeSetDescriptionByName("file.name", "file name");
 
@@ -118,7 +120,6 @@ void DetectFilenameRegister(void)
     filehandler_table[DETECT_FILE_NAME].Callback = DetectEngineInspectFilename;
 
     DetectBufferTypeSupportsMultiInstance("file.name");
-    return;
 }
 
 static int DetectFileextSetup(DetectEngineCtx *de_ctx, Signature *s, const char *str)
@@ -208,7 +209,7 @@ static int DetectFilenameSetup (DetectEngineCtx *de_ctx, Signature *s, const cha
  */
 static int DetectFilenameSetupSticky(DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
-    if (DetectBufferSetActiveList(de_ctx, s, g_file_name_buffer_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_file_name_buffer_id) < 0)
         return -1;
     s->file_flags |= (FILE_SIG_NEED_FILE | FILE_SIG_NEED_FILENAME);
     return 0;
@@ -229,7 +230,7 @@ static InspectionBuffer *FilenameGetDataCallback(DetectEngineThreadCtx *det_ctx,
     const uint8_t *data = cur_file->name;
     uint32_t data_len = cur_file->name_len;
 
-    InspectionBufferSetupMulti(buffer, transforms, data, data_len);
+    InspectionBufferSetupMulti(det_ctx, buffer, transforms, data, data_len);
 
     SCReturnPtr(buffer, "InspectionBuffer");
 }
@@ -243,9 +244,17 @@ static uint8_t DetectEngineInspectFilename(DetectEngineCtx *de_ctx, DetectEngine
         transforms = engine->v2.transforms;
     }
 
-    AppLayerGetFileState files = AppLayerParserGetTxFiles(f, alstate, txv, flags);
+    AppLayerGetFileState files = AppLayerParserGetTxFiles(f, txv, flags);
     FileContainer *ffc = files.fc;
-    if (ffc == NULL) {
+    if (ffc == NULL || ffc->head == NULL) {
+        const bool eof = (AppLayerParserGetStateProgress(f->proto, f->alproto, txv, flags) >
+                          engine->progress);
+        if (eof && engine->match_on_null) {
+            return DETECT_ENGINE_INSPECT_SIG_MATCH;
+        }
+        if (ffc != NULL) {
+            return DETECT_ENGINE_INSPECT_SIG_NO_MATCH;
+        }
         return DETECT_ENGINE_INSPECT_SIG_CANT_MATCH_FILES;
     }
 
@@ -254,8 +263,10 @@ static uint8_t DetectEngineInspectFilename(DetectEngineCtx *de_ctx, DetectEngine
     for (File *file = ffc->head; file != NULL; file = file->next) {
         InspectionBuffer *buffer = FilenameGetDataCallback(
                 det_ctx, transforms, f, flags, file, engine->sm_list, local_file_id);
-        if (buffer == NULL)
+        if (buffer == NULL) {
+            local_file_id++;
             continue;
+        }
 
         const bool match = DetectEngineContentInspection(de_ctx, det_ctx, s, engine->smd, NULL, f,
                 buffer->inspect, buffer->inspect_len, buffer->inspect_offset,
@@ -296,7 +307,7 @@ static void PrefilterTxFilename(DetectEngineThreadCtx *det_ctx, const void *pect
     const MpmCtx *mpm_ctx = ctx->mpm_ctx;
     const int list_id = ctx->list_id;
 
-    AppLayerGetFileState files = AppLayerParserGetTxFiles(f, f->alstate, txv, flags);
+    AppLayerGetFileState files = AppLayerParserGetTxFiles(f, txv, flags);
     FileContainer *ffc = files.fc;
     if (ffc != NULL) {
         int local_file_id = 0;

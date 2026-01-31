@@ -18,27 +18,35 @@
 // written by Pierre Chifflier  <chifflier@wzdftpd.net>
 
 use crate::krb::krb5::{test_weak_encryption, KRB5Transaction};
+use suricata_sys::sys::AppProtoEnum::ALPROTO_KRB5;
+use suricata_sys::sys::{
+    AppProto, DetectEngineCtx, DetectEngineThreadCtx, Flow, SCDetectHelperBufferRegister,
+    SCDetectHelperKeywordRegister, SCDetectSignatureSetAppProto, SCSigMatchAppendSMToList,
+    SCSigTableAppLiteElmt, SigMatchCtx, Signature,
+};
 
+use crate::core::{STREAM_TOCLIENT, STREAM_TOSERVER};
+use crate::detect::uint::{
+    detect_parse_uint_enum, DetectUintData, SCDetectU32Free, SCDetectU32Match,
+};
+use crate::detect::{SIGMATCH_INFO_ENUM_UINT, SIGMATCH_INFO_MULTI_UINT, SIGMATCH_INFO_UINT32};
 use kerberos_parser::krb5::EncryptionType;
 
-use nom7::branch::alt;
-use nom7::bytes::complete::{is_a, tag, take_while, take_while1};
-use nom7::character::complete::char;
-use nom7::combinator::{all_consuming, map_res, opt};
-use nom7::multi::many1;
-use nom7::IResult;
+use nom8::branch::alt;
+use nom8::bytes::complete::{is_a, tag, take_while, take_while1};
+use nom8::character::complete::char;
+use nom8::combinator::{all_consuming, map_res, opt};
+use nom8::multi::many1;
+use nom8::IResult;
+use nom8::Parser;
 
-use std::ffi::CStr;
-
-#[no_mangle]
-pub unsafe extern "C" fn rs_krb5_tx_get_msgtype(tx: &mut KRB5Transaction, ptr: *mut u32) {
-    *ptr = tx.msg_type.0;
-}
+use std::ffi::{c_int, CStr};
+use std::os::raw::c_void;
 
 /// Get error code, if present in transaction
 /// Return 0 if error code was filled, else 1
 #[no_mangle]
-pub unsafe extern "C" fn rs_krb5_tx_get_errcode(tx: &mut KRB5Transaction, ptr: *mut i32) -> u32 {
+pub unsafe extern "C" fn SCKrb5TxGetErrorCode(tx: &KRB5Transaction, ptr: *mut i32) -> u32 {
     match tx.error_code {
         Some(ref e) => {
             *ptr = e.0;
@@ -49,33 +57,37 @@ pub unsafe extern "C" fn rs_krb5_tx_get_errcode(tx: &mut KRB5Transaction, ptr: *
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn rs_krb5_tx_get_cname(
-    tx: &mut KRB5Transaction, i: u32, buffer: *mut *const u8, buffer_len: *mut u32,
-) -> u8 {
+pub unsafe extern "C" fn SCKrb5TxGetCname(
+    _de: *mut DetectEngineThreadCtx, tx: *const c_void, _flags: u8, i: u32, buffer: *mut *const u8,
+    buffer_len: *mut u32,
+) -> bool {
+    let tx = cast_pointer!(tx, KRB5Transaction);
     if let Some(ref s) = tx.cname {
         if (i as usize) < s.name_string.len() {
             let value = &s.name_string[i as usize];
             *buffer = value.as_ptr();
             *buffer_len = value.len() as u32;
-            return 1;
+            return true;
         }
     }
-    0
+    false
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn rs_krb5_tx_get_sname(
-    tx: &mut KRB5Transaction, i: u32, buffer: *mut *const u8, buffer_len: *mut u32,
-) -> u8 {
+pub unsafe extern "C" fn SCKrb5TxGetSname(
+    _de: *mut DetectEngineThreadCtx, tx: *const c_void, _flags: u8, i: u32, buffer: *mut *const u8,
+    buffer_len: *mut u32,
+) -> bool {
+    let tx = cast_pointer!(tx, KRB5Transaction);
     if let Some(ref s) = tx.sname {
         if (i as usize) < s.name_string.len() {
             let value = &s.name_string[i as usize];
             *buffer = value.as_ptr();
             *buffer_len = value.len() as u32;
-            return 1;
+            return true;
         }
     }
-    0
+    false
 }
 
 const KRB_TICKET_FASTARRAY_SIZE: usize = 256;
@@ -103,7 +115,6 @@ impl DetectKrb5TicketEncryptionList {
     }
 }
 
-
 // Suppress large enum variant lint as the LIST is very large compared
 // to the boolean variant.
 #[derive(Debug)]
@@ -114,8 +125,8 @@ pub enum DetectKrb5TicketEncryptionData {
 }
 
 pub fn detect_parse_encryption_weak(i: &str) -> IResult<&str, DetectKrb5TicketEncryptionData> {
-    let (i, neg) = opt(char('!'))(i)?;
-    let (i, _) = tag("weak")(i)?;
+    let (i, neg) = opt(char('!')).parse(i)?;
+    let (i, _) = tag("weak").parse(i)?;
     let value = neg.is_none();
     return Ok((i, DetectKrb5TicketEncryptionData::WEAK(value)));
 }
@@ -179,21 +190,23 @@ pub fn is_alphanumeric_or_dash(chr: char) -> bool {
 }
 
 pub fn detect_parse_encryption_item(i: &str) -> IResult<&str, EncryptionType> {
-    let (i, _) = opt(is_a(" "))(i)?;
+    let (i, _) = opt(is_a(" ")).parse(i)?;
     let (i, e) = map_res(take_while1(is_alphanumeric_or_dash), |s: &str| {
         EncryptionType::from_str(s)
-    })(i)?;
-    let (i, _) = opt(is_a(" "))(i)?;
-    let (i, _) = opt(char(','))(i)?;
+    })
+    .parse(i)?;
+    let (i, _) = opt(is_a(" ")).parse(i)?;
+    let (i, _) = opt(char(',')).parse(i)?;
     return Ok((i, e));
 }
 
 pub fn detect_parse_encryption_list(i: &str) -> IResult<&str, DetectKrb5TicketEncryptionData> {
     let mut l = DetectKrb5TicketEncryptionList::new();
-    let (i, v) = many1(detect_parse_encryption_item)(i)?;
+    let (i, v) = many1(detect_parse_encryption_item).parse(i)?;
     for &val in v.iter() {
         let vali = val.0;
-        if vali < 0 && ((-vali) as usize) < KRB_TICKET_FASTARRAY_SIZE {
+        // KRB_TICKET_FASTARRAY_SIZE is a constant typed usize but which fits in a i32
+        if vali < 0 && vali > -(KRB_TICKET_FASTARRAY_SIZE as i32) {
             l.negative[(-vali) as usize] = true;
         } else if vali >= 0 && (vali as usize) < KRB_TICKET_FASTARRAY_SIZE {
             l.positive[vali as usize] = true;
@@ -205,14 +218,14 @@ pub fn detect_parse_encryption_list(i: &str) -> IResult<&str, DetectKrb5TicketEn
 }
 
 pub fn detect_parse_encryption(i: &str) -> IResult<&str, DetectKrb5TicketEncryptionData> {
-    let (i, _) = opt(is_a(" "))(i)?;
-    let (i, parsed) = alt((detect_parse_encryption_weak, detect_parse_encryption_list))(i)?;
-    let (i, _) = all_consuming(take_while(|c| c == ' '))(i)?;
+    let (i, _) = opt(is_a(" ")).parse(i)?;
+    let (i, parsed) = alt((detect_parse_encryption_weak, detect_parse_encryption_list)).parse(i)?;
+    let (i, _) = all_consuming(take_while(|c| c == ' ')).parse(i)?;
     return Ok((i, parsed));
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn rs_krb5_detect_encryption_parse(
+pub unsafe extern "C" fn SCKrb5DetectEncryptionParse(
     ustr: *const std::os::raw::c_char,
 ) -> *mut DetectKrb5TicketEncryptionData {
     let ft_name: &CStr = CStr::from_ptr(ustr); //unsafe
@@ -226,8 +239,8 @@ pub unsafe extern "C" fn rs_krb5_detect_encryption_parse(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn rs_krb5_detect_encryption_match(
-    tx: &mut KRB5Transaction, ctx: &DetectKrb5TicketEncryptionData,
+pub unsafe extern "C" fn SCKrb5DetectEncryptionMatch(
+    tx: &KRB5Transaction, ctx: &DetectKrb5TicketEncryptionData,
 ) -> std::os::raw::c_int {
     if let Some(x) = tx.ticket_etype {
         match ctx {
@@ -260,7 +273,7 @@ pub unsafe extern "C" fn rs_krb5_detect_encryption_match(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn rs_krb5_detect_encryption_free(ctx: &mut DetectKrb5TicketEncryptionData) {
+pub unsafe extern "C" fn SCKrb5DetectEncryptionFree(ctx: &mut DetectKrb5TicketEncryptionData) {
     // Just unbox...
     std::mem::drop(Box::from_raw(ctx));
 }
@@ -327,5 +340,109 @@ mod tests {
                 panic!("Result should have been ok.");
             }
         }
+        let ctx = detect_parse_encryption("-2147483648").unwrap().1;
+        match ctx {
+            DetectKrb5TicketEncryptionData::LIST(l) => {
+                assert_eq!(l.other.len(), 1);
+                assert_eq!(l.other[0], EncryptionType(i32::MIN));
+            }
+            _ => {
+                panic!("Result should have been list.");
+            }
+        }
     }
+}
+
+static mut G_KRB5_MSG_TYPE_KW_ID: u16 = 0;
+static mut G_KRB5_MSG_TYPE_BUFFER_ID: c_int = 0;
+
+// We should apply the derive on the kerberos_parser MessageType
+#[repr(u32)]
+#[derive(EnumStringU32)]
+#[allow(non_camel_case_types)]
+pub enum Krb5MessageType {
+    AS_REQ = 10,
+    AS_REP = 11,
+    TGS_REQ = 12,
+    TGS_REP = 13,
+    AP_REQ = 14,
+    AP_REP = 15,
+    RESERVED16 = 16,
+    RESERVED17 = 17,
+    SAFE = 20,
+    PRIV = 21,
+    CRED = 22,
+    ERROR = 30,
+}
+
+unsafe extern "C" fn krb5_parse_msg_type(
+    ustr: *const std::os::raw::c_char,
+) -> *mut DetectUintData<u32> {
+    let ft_name: &CStr = CStr::from_ptr(ustr); //unsafe
+    if let Ok(s) = ft_name.to_str() {
+        if let Some(ctx) = detect_parse_uint_enum::<u32, Krb5MessageType>(s) {
+            let boxed = Box::new(ctx);
+            return Box::into_raw(boxed) as *mut _;
+        }
+    }
+    return std::ptr::null_mut();
+}
+
+unsafe extern "C" fn krb5_msg_type_setup(
+    de: *mut DetectEngineCtx, s: *mut Signature, raw: *const libc::c_char,
+) -> c_int {
+    if SCDetectSignatureSetAppProto(s, ALPROTO_KRB5 as AppProto) != 0 {
+        return -1;
+    }
+    let ctx = krb5_parse_msg_type(raw) as *mut c_void;
+    if ctx.is_null() {
+        return -1;
+    }
+    if SCSigMatchAppendSMToList(
+        de,
+        s,
+        G_KRB5_MSG_TYPE_KW_ID,
+        ctx as *mut SigMatchCtx,
+        G_KRB5_MSG_TYPE_BUFFER_ID,
+    )
+    .is_null()
+    {
+        krb5_msg_type_free(std::ptr::null_mut(), ctx);
+        return -1;
+    }
+    return 0;
+}
+
+unsafe extern "C" fn krb5_msg_type_match(
+    _de: *mut DetectEngineThreadCtx, _f: *mut Flow, _flags: u8, _state: *mut c_void,
+    tx: *mut c_void, _sig: *const Signature, ctx: *const SigMatchCtx,
+) -> c_int {
+    let tx = cast_pointer!(tx, KRB5Transaction);
+    let ctx = cast_pointer!(ctx, DetectUintData<u32>);
+    // kerberos_parser crate defines MessageType as u32 and not u8...
+    return SCDetectU32Match(tx.msg_type.0, ctx);
+}
+
+unsafe extern "C" fn krb5_msg_type_free(_de: *mut DetectEngineCtx, ctx: *mut c_void) {
+    let ctx = cast_pointer!(ctx, DetectUintData<u32>);
+    SCDetectU32Free(ctx);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn SCDetectKrb5MsgTypeRegister() {
+    let kw = SCSigTableAppLiteElmt {
+        name: b"krb5_msg_type\0".as_ptr() as *const libc::c_char,
+        desc: b"match Kerberos 5 message type\0".as_ptr() as *const libc::c_char,
+        url: b"/rules/kerberos-keywords.html#krb5-msg-type\0".as_ptr() as *const libc::c_char,
+        AppLayerTxMatch: Some(krb5_msg_type_match),
+        Setup: Some(krb5_msg_type_setup),
+        Free: Some(krb5_msg_type_free),
+        flags: SIGMATCH_INFO_MULTI_UINT | SIGMATCH_INFO_ENUM_UINT | SIGMATCH_INFO_UINT32,
+    };
+    G_KRB5_MSG_TYPE_KW_ID = SCDetectHelperKeywordRegister(&kw);
+    G_KRB5_MSG_TYPE_BUFFER_ID = SCDetectHelperBufferRegister(
+        b"krb5_msg_type\0".as_ptr() as *const libc::c_char,
+        ALPROTO_KRB5 as AppProto,
+        STREAM_TOCLIENT | STREAM_TOSERVER,
+    );
 }

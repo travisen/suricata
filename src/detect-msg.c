@@ -50,7 +50,7 @@ void DetectMsgRegister (void)
 #ifdef UNITTESTS
     sigmatch_table[DETECT_MSG].RegisterTests = DetectMsgRegisterTests;
 #endif
-    sigmatch_table[DETECT_MSG].flags = SIGMATCH_QUOTES_MANDATORY;
+    sigmatch_table[DETECT_MSG].flags = (SIGMATCH_QUOTES_MANDATORY | SIGMATCH_SUPPORT_FIREWALL);
 }
 
 static int DetectMsgSetup (DetectEngineCtx *de_ctx, Signature *s, const char *msgstr)
@@ -59,9 +59,15 @@ static int DetectMsgSetup (DetectEngineCtx *de_ctx, Signature *s, const char *ms
     if (slen == 0)
         return -1;
 
-    char input[slen + 1];
-    strlcpy(input, msgstr, slen + 1);
-    char *str = input;
+    if (s->msg != NULL) {
+        SCLogError("duplicated 'msg' keyword detected");
+        return -1;
+    }
+
+    char *str = SCStrdup(msgstr);
+    if (str == NULL)
+        return -1;
+
     char converted = 0;
 
     {
@@ -107,17 +113,8 @@ static int DetectMsgSetup (DetectEngineCtx *de_ctx, Signature *s, const char *ms
         }
     }
 
-    if (s->msg != NULL) {
-        SCLogError("duplicated 'msg' keyword detected");
-        goto error;
-    }
-    s->msg = SCStrdup(str);
-    if (s->msg == NULL)
-        goto error;
+    s->msg = str;
     return 0;
-
-error:
-    return -1;
 }
 
 /* -------------------------------------Unittests-----------------------------*/
@@ -129,6 +126,7 @@ static int DetectMsgParseTest01(void)
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     FAIL_IF_NULL(de_ctx);
 
+    SCClassConfDeInitContext(de_ctx);
     FILE *fd = SCClassConfGenerateValidDummyClassConfigFD01();
     SCClassConfLoadClassificationConfigFile(de_ctx, fd);
 
@@ -137,11 +135,10 @@ static int DetectMsgParseTest01(void)
             "flow:stateless,to_server; content:\"flowstatelesscheck\"; "
             "classtype:bad-unknown; sid: 40000002; rev: 1;)");
     FAIL_IF_NULL(sig);
-
     FAIL_IF(strcmp(sig->msg, teststringparsed) != 0);
 
+    SCClassConfDeInitContext(de_ctx);
     DetectEngineCtxFree(de_ctx);
-
     PASS;
 }
 
@@ -169,6 +166,7 @@ static int DetectMsgParseTest03(void)
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     FAIL_IF_NULL(de_ctx);
 
+    SCClassConfDeInitContext(de_ctx);
     FILE *fd = SCClassConfGenerateValidDummyClassConfigFD01();
     SCClassConfLoadClassificationConfigFile(de_ctx, fd);
 
@@ -177,11 +175,10 @@ static int DetectMsgParseTest03(void)
             "flow:stateless,to_server; content:\"flowstatelesscheck\"; "
             "classtype:bad-unknown; sid: 40000002; rev: 1;)");
     FAIL_IF_NULL(sig);
-
     FAIL_IF(strcmp(sig->msg, teststringparsed) != 0);
 
+    SCClassConfDeInitContext(de_ctx);
     DetectEngineCtxFree(de_ctx);
-
     PASS;
 }
 

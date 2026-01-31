@@ -13,6 +13,8 @@
 #include "util-byte.h"
 #include "conf-yaml-loader.h"
 #include "util-conf.h"
+#include "rust.h"
+#include "nallocinc.c"
 
 #define HEADER_LEN 6
 
@@ -21,7 +23,7 @@ int LLVMFuzzerInitialize(int *argc, char ***argv);
 
 AppLayerParserThreadCtx *alp_tctx = NULL;
 
-#include "confyaml.c"
+extern const char *configNoChecksum;
 
 /* input buffer is structured this way :
  * 6 bytes header,
@@ -36,38 +38,20 @@ AppLayerParserThreadCtx *alp_tctx = NULL;
 const uint8_t separator[] = {0x01, 0xD5, 0xCA, 0x7A};
 SCInstance surifuzz;
 AppProto forceLayer = 0;
+char *target_suffix = NULL;
 SC_ATOMIC_EXTERN(unsigned int, engine_stage);
 
 int LLVMFuzzerInitialize(int *argc, char ***argv)
 {
-    char *target_suffix = strrchr((*argv)[0], '_');
-    if (target_suffix != NULL) {
-        AppProto applayer = StringToAppProto(target_suffix + 1);
-        if (applayer != ALPROTO_UNKNOWN) {
-            forceLayer = applayer;
-            printf("Forcing %s=%" PRIu16 "\n", AppProtoToString(forceLayer), forceLayer);
-            return 0;
-        }
-    }
+    target_suffix = getenv("FUZZ_APPLAYER");
     // else
-    const char *forceLayerStr = getenv("FUZZ_APPLAYER");
-    if (forceLayerStr) {
-        if (ByteExtractStringUint16(&forceLayer, 10, 0, forceLayerStr) < 0) {
-            forceLayer = 0;
-            printf("Invalid numeric value for FUZZ_APPLAYER environment variable");
-        } else {
-            printf("Forcing %s\n", AppProtoToString(forceLayer));
-        }
+    if (!target_suffix) {
+        target_suffix = strrchr((*argv)[0], '_');
     }
-    // http is the output name, but we want to fuzz HTTP1
-    if (forceLayer == ALPROTO_HTTP) {
-        forceLayer = ALPROTO_HTTP1;
-    }
+    nalloc_init((*argv)[0]);
+    nalloc_restrict_file_prefix(3);
     return 0;
 }
-
-// arbitrary value
-#define ALPROTO_MAXTX 4096
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
@@ -86,26 +70,37 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         setenv("SC_LOG_FILE", "/dev/null", 0);
 
         InitGlobal();
-        run_mode = RUNMODE_PCAP_FILE;
+        SCRunmodeSet(RUNMODE_PCAP_FILE);
         GlobalsInitPreConfig();
 
         //redirect logs to /tmp
         ConfigSetLogDirectory("/tmp/");
         // disables checksums validation for fuzzing
-        if (ConfYamlLoadString(configNoChecksum, strlen(configNoChecksum)) != 0) {
+        if (SCConfYamlLoadString(configNoChecksum, strlen(configNoChecksum)) != 0) {
             abort();
         }
 
         PostConfLoadedSetup(&surifuzz);
         alp_tctx = AppLayerParserThreadCtxAlloc();
         SC_ATOMIC_SET(engine_stage, SURICATA_RUNTIME);
+        if (target_suffix != NULL) {
+            AppProto applayer = StringToAppProto(target_suffix + 1);
+            if (applayer != ALPROTO_UNKNOWN) {
+                forceLayer = applayer;
+                printf("Forcing %s=%" PRIu16 "\n", AppProtoToString(forceLayer), forceLayer);
+            }
+        }
+        // http is the output name, but we want to fuzz HTTP1
+        if (forceLayer == ALPROTO_HTTP) {
+            forceLayer = ALPROTO_HTTP1;
+        }
     }
 
     if (size < HEADER_LEN) {
         return 0;
     }
 
-    if (data[0] >= ALPROTO_MAX) {
+    if (data[0] >= g_alproto_max) {
         return 0;
     }
     //no UTHBuildFlow to have storage
@@ -113,7 +108,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     if (f == NULL) {
         return 0;
     }
-    f->flags |= FLOW_IPV4;
+    f->flags |= FLOW_IPV4 | FLOW_SGH_TOCLIENT | FLOW_SGH_TOSERVER;
     f->src.addr_data32[0] = 0x01020304;
     f->dst.addr_data32[0] = 0x05060708;
     f->sp = (uint16_t)((data[2] << 8) | data[3]);
@@ -128,6 +123,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         f->alproto = data[0];
     }
 
+    nalloc_start(data, size);
     FLOWLOCK_WRLOCK(f);
     /*
      * We want to fuzz multiple calls to AppLayerParserParse
@@ -158,7 +154,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 goto bail;
             }
             memcpy(isolatedBuffer, albuffer, alnext - albuffer);
-            (void) AppLayerParserParse(NULL, alp_tctx, f, f->alproto, flags, isolatedBuffer, alnext - albuffer);
+            (void)AppLayerParserParse(NULL, alp_tctx, f, f->alproto, flags, isolatedBuffer,
+                    (uint32_t)(alnext - albuffer));
             free(isolatedBuffer);
             if (FlowChangeProto(f)) {
                 // exits if a protocol change is requested
@@ -167,10 +164,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             }
             flags &= ~(STREAM_START);
             if (f->alparser &&
-                   (((flags & STREAM_TOSERVER) != 0 &&
-                     AppLayerParserStateIssetFlag(f->alparser, APP_LAYER_PARSER_EOF_TS)) ||
-                    ((flags & STREAM_TOCLIENT) != 0 &&
-                     AppLayerParserStateIssetFlag(f->alparser, APP_LAYER_PARSER_EOF_TC)))) {
+                    (((flags & STREAM_TOSERVER) != 0 && SCAppLayerParserStateIssetFlag(f->alparser,
+                                                                APP_LAYER_PARSER_EOF_TS)) ||
+                            ((flags & STREAM_TOCLIENT) != 0 &&
+                                    SCAppLayerParserStateIssetFlag(
+                                            f->alparser, APP_LAYER_PARSER_EOF_TC)))) {
                 //no final chunk
                 alsize = 0;
                 break;
@@ -201,13 +199,15 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             goto bail;
         }
         memcpy(isolatedBuffer, albuffer, alsize);
-        (void) AppLayerParserParse(NULL, alp_tctx, f, f->alproto, flags, isolatedBuffer, alsize);
+        (void)AppLayerParserParse(
+                NULL, alp_tctx, f, f->alproto, flags, isolatedBuffer, (uint32_t)alsize);
         free(isolatedBuffer);
     }
 
 bail:
     FLOWLOCK_UNLOCK(f);
     FlowFree(f);
+    nalloc_end();
 
     return 0;
 }

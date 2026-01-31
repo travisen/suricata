@@ -1,4 +1,4 @@
-/* Copyright (C) 2020 Open Information Security Foundation
+/* Copyright (C) 2020-2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -15,10 +15,12 @@
  * 02110-1301, USA.
  */
 
- //! Module for building JSON documents.
+//! Module for building JSON documents.
 
 #![allow(clippy::missing_safety_doc)]
 
+use base64::{engine::general_purpose::STANDARD, Engine};
+use num_traits::Unsigned;
 use std::cmp::max;
 use std::collections::TryReserveError;
 use std::ffi::CStr;
@@ -435,7 +437,7 @@ impl JsonBuilder {
                 return Err(JsonError::InvalidState);
             }
         }
-        self.push_str(&val.to_string())?;
+        self.push_float(val)?;
         Ok(self)
     }
 
@@ -502,6 +504,40 @@ impl JsonBuilder {
         Ok(self)
     }
 
+    /// Set a key and a string value on an object, with a limited size
+    pub fn set_string_limited(
+        &mut self, key: &str, val: &str, limit: usize,
+    ) -> Result<&mut Self, JsonError> {
+        if val.len() > limit {
+            // Gracefully handle splitting UTF-8 strings at arbitrary locations.
+            // Strings in Rust are UTF-8; and a UTF-8 code point is max 4 bytes.
+            // Hence we will find a suitable boundary within 4 bytes of any byte
+            // position, in any direction with sufficiently long strings left.
+            // This is an approach similar to Rust's (currently nightly unstable
+            // only) "floor_char_boundary" str method:
+            // https://doc.rust-lang.org/std/primitive.str.html#method.floor_char_boundary
+            for i in 0..=std::cmp::min(limit, 4) {
+                // We first try the requested boundary. In the expected
+                // ("happy") case the limit is at a code point boundary so the
+                // slice will succeed immediately. If not, we successively try
+                // earlier positions in the string until we find a suitable
+                // position.
+                if let Some(valtrunc) = val.get(0..limit - i) {
+                    let additional_bytes = val.len() - limit;
+                    let outstr = format!(
+                        "{valtrunc}[truncated {additional_bytes} additional byte{}]",
+                        if additional_bytes != 1 { "s" } else { "" }
+                    );
+                    self.set_string(key, &outstr)?;
+                    break;
+                }
+            }
+        } else {
+            self.set_string(key, val)?;
+        }
+        Ok(self)
+    }
+
     pub fn set_formatted(&mut self, formatted: &str) -> Result<&mut Self, JsonError> {
         match self.current_state() {
             State::ObjectNth => {
@@ -521,6 +557,77 @@ impl JsonBuilder {
 
     /// Set a key and a string value (from bytes) on an object.
     pub fn set_string_from_bytes(&mut self, key: &str, val: &[u8]) -> Result<&mut Self, JsonError> {
+        match std::str::from_utf8(val) {
+            Ok(s) => self.set_string(key, s),
+            Err(_) => self.set_string(key, &try_string_from_bytes(val)?),
+        }
+    }
+
+    /// Set a key with a string value taking only ascii-printable bytes.
+    /// Non-printable characters are replaced by a dot `.`, except
+    /// CR and LF which are escaped the regular json way \r and \n
+    pub fn set_print_ascii(&mut self, key: &str, val: &[u8]) -> Result<&mut Self, JsonError> {
+        match self.current_state() {
+            State::ObjectNth => {
+                self.push(',')?;
+            }
+            State::ObjectFirst => {
+                self.set_state(State::ObjectNth);
+            }
+            _ => {
+                debug_validate_fail!("invalid state");
+                return Err(JsonError::InvalidState);
+            }
+        }
+        self.push('"')?;
+        self.push_str(key)?;
+        self.push_str("\":\"")?;
+        for &x in val.iter() {
+            match x {
+                b'\r' => {
+                    self.push_str("\\r")?;
+                }
+                b'\n'=> {
+                    self.push_str("\\n")?;
+                }
+                b'"'=> {
+                    self.push_str("\\\"")?;
+                }
+                b'\\'=> {
+                    self.push_str("\\\\")?;
+                }
+                _ => {
+                    if !x.is_ascii() || x.is_ascii_control()  {
+                        self.push('.')?;
+                    } else {
+                        self.push(x as char)?;
+                    }
+                }
+            }
+        }
+        self.push('"')?;
+        Ok(self)
+    }
+
+    /// Set a key and a string value (from bytes) on an object, with a limited size
+    pub fn set_string_from_bytes_limited(
+        &mut self, key: &str, val: &[u8], limit: usize,
+    ) -> Result<&mut Self, JsonError> {
+        let mut valtrunc = Vec::new();
+        let val = if val.len() > limit {
+            let additional_bytes = val.len() - limit;
+            valtrunc.extend_from_slice(&val[..limit]);
+            valtrunc.extend_from_slice(
+                format!(
+                    "[truncated {additional_bytes} additional byte{}]",
+                    if additional_bytes != 1 { "s" } else { "" }
+                )
+                .as_bytes(),
+            );
+            &valtrunc
+        } else {
+            val
+        };
         match std::str::from_utf8(val) {
             Ok(s) => self.set_string(key, s),
             Err(_) => self.set_string(key, &try_string_from_bytes(val)?),
@@ -577,7 +684,11 @@ impl JsonBuilder {
     }
 
     /// Set a key and an unsigned integer type on an object.
-    pub fn set_uint(&mut self, key: &str, val: u64) -> Result<&mut Self, JsonError> {
+    pub fn set_uint<T>(&mut self, key: &str, val: T) -> Result<&mut Self, JsonError>
+    where
+        T: Unsigned + Into<u64>,
+    {
+        let val: u64 = val.into();
         match self.current_state() {
             State::ObjectNth => {
                 self.push(',')?;
@@ -634,7 +745,7 @@ impl JsonBuilder {
         self.push('"')?;
         self.push_str(key)?;
         self.push_str("\":")?;
-        self.push_str(&val.to_string())?;
+        self.push_float(val)?;
         Ok(self)
     }
 
@@ -663,6 +774,15 @@ impl JsonBuilder {
 
     pub fn capacity(&self) -> usize {
         self.buf.capacity()
+    }
+
+    fn push_float(&mut self, val: f64) -> Result<(), JsonError> {
+        if val.is_nan() || val.is_infinite() {
+            self.push_str("null")?;
+        } else {
+            self.push_str(&val.to_string())?;
+        }
+        Ok(())
     }
 
     /// Encode a string into the buffer, escaping as needed.
@@ -704,7 +824,7 @@ impl JsonBuilder {
                 offset += 1;
                 buf[offset] = b'0';
                 offset += 1;
-                buf[offset] = HEX[(x >> 4 & 0xf) as usize];
+                buf[offset] = HEX[((x >> 4) & 0xf) as usize];
                 offset += 1;
                 buf[offset] = HEX[(x & 0xf) as usize];
                 offset += 1;
@@ -735,11 +855,11 @@ impl JsonBuilder {
     }
 
     fn encode_base64(&mut self, val: &[u8]) -> Result<&mut Self, JsonError> {
-        let encoded_len = 4 * ((val.len() + 2) / 3);
+        let encoded_len = 4 * val.len().div_ceil(3);
         if self.buf.capacity() < self.buf.len() + encoded_len {
             self.buf.try_reserve(encoded_len)?;
         }
-        base64::encode_config_buf(val, base64::STANDARD, &mut self.buf);
+        STANDARD.encode_string(val, &mut self.buf);
         Ok(self)
     }
 }
@@ -765,7 +885,7 @@ fn try_string_from_bytes(input: &[u8]) -> Result<String, JsonError> {
 }
 
 #[no_mangle]
-pub extern "C" fn jb_new_object() -> *mut JsonBuilder {
+pub extern "C" fn SCJbNewObject() -> *mut JsonBuilder {
     match JsonBuilder::try_new_object() {
         Ok(js) => {
             let boxed = Box::new(js);
@@ -776,7 +896,7 @@ pub extern "C" fn jb_new_object() -> *mut JsonBuilder {
 }
 
 #[no_mangle]
-pub extern "C" fn jb_new_array() -> *mut JsonBuilder {
+pub extern "C" fn SCJbNewArray() -> *mut JsonBuilder {
     match JsonBuilder::try_new_array() {
         Ok(js) => {
             let boxed = Box::new(js);
@@ -787,28 +907,28 @@ pub extern "C" fn jb_new_array() -> *mut JsonBuilder {
 }
 
 #[no_mangle]
-pub extern "C" fn jb_clone(js: &mut JsonBuilder) -> *mut JsonBuilder {
+pub extern "C" fn SCJbClone(js: &mut JsonBuilder) -> *mut JsonBuilder {
     let clone = Box::new(js.clone());
     Box::into_raw(clone)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn jb_free(js: &mut JsonBuilder) {
+pub unsafe extern "C" fn SCJbFree(js: &mut JsonBuilder) {
     let _ = Box::from_raw(js);
 }
 
 #[no_mangle]
-pub extern "C" fn jb_capacity(jb: &mut JsonBuilder) -> usize {
+pub extern "C" fn SCJbCapacity(jb: &mut JsonBuilder) -> usize {
     jb.capacity()
 }
 
 #[no_mangle]
-pub extern "C" fn jb_reset(jb: &mut JsonBuilder) {
+pub extern "C" fn SCJbReset(jb: &mut JsonBuilder) {
     jb.reset();
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn jb_open_object(js: &mut JsonBuilder, key: *const c_char) -> bool {
+pub unsafe extern "C" fn SCJbOpenObject(js: &mut JsonBuilder, key: *const c_char) -> bool {
     if let Ok(s) = CStr::from_ptr(key).to_str() {
         js.open_object(s).is_ok()
     } else {
@@ -817,12 +937,12 @@ pub unsafe extern "C" fn jb_open_object(js: &mut JsonBuilder, key: *const c_char
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn jb_start_object(js: &mut JsonBuilder) -> bool {
+pub unsafe extern "C" fn SCJbStartObject(js: &mut JsonBuilder) -> bool {
     js.start_object().is_ok()
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn jb_open_array(js: &mut JsonBuilder, key: *const c_char) -> bool {
+pub unsafe extern "C" fn SCJbOpenArray(js: &mut JsonBuilder, key: *const c_char) -> bool {
     if let Ok(s) = CStr::from_ptr(key).to_str() {
         js.open_array(s).is_ok()
     } else {
@@ -831,7 +951,7 @@ pub unsafe extern "C" fn jb_open_array(js: &mut JsonBuilder, key: *const c_char)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn jb_set_string(
+pub unsafe extern "C" fn SCJbSetString(
     js: &mut JsonBuilder, key: *const c_char, val: *const c_char,
 ) -> bool {
     if val.is_null() {
@@ -846,7 +966,7 @@ pub unsafe extern "C" fn jb_set_string(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn jb_set_string_from_bytes(
+pub unsafe extern "C" fn SCJbSetStringFromBytes(
     js: &mut JsonBuilder, key: *const c_char, bytes: *const u8, len: u32,
 ) -> bool {
     if bytes.is_null() || len == 0 {
@@ -860,7 +980,21 @@ pub unsafe extern "C" fn jb_set_string_from_bytes(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn jb_set_base64(
+pub unsafe extern "C" fn SCJbSetPrintAsciiString(
+    js: &mut JsonBuilder, key: *const c_char, bytes: *const u8, len: u32,
+) -> bool {
+    if bytes.is_null() || len == 0 {
+        return false;
+    }
+    if let Ok(key) = CStr::from_ptr(key).to_str() {
+        let val = std::slice::from_raw_parts(bytes, len as usize);
+        return js.set_print_ascii(key, val).is_ok();
+    }
+    return false;
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn SCJbSetBase64(
     js: &mut JsonBuilder, key: *const c_char, bytes: *const u8, len: u32,
 ) -> bool {
     if bytes.is_null() || len == 0 {
@@ -874,7 +1008,7 @@ pub unsafe extern "C" fn jb_set_base64(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn jb_set_hex(
+pub unsafe extern "C" fn SCJbSetHex(
     js: &mut JsonBuilder, key: *const c_char, bytes: *const u8, len: u32,
 ) -> bool {
     if bytes.is_null() || len == 0 {
@@ -888,7 +1022,7 @@ pub unsafe extern "C" fn jb_set_hex(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn jb_set_formatted(js: &mut JsonBuilder, formatted: *const c_char) -> bool {
+pub unsafe extern "C" fn SCJbSetFormatted(js: &mut JsonBuilder, formatted: *const c_char) -> bool {
     if let Ok(formatted) = CStr::from_ptr(formatted).to_str() {
         return js.set_formatted(formatted).is_ok();
     }
@@ -896,12 +1030,12 @@ pub unsafe extern "C" fn jb_set_formatted(js: &mut JsonBuilder, formatted: *cons
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn jb_append_object(jb: &mut JsonBuilder, obj: &JsonBuilder) -> bool {
+pub unsafe extern "C" fn SCJbAppendObject(jb: &mut JsonBuilder, obj: &JsonBuilder) -> bool {
     jb.append_object(obj).is_ok()
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn jb_set_object(
+pub unsafe extern "C" fn SCJbSetObject(
     js: &mut JsonBuilder, key: *const c_char, val: &mut JsonBuilder,
 ) -> bool {
     if let Ok(key) = CStr::from_ptr(key).to_str() {
@@ -911,7 +1045,7 @@ pub unsafe extern "C" fn jb_set_object(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn jb_append_string(js: &mut JsonBuilder, val: *const c_char) -> bool {
+pub unsafe extern "C" fn SCJbAppendString(js: &mut JsonBuilder, val: *const c_char) -> bool {
     if val.is_null() {
         return false;
     }
@@ -922,7 +1056,7 @@ pub unsafe extern "C" fn jb_append_string(js: &mut JsonBuilder, val: *const c_ch
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn jb_append_string_from_bytes(
+pub unsafe extern "C" fn SCJbAppendStringFromBytes(
     js: &mut JsonBuilder, bytes: *const u8, len: u32,
 ) -> bool {
     if bytes.is_null() || len == 0 {
@@ -933,7 +1067,7 @@ pub unsafe extern "C" fn jb_append_string_from_bytes(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn jb_append_base64(
+pub unsafe extern "C" fn SCJbAppendBase64(
     js: &mut JsonBuilder, bytes: *const u8, len: u32,
 ) -> bool {
     if bytes.is_null() || len == 0 {
@@ -944,17 +1078,17 @@ pub unsafe extern "C" fn jb_append_base64(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn jb_append_uint(js: &mut JsonBuilder, val: u64) -> bool {
+pub unsafe extern "C" fn SCJbAppendUint(js: &mut JsonBuilder, val: u64) -> bool {
     return js.append_uint(val).is_ok();
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn jb_append_float(js: &mut JsonBuilder, val: f64) -> bool {
+pub unsafe extern "C" fn SCJbAppendFloat(js: &mut JsonBuilder, val: f64) -> bool {
     return js.append_float(val).is_ok();
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn jb_set_uint(js: &mut JsonBuilder, key: *const c_char, val: u64) -> bool {
+pub unsafe extern "C" fn SCJbSetUint(js: &mut JsonBuilder, key: *const c_char, val: u64) -> bool {
     if let Ok(key) = CStr::from_ptr(key).to_str() {
         return js.set_uint(key, val).is_ok();
     }
@@ -962,7 +1096,7 @@ pub unsafe extern "C" fn jb_set_uint(js: &mut JsonBuilder, key: *const c_char, v
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn jb_set_int(js: &mut JsonBuilder, key: *const c_char, val: i64) -> bool {
+pub unsafe extern "C" fn SCJbSetInt(js: &mut JsonBuilder, key: *const c_char, val: i64) -> bool {
     if let Ok(key) = CStr::from_ptr(key).to_str() {
         return js.set_int(key, val).is_ok();
     }
@@ -970,7 +1104,7 @@ pub unsafe extern "C" fn jb_set_int(js: &mut JsonBuilder, key: *const c_char, va
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn jb_set_float(js: &mut JsonBuilder, key: *const c_char, val: f64) -> bool {
+pub unsafe extern "C" fn SCJbSetFloat(js: &mut JsonBuilder, key: *const c_char, val: f64) -> bool {
     if let Ok(key) = CStr::from_ptr(key).to_str() {
         return js.set_float(key, val).is_ok();
     }
@@ -978,7 +1112,7 @@ pub unsafe extern "C" fn jb_set_float(js: &mut JsonBuilder, key: *const c_char, 
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn jb_set_bool(js: &mut JsonBuilder, key: *const c_char, val: bool) -> bool {
+pub unsafe extern "C" fn SCJbSetBool(js: &mut JsonBuilder, key: *const c_char, val: bool) -> bool {
     if let Ok(key) = CStr::from_ptr(key).to_str() {
         return js.set_bool(key, val).is_ok();
     }
@@ -986,22 +1120,22 @@ pub unsafe extern "C" fn jb_set_bool(js: &mut JsonBuilder, key: *const c_char, v
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn jb_close(js: &mut JsonBuilder) -> bool {
+pub unsafe extern "C" fn SCJbClose(js: &mut JsonBuilder) -> bool {
     js.close().is_ok()
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn jb_len(js: &JsonBuilder) -> usize {
+pub unsafe extern "C" fn SCJbLen(js: &JsonBuilder) -> usize {
     js.buf.len()
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn jb_ptr(js: &mut JsonBuilder) -> *const u8 {
+pub unsafe extern "C" fn SCJbPtr(js: &mut JsonBuilder) -> *const u8 {
     js.buf.as_ptr()
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn jb_get_mark(js: &mut JsonBuilder, mark: &mut JsonBuilderMark) {
+pub unsafe extern "C" fn SCJbGetMark(js: &mut JsonBuilder, mark: &mut JsonBuilderMark) {
     let m = js.get_mark();
     mark.position = m.position;
     mark.state_index = m.state_index;
@@ -1009,7 +1143,7 @@ pub unsafe extern "C" fn jb_get_mark(js: &mut JsonBuilder, mark: &mut JsonBuilde
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn jb_restore_mark(js: &mut JsonBuilder, mark: &mut JsonBuilderMark) -> bool {
+pub unsafe extern "C" fn SCJbRestoreMark(js: &mut JsonBuilder, mark: &mut JsonBuilderMark) -> bool {
     js.restore_mark(mark).is_ok()
 }
 
@@ -1135,9 +1269,11 @@ mod test {
         assert_eq!(js.current_state(), State::ObjectNth);
         assert_eq!(js.buf, r#"{"one":"one","two":"two""#);
 
+        js.set_uint("three", 3u8)?;
+
         js.close()?;
         assert_eq!(js.current_state(), State::None);
-        assert_eq!(js.buf, r#"{"one":"one","two":"two"}"#);
+        assert_eq!(js.buf, r#"{"one":"one","two":"two","three":3}"#);
 
         Ok(())
     }
@@ -1261,6 +1397,88 @@ mod test {
     }
 
     #[test]
+    fn test_set_string_limited() {
+        let mut jb = JsonBuilder::try_new_object().unwrap();
+        jb.set_string_limited("val", "foobar", 10).unwrap();
+        assert_eq!(jb.buf, r#"{"val":"foobar""#);
+        jb.reset();
+        jb.set_string_limited("val", "foobar", 2).unwrap();
+        assert_eq!(jb.buf, r#"{"val":"fo[truncated 4 additional bytes]""#);
+        jb.reset();
+        jb.set_string_limited("val", "foobar", 0).unwrap();
+        assert_eq!(jb.buf, r#"{"val":"[truncated 6 additional bytes]""#);
+        jb.reset();
+        let unicode_str = "Hello, 世界! 👋😊";
+        // invalid unicode boundary, naive access should panic
+        let result = std::panic::catch_unwind(|| _ = unicode_str[..9]);
+        assert!(result.is_err());
+        // our code should just skip the incomplete character
+        jb.set_string_limited("val", unicode_str, 9).unwrap();
+        assert_eq!(jb.buf, r#"{"val":"Hello, [truncated 14 additional bytes]""#);
+        jb.reset();
+        // valid unicode boundary, naive access should not panic
+        let result = std::panic::catch_unwind(|| _ = unicode_str[..10]);
+        assert!(result.is_ok());
+        jb.set_string_limited("val", unicode_str, 10).unwrap();
+        assert_eq!(
+            jb.buf,
+            r#"{"val":"Hello, 世[truncated 13 additional bytes]""#
+        );
+        jb.reset();
+        let unicode_str2 = "世";
+        // this character has three UTF-8 bytes
+        assert_eq!(
+            unicode_str2,
+            std::str::from_utf8(&[0xE4, 0xB8, 0x96]).unwrap()
+        );
+        let result = std::panic::catch_unwind(|| _ = unicode_str2[..1]);
+        assert!(result.is_err());
+        jb.set_string_limited("val", unicode_str2, 1).unwrap();
+        assert_eq!(jb.buf, r#"{"val":"[truncated 2 additional bytes]""#);
+        jb.reset();
+        jb.set_string_limited("val", unicode_str2, 2).unwrap();
+        assert_eq!(jb.buf, r#"{"val":"[truncated 1 additional byte]""#);
+        jb.reset();
+        // with limit 3 or more we should include it in the log
+        jb.set_string_limited("val", unicode_str2, 3).unwrap();
+        assert_eq!(jb.buf, r#"{"val":"世""#);
+        jb.reset();
+        jb.set_string_limited("val", unicode_str2, 4).unwrap();
+        assert_eq!(jb.buf, r#"{"val":"世""#);
+        jb.reset();
+        jb.set_string_limited("val", unicode_str2, 0).unwrap();
+        assert_eq!(jb.buf, r#"{"val":"[truncated 3 additional bytes]""#);
+        let unicode_str3 = "🏴󠁧󠁢󠁷󠁬󠁳󠁿";
+        // this character consists of multiple code points
+        jb.reset();
+        jb.set_string_limited("val", unicode_str3, 7).unwrap();
+        assert_eq!(jb.buf, r#"{"val":"🏴[truncated 21 additional bytes]""#);
+        jb.reset();
+        jb.set_string_limited("val", unicode_str3, 2).unwrap();
+        assert_eq!(jb.buf, r#"{"val":"[truncated 26 additional bytes]""#);
+    }
+
+    #[test]
+    fn test_set_string_from_bytes_limited() {
+        let mut jb = JsonBuilder::try_new_object().unwrap();
+        jb.set_string_from_bytes_limited("first", b"foobar", 10)
+            .unwrap();
+        assert_eq!(jb.buf, r#"{"first":"foobar""#);
+        jb.set_string_from_bytes_limited("second", b"foobar", 2)
+            .unwrap();
+        assert_eq!(
+            jb.buf,
+            r#"{"first":"foobar","second":"fo[truncated 4 additional bytes]""#
+        );
+        jb.set_string_from_bytes_limited("third", b"foobar", 0)
+            .unwrap();
+        assert_eq!(
+            jb.buf,
+            r#"{"first":"foobar","second":"fo[truncated 4 additional bytes]","third":"[truncated 6 additional bytes]""#
+        );
+    }
+
+    #[test]
     fn test_invalid_utf8() {
         let mut jb = JsonBuilder::try_new_object().unwrap();
         jb.set_string_from_bytes("invalid", &[0xf0, 0xf1, 0xf2])
@@ -1322,6 +1540,48 @@ mod test {
         jb.append_float(2.2).unwrap();
         jb.close().unwrap();
         assert_eq!(jb.buf, r#"[1.1,2.2]"#);
+    }
+
+    #[test]
+    fn test_set_nan() {
+        let mut jb = JsonBuilder::try_new_object().unwrap();
+        jb.set_float("nan", f64::NAN).unwrap();
+        jb.close().unwrap();
+        assert_eq!(jb.buf, r#"{"nan":null}"#);
+    }
+
+    #[test]
+    fn test_append_nan() {
+        let mut jb = JsonBuilder::try_new_array().unwrap();
+        jb.append_float(f64::NAN).unwrap();
+        jb.close().unwrap();
+        assert_eq!(jb.buf, r#"[null]"#);
+    }
+
+    #[test]
+    fn test_set_inf() {
+        let mut jb = JsonBuilder::try_new_object().unwrap();
+        jb.set_float("inf", f64::INFINITY).unwrap();
+        jb.close().unwrap();
+        assert_eq!(jb.buf, r#"{"inf":null}"#);
+
+        let mut jb = JsonBuilder::try_new_object().unwrap();
+        jb.set_float("inf", f64::NEG_INFINITY).unwrap();
+        jb.close().unwrap();
+        assert_eq!(jb.buf, r#"{"inf":null}"#);
+    }
+
+    #[test]
+    fn test_append_inf() {
+        let mut jb = JsonBuilder::try_new_array().unwrap();
+        jb.append_float(f64::INFINITY).unwrap();
+        jb.close().unwrap();
+        assert_eq!(jb.buf, r#"[null]"#);
+
+        let mut jb = JsonBuilder::try_new_array().unwrap();
+        jb.append_float(f64::NEG_INFINITY).unwrap();
+        jb.close().unwrap();
+        assert_eq!(jb.buf, r#"[null]"#);
     }
 }
 

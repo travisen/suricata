@@ -30,6 +30,7 @@
 #include "detect-parse.h"
 
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-build.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-state.h"
@@ -58,7 +59,6 @@
 #include "rust.h"
 
 #define BUFFER_NAME "dce_stub_data"
-#define KEYWORD_NAME "dce_stub_data"
 
 static int DetectDceStubDataSetup(DetectEngineCtx *, Signature *, const char *);
 #ifdef UNITTESTS
@@ -76,12 +76,12 @@ static InspectionBuffer *GetSMBData(DetectEngineThreadCtx *det_ctx,
         uint32_t data_len = 0;
         const uint8_t *data = NULL;
         uint8_t dir = flow_flags & (STREAM_TOSERVER|STREAM_TOCLIENT);
-        if (rs_smb_tx_get_stub_data(txv, dir, &data, &data_len) != 1)
+        if (SCSmbTxGetStubData(txv, dir, &data, &data_len) != 1)
             return NULL;
         SCLogDebug("have data!");
 
-        InspectionBufferSetup(det_ctx, list_id, buffer, data, data_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(
+                det_ctx, list_id, buffer, data, data_len, transforms);
     }
     return buffer;
 }
@@ -97,7 +97,7 @@ static InspectionBuffer *GetDCEData(DetectEngineThreadCtx *det_ctx,
         const uint8_t *data = NULL;
         uint8_t endianness;
 
-        rs_dcerpc_get_stub_data(txv, &data, &data_len, &endianness, flow_flags);
+        SCDcerpcGetStubData(txv, &data, &data_len, &endianness, flow_flags);
         if (data == NULL || data_len == 0)
             return NULL;
 
@@ -106,8 +106,8 @@ static InspectionBuffer *GetDCEData(DetectEngineThreadCtx *det_ctx,
         } else {
             buffer->flags |= DETECT_CI_FLAGS_DCE_BE;
         }
-        InspectionBufferSetup(det_ctx, list_id, buffer, data, data_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(
+                det_ctx, list_id, buffer, data, data_len, transforms);
     }
     return buffer;
 }
@@ -120,6 +120,8 @@ void DetectDceStubDataRegister(void)
     sigmatch_table[DETECT_DCE_STUB_DATA].name = "dcerpc.stub_data";
     sigmatch_table[DETECT_DCE_STUB_DATA].alias = "dce_stub_data";
     sigmatch_table[DETECT_DCE_STUB_DATA].Setup = DetectDceStubDataSetup;
+    sigmatch_table[DETECT_DCE_STUB_DATA].desc = "match on the stub data in a DCERPC packet";
+    sigmatch_table[DETECT_DCE_STUB_DATA].url = "/rules/dcerpc-keywords.html#dcerpc-stub-data";
 #ifdef UNITTESTS
     sigmatch_table[DETECT_DCE_STUB_DATA].RegisterTests = DetectDceStubDataRegisterTests;
 #endif
@@ -159,9 +161,9 @@ void DetectDceStubDataRegister(void)
 
 static int DetectDceStubDataSetup(DetectEngineCtx *de_ctx, Signature *s, const char *arg)
 {
-    if (DetectSignatureSetAppProto(s, ALPROTO_DCERPC) < 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_DCERPC) < 0)
         return -1;
-    if (DetectBufferSetActiveList(de_ctx, s, g_dce_stub_data_buffer_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_dce_stub_data_buffer_id) < 0)
         return -1;
     return 0;
 }
@@ -172,7 +174,7 @@ static int DetectDceStubDataSetup(DetectEngineCtx *de_ctx, Signature *s, const c
 #include "detect-engine-alert.h"
 
 /**
- * \test Test a valid dce_stub_data entry with  bind, bind_ack, request frags.
+ * \test Test a valid dce_stub_data entry with bind, bind_ack, request frags.
  */
 static int DetectDceStubDataTestParse02(void)
 {
@@ -636,6 +638,7 @@ static int DetectDceStubDataTestParse02(void)
     AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
 
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
     memset(&f, 0, sizeof(f));
     memset(&ssn, 0, sizeof(ssn));
 
@@ -742,6 +745,7 @@ static int DetectDceStubDataTestParse02(void)
     FLOW_DESTROY(&f);
 
     UTHFreePackets(&p, 1);
+    StatsThreadCleanup(&th_v.stats);
     return result;
 }
 
@@ -1184,6 +1188,7 @@ static int DetectDceStubDataTestParse03(void)
     AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
 
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
     memset(&f, 0, sizeof(f));
     memset(&ssn, 0, sizeof(ssn));
 
@@ -1237,6 +1242,7 @@ static int DetectDceStubDataTestParse03(void)
     FLOW_DESTROY(&f);
 
     UTHFreePackets(&p, 1);
+    StatsThreadCleanup(&th_v.stats);
     PASS;
 }
 
@@ -1366,6 +1372,7 @@ static int DetectDceStubDataTestParse04(void)
     AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
 
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
     memset(&f, 0, sizeof(f));
     memset(&ssn, 0, sizeof(ssn));
 
@@ -1548,6 +1555,7 @@ static int DetectDceStubDataTestParse04(void)
     FLOW_DESTROY(&f);
 
     UTHFreePackets(&p, 1);
+    StatsThreadCleanup(&th_v.stats);
     return result;
 }
 
@@ -1650,6 +1658,7 @@ static int DetectDceStubDataTestParse05(void)
     AppLayerParserThreadCtx *alp_tctx = AppLayerParserThreadCtxAlloc();
 
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
     memset(&f, 0, sizeof(f));
     memset(&ssn, 0, sizeof(ssn));
 
@@ -1821,6 +1830,7 @@ static int DetectDceStubDataTestParse05(void)
     FLOW_DESTROY(&f);
 
     UTHFreePackets(&p, 1);
+    StatsThreadCleanup(&th_v.stats);
     return result;
 }
 
@@ -1830,8 +1840,8 @@ static int DetectDceStubDataTestParse06(void)
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     FAIL_IF_NULL(de_ctx);
     de_ctx->flags = DE_QUIET;
-    Signature *s = DetectEngineAppendSig(de_ctx,
-            "alert dns any any -> any any dce_stub_data;content:\"0\";");
+    Signature *s = DetectEngineAppendSig(
+            de_ctx, "alert dns any any -> any any dce_stub_data;content:\"0\"; sid:1;");
     FAIL_IF_NOT_NULL(s);
     DetectEngineCtxFree(de_ctx);
     PASS;

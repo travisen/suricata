@@ -27,6 +27,7 @@
 
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-prefilter.h"
 #include "detect-urilen.h"
@@ -59,10 +60,10 @@ static int g_buffer_nonce_id = 0;
 
 static int DetectNonceSetup(DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
-    if (DetectBufferSetActiveList(de_ctx, s, g_buffer_nonce_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_buffer_nonce_id) < 0)
         return -1;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_IKE) < 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_IKE) < 0)
         return -1;
 
     return 0;
@@ -77,13 +78,12 @@ static InspectionBuffer *GetNonceData(DetectEngineThreadCtx *det_ctx,
         const uint8_t *b = NULL;
         uint32_t b_len = 0;
 
-        if (rs_ike_state_get_nonce(txv, &b, &b_len) != 1)
+        if (SCIkeStateGetNonce(txv, &b, &b_len) != 1)
             return NULL;
         if (b == NULL || b_len == 0)
             return NULL;
 
-        InspectionBufferSetup(det_ctx, list_id, buffer, b, b_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(det_ctx, list_id, buffer, b, b_len, transforms);
     }
 
     return buffer;
@@ -92,12 +92,12 @@ static InspectionBuffer *GetNonceData(DetectEngineThreadCtx *det_ctx,
 void DetectIkeNonceRegister(void)
 {
     // register nonce
-    sigmatch_table[DETECT_AL_IKE_NONCE].name = KEYWORD_NAME_NONCE;
-    sigmatch_table[DETECT_AL_IKE_NONCE].url =
-            "/rules/" KEYWORD_DOC_NONCE sigmatch_table[DETECT_AL_IKE_NONCE].desc =
+    sigmatch_table[DETECT_IKE_NONCE].name = KEYWORD_NAME_NONCE;
+    sigmatch_table[DETECT_IKE_NONCE].url =
+            "/rules/" KEYWORD_DOC_NONCE sigmatch_table[DETECT_IKE_NONCE].desc =
                     "sticky buffer to match on the IKE nonce_payload";
-    sigmatch_table[DETECT_AL_IKE_NONCE].Setup = DetectNonceSetup;
-    sigmatch_table[DETECT_AL_IKE_NONCE].flags |= SIGMATCH_NOOPT | SIGMATCH_INFO_STICKY_BUFFER;
+    sigmatch_table[DETECT_IKE_NONCE].Setup = DetectNonceSetup;
+    sigmatch_table[DETECT_IKE_NONCE].flags |= SIGMATCH_NOOPT | SIGMATCH_INFO_STICKY_BUFFER;
 
     DetectAppLayerInspectEngineRegister(BUFFER_NAME_NONCE, ALPROTO_IKE, SIG_FLAG_TOSERVER, 1,
             DetectEngineInspectBufferGeneric, GetNonceData);

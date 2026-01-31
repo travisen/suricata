@@ -20,7 +20,7 @@
  *
  * \author Eric Leblond <eric@regit.org>
  *
- * Implements the mark keyword. Based  on detect-gid
+ * Implements the mark keyword. Based on detect-gid
  * by Breno Silva <breno.silva@gmail.com>
  */
 
@@ -35,6 +35,7 @@
 #include "detect-parse.h"
 
 #include "util-unittest.h"
+#include "util-byte.h"
 #include "util-debug.h"
 
 #define PARSE_REGEX "([0x]*[0-9a-f]+)/([0x]*[0-9a-f]+)"
@@ -81,7 +82,6 @@ static void * DetectMarkParse (const char *rawstr)
     size_t pcre2_len;
     const char *str_ptr = NULL;
     char *ptr = NULL;
-    char *endptr = NULL;
     uint32_t mark;
     uint32_t mask;
     DetectMarkData *data;
@@ -105,20 +105,8 @@ static void * DetectMarkParse (const char *rawstr)
     if (ptr == NULL)
         goto error;
 
-    errno = 0;
-    mark = strtoul(ptr, &endptr, 0);
-    if (errno == ERANGE) {
-        SCLogError("Numeric value out of range");
-        pcre2_substring_free((PCRE2_UCHAR8 *)ptr);
-        goto error;
-    }     /* If there is no numeric value in the given string then strtoull(), makes
-             endptr equals to ptr and return 0 as result */
-    else if (endptr == ptr && mark == 0) {
-        SCLogError("No numeric value");
-        pcre2_substring_free((PCRE2_UCHAR8 *)ptr);
-        goto error;
-    } else if (endptr == ptr) {
-        SCLogError("Invalid numeric value");
+    if (ByteExtractStringUint32(&mark, 0, strlen(ptr), ptr) <= 0) {
+        SCLogError("invalid input as arg to nfq_set_mark keyword");
         pcre2_substring_free((PCRE2_UCHAR8 *)ptr);
         goto error;
     }
@@ -143,21 +131,8 @@ static void * DetectMarkParse (const char *rawstr)
         return data;
     }
 
-    errno = 0;
-    mask = strtoul(ptr, &endptr, 0);
-    if (errno == ERANGE) {
-        SCLogError("Numeric value out of range");
-        pcre2_substring_free((PCRE2_UCHAR8 *)ptr);
-        goto error;
-    }     /* If there is no numeric value in the given string then strtoull(), makes
-             endptr equals to ptr and return 0 as result */
-    else if (endptr == ptr && mask == 0) {
-        SCLogError("No numeric value");
-        pcre2_substring_free((PCRE2_UCHAR8 *)ptr);
-        goto error;
-    }
-    else if (endptr == ptr) {
-        SCLogError("Invalid numeric value");
+    if (ByteExtractStringUint32(&mask, 0, strlen(ptr), ptr) <= 0) {
+        SCLogError("invalid input as arg to nfq_set_mark keyword");
         pcre2_substring_free((PCRE2_UCHAR8 *)ptr);
         goto error;
     }
@@ -206,7 +181,7 @@ static int DetectMarkSetup (DetectEngineCtx *de_ctx, Signature *s, const char *r
 
     /* Append it to the list of post match, so the mark is set if the
      * full signature matches. */
-    if (SigMatchAppendSMToList(
+    if (SCSigMatchAppendSMToList(
                 de_ctx, s, DETECT_MARK, (SigMatchCtx *)data, DETECT_SM_LIST_POSTMATCH) == NULL) {
         DetectMarkDataFree(de_ctx, data);
         return -1;
@@ -228,11 +203,16 @@ static int DetectMarkPacket(DetectEngineThreadCtx *det_ctx, Packet *p,
 #ifdef NFQ
     const DetectMarkData *nf_data = (const DetectMarkData *)ctx;
     if (nf_data->mask) {
-        if (!(IS_TUNNEL_PKT(p))) {
+        if (PacketIsNotTunnel(p)) {
+            /* for a non-tunnel packet we don't need a lock,
+             * and if we're here we can't turn into a tunnel
+             * packet anymore. */
+
             /* coverity[missing_lock] */
             p->nfq_v.mark = (nf_data->mark & nf_data->mask)
                 | (p->nfq_v.mark & ~(nf_data->mask));
-            p->flags |= PKT_MARK_MODIFIED;
+            /* coverity[missing_lock] */
+            p->nfq_v.mark_modified = true;
         } else {
             /* real tunnels may have multiple flows inside them, so marking
              * might 'mark' too much. Rebuilt packets from IP fragments
@@ -242,7 +222,7 @@ static int DetectMarkPacket(DetectEngineThreadCtx *det_ctx, Packet *p,
                 SCSpinLock(&tp->persistent.tunnel_lock);
                 tp->nfq_v.mark = (nf_data->mark & nf_data->mask)
                     | (tp->nfq_v.mark & ~(nf_data->mask));
-                tp->flags |= PKT_MARK_MODIFIED;
+                tp->nfq_v.mark_modified = true;
                 SCSpinUnlock(&tp->persistent.tunnel_lock);
             }
         }
@@ -267,6 +247,8 @@ static int MarkTestParse01 (void)
     data = DetectMarkParse("1/1");
 
     FAIL_IF_NULL(data);
+    FAIL_IF(data->mark != 1);
+    FAIL_IF(data->mask != 1);
 
     DetectMarkDataFree(NULL, data);
     PASS;
@@ -297,6 +279,8 @@ static int MarkTestParse03 (void)
     DetectMarkData *data;
 
     data = DetectMarkParse("0x10/0xff");
+    FAIL_IF(data->mark != 0x10);
+    FAIL_IF(data->mask != 0xff);
 
     FAIL_IF_NULL(data);
 

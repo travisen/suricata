@@ -31,6 +31,7 @@
 #include "detect-content.h"
 
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-prefilter.h"
 #include "detect-engine-content-inspection.h"
@@ -113,7 +114,8 @@ void DetectFilemagicRegister(void)
     sigmatch_table[DETECT_FILE_MAGIC].desc = "sticky buffer to match on the file magic";
     sigmatch_table[DETECT_FILE_MAGIC].url = "/rules/file-keywords.html#filemagic";
     sigmatch_table[DETECT_FILE_MAGIC].Setup = DetectFilemagicSetupSticky;
-    sigmatch_table[DETECT_FILE_MAGIC].flags = SIGMATCH_NOOPT|SIGMATCH_INFO_STICKY_BUFFER;
+    sigmatch_table[DETECT_FILE_MAGIC].flags = SIGMATCH_OPTIONAL_OPT | SIGMATCH_INFO_STICKY_BUFFER |
+                                              SIGMATCH_SUPPORT_DIR | SIGMATCH_INFO_MULTI_BUFFER;
 
     filehandler_table[DETECT_FILE_MAGIC].name = "file.magic",
     filehandler_table[DETECT_FILE_MAGIC].priority = 2;
@@ -126,8 +128,7 @@ void DetectFilemagicRegister(void)
     DetectBufferTypeSupportsMultiInstance("file.magic");
 
     g_file_magic_buffer_id = DetectBufferTypeGetByName("file.magic");
-	SCLogDebug("registering filemagic rule option");
-    return;
+    SCLogDebug("registering filemagic rule option");
 }
 
 #define FILEMAGIC_MIN_SIZE  512
@@ -250,7 +251,7 @@ static int DetectFilemagicSetup (DetectEngineCtx *de_ctx, Signature *s, const ch
  */
 static int DetectFilemagicSetupSticky(DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
-    if (DetectBufferSetActiveList(de_ctx, s, g_file_magic_buffer_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_file_magic_buffer_id) < 0)
         return -1;
 
     if (de_ctx->filemagic_thread_ctx_id == -1) {
@@ -292,7 +293,7 @@ static InspectionBuffer *FilemagicGetDataCallback(DetectEngineThreadCtx *det_ctx
     const uint8_t *data = (const uint8_t *)cur_file->magic;
     uint32_t data_len = (uint32_t)strlen(cur_file->magic);
 
-    InspectionBufferSetupMulti(buffer, transforms, data, data_len);
+    InspectionBufferSetupMulti(det_ctx, buffer, transforms, data, data_len);
 
     SCReturnPtr(buffer, "InspectionBuffer");
 }
@@ -306,9 +307,17 @@ static uint8_t DetectEngineInspectFilemagic(DetectEngineCtx *de_ctx, DetectEngin
         transforms = engine->v2.transforms;
     }
 
-    AppLayerGetFileState files = AppLayerParserGetTxFiles(f, alstate, txv, flags);
+    AppLayerGetFileState files = AppLayerParserGetTxFiles(f, txv, flags);
     FileContainer *ffc = files.fc;
-    if (ffc == NULL) {
+    if (ffc == NULL || ffc->head == NULL) {
+        const bool eof = (AppLayerParserGetStateProgress(f->proto, f->alproto, txv, flags) >
+                          engine->progress);
+        if (eof && engine->match_on_null) {
+            return DETECT_ENGINE_INSPECT_SIG_MATCH;
+        }
+        if (ffc != NULL) {
+            return DETECT_ENGINE_INSPECT_SIG_NO_MATCH;
+        }
         return DETECT_ENGINE_INSPECT_SIG_CANT_MATCH_FILES;
     }
 
@@ -317,8 +326,10 @@ static uint8_t DetectEngineInspectFilemagic(DetectEngineCtx *de_ctx, DetectEngin
     for (File *file = ffc->head; file != NULL; file = file->next) {
         InspectionBuffer *buffer = FilemagicGetDataCallback(
                 det_ctx, transforms, f, flags, file, engine->sm_list, local_file_id);
-        if (buffer == NULL)
+        if (buffer == NULL) {
+            local_file_id++;
             continue;
+        }
 
         const bool match = DetectEngineContentInspection(de_ctx, det_ctx, s, engine->smd, NULL, f,
                 buffer->inspect, buffer->inspect_len, buffer->inspect_offset,
@@ -359,7 +370,7 @@ static void PrefilterTxFilemagic(DetectEngineThreadCtx *det_ctx, const void *pec
     const MpmCtx *mpm_ctx = ctx->mpm_ctx;
     const int list_id = ctx->list_id;
 
-    AppLayerGetFileState files = AppLayerParserGetTxFiles(f, f->alstate, txv, flags);
+    AppLayerGetFileState files = AppLayerParserGetTxFiles(f, txv, flags);
     FileContainer *ffc = files.fc;
     if (ffc != NULL) {
         int local_file_id = 0;

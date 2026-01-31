@@ -15,6 +15,7 @@
 #include "conf-yaml-loader.h"
 #include "util-time.h"
 #include "util-conf.h"
+#include "nallocinc.c"
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 
@@ -43,12 +44,12 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         setenv("SC_LOG_FILE", "/dev/null", 0);
 
         InitGlobal();
-        run_mode = RUNMODE_PCAP_FILE;
+        SCRunmodeSet(RUNMODE_PCAP_FILE);
 
         //redirect logs to /tmp
         ConfigSetLogDirectory("/tmp/");
         //disables checksums validation for fuzzing
-        if (ConfYamlLoadString(configNoChecksum, strlen(configNoChecksum)) != 0) {
+        if (SCConfYamlLoadString(configNoChecksum, strlen(configNoChecksum)) != 0) {
             abort();
         }
 
@@ -78,11 +79,13 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         tmm_modules[TMM_DECODEPCAPFILE].ThreadInit(tv, NULL, (void **) &dtv);
         (void)SC_ATOMIC_SET(tv->tm_slots->slot_next->slot_data, dtv);
 
-        extern uint16_t max_pending_packets;
+        extern uint32_t max_pending_packets;
         max_pending_packets = 128;
         PacketPoolInit();
         SC_ATOMIC_SET(engine_stage, SURICATA_RUNTIME);
 
+        nalloc_init(NULL);
+        // do not restrict nalloc
         initialized = 1;
     }
 
@@ -91,11 +94,13 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         return 0;
     }
 
+    nalloc_start(data, size);
     if (tmm_modules[TMM_RECEIVEPCAPFILE].ThreadInit(tv, "/tmp/fuzz.pcap", &ptv) == TM_ECODE_OK && ptv != NULL) {
         suricata_ctl_flags = 0;
         tmm_modules[TMM_RECEIVEPCAPFILE].PktAcqLoop(tv, ptv, tv->tm_slots);
         tmm_modules[TMM_RECEIVEPCAPFILE].ThreadDeinit(tv, ptv);
     }
+    nalloc_end();
 
     return 0;
 }

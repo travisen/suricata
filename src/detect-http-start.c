@@ -36,6 +36,7 @@
 #include "detect.h"
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-state.h"
 #include "detect-engine-prefilter.h"
@@ -74,31 +75,30 @@ static int g_keyword_thread_id = 0;
 static HttpHeaderThreadDataConfig g_td_config = { BUFFER_SIZE_STEP };
 
 static uint8_t *GetBufferForTX(
-        htp_tx_t *tx, DetectEngineThreadCtx *det_ctx, Flow *f, uint8_t flags, uint32_t *buffer_len)
+        htp_tx_t *tx, DetectEngineThreadCtx *det_ctx, uint8_t flags, uint32_t *buffer_len)
 {
     *buffer_len = 0;
 
     HttpHeaderThreadData *hdr_td = NULL;
-    HttpHeaderBuffer *buf =
-            HttpHeaderGetBufferSpace(det_ctx, f, flags, g_keyword_thread_id, &hdr_td);
+    HttpHeaderBuffer *buf = HttpHeaderGetBufferSpace(det_ctx, flags, g_keyword_thread_id, &hdr_td);
     if (unlikely(buf == NULL)) {
         return NULL;
     }
 
-    bstr *line = NULL;
-    htp_table_t *headers;
+    const bstr *line = NULL;
+    const htp_headers_t *headers;
     if (flags & STREAM_TOSERVER) {
         if (AppLayerParserGetStateProgress(IPPROTO_TCP, ALPROTO_HTTP1, tx, flags) <=
-                HTP_REQUEST_HEADERS)
+                HTP_REQUEST_PROGRESS_HEADERS)
             return NULL;
-        line = tx->request_line;
-        headers = tx->request_headers;
+        line = htp_tx_request_line(tx);
+        headers = htp_tx_request_headers(tx);
     } else {
         if (AppLayerParserGetStateProgress(IPPROTO_TCP, ALPROTO_HTTP1, tx, flags) <=
-                HTP_RESPONSE_HEADERS)
+                HTP_RESPONSE_PROGRESS_HEADERS)
             return NULL;
-        headers = tx->response_headers;
-        line = tx->response_line;
+        headers = htp_tx_response_headers(tx);
+        line = htp_tx_response_line(tx);
     }
     if (line == NULL || headers == NULL)
         return NULL;
@@ -115,11 +115,11 @@ static uint8_t *GetBufferForTX(
     buf->buffer[buf->len++] = '\n';
 
     size_t i = 0;
-    size_t no_of_headers = htp_table_size(headers);
+    size_t no_of_headers = htp_headers_size(headers);
     for (; i < no_of_headers; i++) {
-        htp_header_t *h = htp_table_get_index(headers, i, NULL);
-        size_t size1 = bstr_size(h->name);
-        size_t size2 = bstr_size(h->value);
+        const htp_header_t *h = htp_headers_get_index(headers, i);
+        size_t size1 = htp_header_name_len(h);
+        size_t size2 = htp_header_value_len(h);
         size_t size = size1 + size2 + 4;
         if (i + 1 == no_of_headers)
             size += 2;
@@ -129,12 +129,12 @@ static uint8_t *GetBufferForTX(
             }
         }
 
-        memcpy(buf->buffer + buf->len, bstr_ptr(h->name), bstr_size(h->name));
-        buf->len += bstr_size(h->name);
+        memcpy(buf->buffer + buf->len, htp_header_name_ptr(h), htp_header_name_len(h));
+        buf->len += htp_header_name_len(h);
         buf->buffer[buf->len++] = ':';
         buf->buffer[buf->len++] = ' ';
-        memcpy(buf->buffer + buf->len, bstr_ptr(h->value), bstr_size(h->value));
-        buf->len += bstr_size(h->value);
+        memcpy(buf->buffer + buf->len, htp_header_value_ptr(h), htp_header_value_len(h));
+        buf->len += htp_header_value_len(h);
         buf->buffer[buf->len++] = '\r';
         buf->buffer[buf->len++] = '\n';
         if (i + 1 == no_of_headers) {
@@ -154,12 +154,12 @@ static InspectionBuffer *GetBuffer1ForTX(DetectEngineThreadCtx *det_ctx,
     InspectionBuffer *buffer = InspectionBufferGet(det_ctx, list_id);
     if (buffer->inspect == NULL) {
         uint32_t rawdata_len = 0;
-        uint8_t *rawdata = GetBufferForTX(txv, det_ctx, f, flow_flags, &rawdata_len);
+        uint8_t *rawdata = GetBufferForTX(txv, det_ctx, flow_flags, &rawdata_len);
         if (rawdata_len == 0)
             return NULL;
 
-        InspectionBufferSetup(det_ctx, list_id, buffer, rawdata, rawdata_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(
+                det_ctx, list_id, buffer, rawdata, rawdata_len, transforms);
     }
 
     return buffer;
@@ -167,10 +167,10 @@ static InspectionBuffer *GetBuffer1ForTX(DetectEngineThreadCtx *det_ctx,
 
 static int DetectHttpStartSetup(DetectEngineCtx *de_ctx, Signature *s, const char *arg)
 {
-    if (DetectBufferSetActiveList(de_ctx, s, g_buffer_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_buffer_id) < 0)
         return -1;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_HTTP1) < 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_HTTP1) < 0)
         return -1;
 
     return 0;
@@ -181,22 +181,22 @@ static int DetectHttpStartSetup(DetectEngineCtx *de_ctx, Signature *s, const cha
  */
 void DetectHttpStartRegister(void)
 {
-    sigmatch_table[DETECT_AL_HTTP_START].name = KEYWORD_NAME;
-    sigmatch_table[DETECT_AL_HTTP_START].alias = KEYWORD_NAME_LEGACY;
-    sigmatch_table[DETECT_AL_HTTP_START].desc = BUFFER_NAME " sticky buffer";
-    sigmatch_table[DETECT_AL_HTTP_START].url = "/rules/" KEYWORD_DOC;
-    sigmatch_table[DETECT_AL_HTTP_START].Setup = DetectHttpStartSetup;
-    sigmatch_table[DETECT_AL_HTTP_START].flags |= SIGMATCH_NOOPT|SIGMATCH_INFO_STICKY_BUFFER;
+    sigmatch_table[DETECT_HTTP_START].name = KEYWORD_NAME;
+    sigmatch_table[DETECT_HTTP_START].alias = KEYWORD_NAME_LEGACY;
+    sigmatch_table[DETECT_HTTP_START].desc = BUFFER_NAME " sticky buffer";
+    sigmatch_table[DETECT_HTTP_START].url = "/rules/" KEYWORD_DOC;
+    sigmatch_table[DETECT_HTTP_START].Setup = DetectHttpStartSetup;
+    sigmatch_table[DETECT_HTTP_START].flags |= SIGMATCH_NOOPT | SIGMATCH_INFO_STICKY_BUFFER;
 
     DetectAppLayerMpmRegister(BUFFER_NAME, SIG_FLAG_TOSERVER, 2, PrefilterGenericMpmRegister,
-            GetBuffer1ForTX, ALPROTO_HTTP1, HTP_REQUEST_HEADERS);
+            GetBuffer1ForTX, ALPROTO_HTTP1, HTP_REQUEST_PROGRESS_HEADERS);
     DetectAppLayerMpmRegister(BUFFER_NAME, SIG_FLAG_TOCLIENT, 2, PrefilterGenericMpmRegister,
-            GetBuffer1ForTX, ALPROTO_HTTP1, HTP_RESPONSE_HEADERS);
+            GetBuffer1ForTX, ALPROTO_HTTP1, HTP_RESPONSE_PROGRESS_HEADERS);
 
     DetectAppLayerInspectEngineRegister(BUFFER_NAME, ALPROTO_HTTP1, SIG_FLAG_TOSERVER,
-            HTP_REQUEST_HEADERS, DetectEngineInspectBufferGeneric, GetBuffer1ForTX);
+            HTP_REQUEST_PROGRESS_HEADERS, DetectEngineInspectBufferGeneric, GetBuffer1ForTX);
     DetectAppLayerInspectEngineRegister(BUFFER_NAME, ALPROTO_HTTP1, SIG_FLAG_TOCLIENT,
-            HTP_RESPONSE_HEADERS, DetectEngineInspectBufferGeneric, GetBuffer1ForTX);
+            HTP_RESPONSE_PROGRESS_HEADERS, DetectEngineInspectBufferGeneric, GetBuffer1ForTX);
 
     DetectBufferTypeSetDescriptionByName(BUFFER_NAME,
             BUFFER_DESC);

@@ -71,7 +71,7 @@ Though the steps are the same, there are a few differences when implementing fra
 Rust
 ----
 
-This section shows how Frame support is added in Rust, using examples from the `SIP parser <https://github.com/OISF/suricata/blob/master/rust/src/sip/sip.rs>`_, and the `telnet parser <https://github.com/OISF/suricata/blob/master/rust/src/telnet/telnet.rs>`_.
+This section shows how Frame support is added in Rust, using examples from the `SIP parser <https://github.com/OISF/suricata/blob/main/rust/src/sip/sip.rs>`_, and the `telnet parser <https://github.com/OISF/suricata/blob/main/rust/src/telnet/telnet.rs>`_.
 
 **Define the frame types**. The frame types are defined as an enum. In Rust, make sure to derive from the ``AppLayerFrameType``:
 
@@ -142,8 +142,9 @@ The Frame API calls parameters represent:
 - ``frame_start``: a pointer to the start of the frame buffer in the stream (``cur_i`` in the SMB code snippet)
 - ``frame_len``: what we expect the frame length to be (the engine may need to wait until it has enough data. See what is done in the telnet snippet request frames registering)
 - ``frame_type``: type of frame it's being registering (defined in an enum, as shown further above)
+- ``tx_id``: an optional transaction id, if the frame belongs to a transaction. May be set later like `frame_len`
 
-``StreamSlice`` contains the input data to the parser, alongside other Stream-related data important in parsing context. Definition  is found in *applayer.rs*:
+``StreamSlice`` contains the input data to the parser, alongside other Stream-related data important in parsing context. Definition is found in *applayer.rs*:
 
 .. literalinclude:: ../../../../../rust/src/applayer.rs
     :caption: rust/src/applayer.rs

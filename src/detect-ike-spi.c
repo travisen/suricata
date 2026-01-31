@@ -27,6 +27,7 @@
 
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-prefilter.h"
 #include "detect-urilen.h"
@@ -65,10 +66,10 @@ static int g_buffer_responder_id = 0;
 
 static int DetectSpiInitiatorSetup(DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
-    if (DetectBufferSetActiveList(de_ctx, s, g_buffer_initiator_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_buffer_initiator_id) < 0)
         return -1;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_IKE) < 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_IKE) < 0)
         return -1;
 
     return 0;
@@ -76,10 +77,10 @@ static int DetectSpiInitiatorSetup(DetectEngineCtx *de_ctx, Signature *s, const 
 
 static int DetectSpiResponderSetup(DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
-    if (DetectBufferSetActiveList(de_ctx, s, g_buffer_responder_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_buffer_responder_id) < 0)
         return -1;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_IKE) < 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_IKE) < 0)
         return -1;
 
     return 0;
@@ -94,13 +95,12 @@ static InspectionBuffer *GetInitiatorData(DetectEngineThreadCtx *det_ctx,
         const uint8_t *b = NULL;
         uint32_t b_len = 0;
 
-        if (rs_ike_state_get_spi_initiator(txv, &b, &b_len) != 1)
+        if (SCIkeStateGetSpiInitiator(txv, &b, &b_len) != 1)
             return NULL;
         if (b == NULL || b_len == 0)
             return NULL;
 
-        InspectionBufferSetup(det_ctx, list_id, buffer, b, b_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(det_ctx, list_id, buffer, b, b_len, transforms);
     }
 
     return buffer;
@@ -115,13 +115,12 @@ static InspectionBuffer *GetResponderData(DetectEngineThreadCtx *det_ctx,
         const uint8_t *b = NULL;
         uint32_t b_len = 0;
 
-        if (rs_ike_state_get_spi_responder(txv, &b, &b_len) != 1)
+        if (SCIkeStateGetSpiResponder(txv, &b, &b_len) != 1)
             return NULL;
         if (b == NULL || b_len == 0)
             return NULL;
 
-        InspectionBufferSetup(det_ctx, list_id, buffer, b, b_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(det_ctx, list_id, buffer, b, b_len, transforms);
     }
 
     return buffer;
@@ -130,13 +129,12 @@ static InspectionBuffer *GetResponderData(DetectEngineThreadCtx *det_ctx,
 void DetectIkeSpiRegister(void)
 {
     // register initiator
-    sigmatch_table[DETECT_AL_IKE_SPI_INITIATOR].name = KEYWORD_NAME_INITIATOR;
-    sigmatch_table[DETECT_AL_IKE_SPI_INITIATOR].url =
-            "/rules/" KEYWORD_DOC_INITIATOR sigmatch_table[DETECT_AL_IKE_SPI_INITIATOR].desc =
+    sigmatch_table[DETECT_IKE_SPI_INITIATOR].name = KEYWORD_NAME_INITIATOR;
+    sigmatch_table[DETECT_IKE_SPI_INITIATOR].url =
+            "/rules/" KEYWORD_DOC_INITIATOR sigmatch_table[DETECT_IKE_SPI_INITIATOR].desc =
                     "sticky buffer to match on the IKE spi initiator";
-    sigmatch_table[DETECT_AL_IKE_SPI_INITIATOR].Setup = DetectSpiInitiatorSetup;
-    sigmatch_table[DETECT_AL_IKE_SPI_INITIATOR].flags |=
-            SIGMATCH_NOOPT | SIGMATCH_INFO_STICKY_BUFFER;
+    sigmatch_table[DETECT_IKE_SPI_INITIATOR].Setup = DetectSpiInitiatorSetup;
+    sigmatch_table[DETECT_IKE_SPI_INITIATOR].flags |= SIGMATCH_NOOPT | SIGMATCH_INFO_STICKY_BUFFER;
 
     DetectAppLayerInspectEngineRegister(BUFFER_NAME_INITIATOR, ALPROTO_IKE, SIG_FLAG_TOSERVER, 1,
             DetectEngineInspectBufferGeneric, GetInitiatorData);
@@ -150,13 +148,12 @@ void DetectIkeSpiRegister(void)
     SCLogDebug("registering " BUFFER_NAME_INITIATOR " rule option");
 
     // register responder
-    sigmatch_table[DETECT_AL_IKE_SPI_RESPONDER].name = KEYWORD_NAME_RESPONDER;
-    sigmatch_table[DETECT_AL_IKE_SPI_RESPONDER].url =
-            "/rules/" KEYWORD_DOC_RESPONDER sigmatch_table[DETECT_AL_IKE_SPI_RESPONDER].desc =
+    sigmatch_table[DETECT_IKE_SPI_RESPONDER].name = KEYWORD_NAME_RESPONDER;
+    sigmatch_table[DETECT_IKE_SPI_RESPONDER].url =
+            "/rules/" KEYWORD_DOC_RESPONDER sigmatch_table[DETECT_IKE_SPI_RESPONDER].desc =
                     "sticky buffer to match on the IKE spi responder";
-    sigmatch_table[DETECT_AL_IKE_SPI_RESPONDER].Setup = DetectSpiResponderSetup;
-    sigmatch_table[DETECT_AL_IKE_SPI_RESPONDER].flags |=
-            SIGMATCH_NOOPT | SIGMATCH_INFO_STICKY_BUFFER;
+    sigmatch_table[DETECT_IKE_SPI_RESPONDER].Setup = DetectSpiResponderSetup;
+    sigmatch_table[DETECT_IKE_SPI_RESPONDER].flags |= SIGMATCH_NOOPT | SIGMATCH_INFO_STICKY_BUFFER;
 
     DetectAppLayerInspectEngineRegister(BUFFER_NAME_RESPONDER, ALPROTO_IKE, SIG_FLAG_TOCLIENT, 1,
             DetectEngineInspectBufferGeneric, GetResponderData);

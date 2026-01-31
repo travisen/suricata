@@ -61,7 +61,6 @@
 #include "output-json-email-common.h"
 #include "output-json-nfs.h"
 #include "output-json-smb.h"
-#include "output-json-http2.h"
 
 #include "app-layer-htp.h"
 #include "app-layer-htp-xff.h"
@@ -80,11 +79,11 @@ typedef struct JsonFileLogThread_ {
     OutputJsonThreadCtx *ctx;
 } JsonFileLogThread;
 
-JsonBuilder *JsonBuildFileInfoRecord(const Packet *p, const File *ff, void *tx,
+SCJsonBuilder *JsonBuildFileInfoRecord(const Packet *p, const File *ff, void *tx,
         const uint64_t tx_id, const bool stored, uint8_t dir, HttpXFFCfg *xff_cfg,
         OutputJsonCtx *eve_ctx)
 {
-    enum OutputJsonLogDirection fdir = LOG_DIR_FLOW;
+    enum SCOutputJsonLogDirection fdir = LOG_DIR_FLOW;
 
     switch(dir) {
         case STREAM_TOCLIENT:
@@ -118,59 +117,59 @@ JsonBuilder *JsonBuildFileInfoRecord(const Packet *p, const File *ff, void *tx,
         }
     }
 
-    JsonBuilder *js = CreateEveHeader(p, fdir, "fileinfo", &addr, eve_ctx);
+    SCJsonBuilder *js = CreateEveHeader(p, fdir, "fileinfo", &addr, eve_ctx);
     if (unlikely(js == NULL))
         return NULL;
 
-    JsonBuilderMark mark = { 0, 0, 0 };
+    SCJsonBuilderMark mark = { 0, 0, 0 };
     EveJsonSimpleAppLayerLogger *al;
     switch (p->flow->alproto) {
         case ALPROTO_HTTP1:
-            jb_open_object(js, "http");
+            SCJbOpenObject(js, "http");
             EveHttpAddMetadata(p->flow, tx_id, js);
-            jb_close(js);
+            SCJbClose(js);
             break;
         case ALPROTO_SMTP:
-            jb_get_mark(js, &mark);
-            jb_open_object(js, "smtp");
+            SCJbGetMark(js, &mark);
+            SCJbOpenObject(js, "smtp");
             if (EveSMTPAddMetadata(p->flow, tx_id, js)) {
-                jb_close(js);
+                SCJbClose(js);
             } else {
-                jb_restore_mark(js, &mark);
+                SCJbRestoreMark(js, &mark);
             }
-            jb_get_mark(js, &mark);
-            jb_open_object(js, "email");
+            SCJbGetMark(js, &mark);
+            SCJbOpenObject(js, "email");
             if (EveEmailAddMetadata(p->flow, tx_id, js)) {
-                jb_close(js);
+                SCJbClose(js);
             } else {
-                jb_restore_mark(js, &mark);
+                SCJbRestoreMark(js, &mark);
             }
             break;
         case ALPROTO_NFS:
             /* rpc */
-            jb_get_mark(js, &mark);
-            jb_open_object(js, "rpc");
+            SCJbGetMark(js, &mark);
+            SCJbOpenObject(js, "rpc");
             if (EveNFSAddMetadataRPC(p->flow, tx_id, js)) {
-                jb_close(js);
+                SCJbClose(js);
             } else {
-                jb_restore_mark(js, &mark);
+                SCJbRestoreMark(js, &mark);
             }
             /* nfs */
-            jb_get_mark(js, &mark);
-            jb_open_object(js, "nfs");
+            SCJbGetMark(js, &mark);
+            SCJbOpenObject(js, "nfs");
             if (EveNFSAddMetadata(p->flow, tx_id, js)) {
-                jb_close(js);
+                SCJbClose(js);
             } else {
-                jb_restore_mark(js, &mark);
+                SCJbRestoreMark(js, &mark);
             }
             break;
         case ALPROTO_SMB:
-            jb_get_mark(js, &mark);
-            jb_open_object(js, "smb");
+            SCJbGetMark(js, &mark);
+            SCJbOpenObject(js, "smb");
             if (EveSMBAddMetadata(p->flow, tx_id, js)) {
-                jb_close(js);
+                SCJbClose(js);
             } else {
-                jb_restore_mark(js, &mark);
+                SCJbRestoreMark(js, &mark);
             }
             break;
         default:
@@ -180,9 +179,9 @@ JsonBuilder *JsonBuildFileInfoRecord(const Packet *p, const File *ff, void *tx,
                 if (state) {
                     tx = AppLayerParserGetTx(p->flow->proto, p->flow->alproto, state, tx_id);
                     if (tx) {
-                        jb_get_mark(js, &mark);
+                        SCJbGetMark(js, &mark);
                         if (!al->LogTx(tx, js)) {
-                            jb_restore_mark(js, &mark);
+                            SCJbRestoreMark(js, &mark);
                         }
                     }
                 }
@@ -190,9 +189,9 @@ JsonBuilder *JsonBuildFileInfoRecord(const Packet *p, const File *ff, void *tx,
             break;
     }
 
-    jb_set_string(js, "app_proto", AppProtoToString(p->flow->alproto));
+    SCJbSetString(js, "app_proto", AppProtoToString(p->flow->alproto));
 
-    jb_open_object(js, "fileinfo");
+    SCJbOpenObject(js, "fileinfo");
     if (stored) {
         // the file has just been stored on disk cf OUTPUT_FILEDATA_FLAG_CLOSE
         // but the flag is not set until the loggers have been called
@@ -200,11 +199,11 @@ JsonBuilder *JsonBuildFileInfoRecord(const Packet *p, const File *ff, void *tx,
     } else {
         EveFileInfo(js, ff, tx_id, ff->flags);
     }
-    jb_close(js);
+    SCJbClose(js);
 
     /* xff header */
     if (have_xff_ip && xff_cfg->flags & XFF_EXTRADATA) {
-        jb_set_string(js, "xff", xff_buffer);
+        SCJbSetString(js, "xff", xff_buffer);
     }
 
     return js;
@@ -214,18 +213,18 @@ JsonBuilder *JsonBuildFileInfoRecord(const Packet *p, const File *ff, void *tx,
  *  \internal
  *  \brief Write meta data on a single line json record
  */
-static void FileWriteJsonRecord(JsonFileLogThread *aft, const Packet *p, const File *ff, void *tx,
-        const uint64_t tx_id, uint8_t dir, OutputJsonCtx *eve_ctx)
+static void FileWriteJsonRecord(ThreadVars *tv, JsonFileLogThread *aft, const Packet *p,
+        const File *ff, void *tx, const uint64_t tx_id, uint8_t dir, OutputJsonCtx *eve_ctx)
 {
     HttpXFFCfg *xff_cfg = aft->filelog_ctx->xff_cfg != NULL ? aft->filelog_ctx->xff_cfg
                                                             : aft->filelog_ctx->parent_xff_cfg;
-    JsonBuilder *js = JsonBuildFileInfoRecord(p, ff, tx, tx_id, false, dir, xff_cfg, eve_ctx);
+    SCJsonBuilder *js = JsonBuildFileInfoRecord(p, ff, tx, tx_id, false, dir, xff_cfg, eve_ctx);
     if (unlikely(js == NULL)) {
         return;
     }
 
-    OutputJsonBuilderBuffer(js, aft->ctx);
-    jb_free(js);
+    OutputJsonBuilderBuffer(tv, p, p->flow, js, aft->ctx);
+    SCJbFree(js);
 }
 
 static int JsonFileLogger(ThreadVars *tv, void *thread_data, const Packet *p, const File *ff,
@@ -234,11 +233,11 @@ static int JsonFileLogger(ThreadVars *tv, void *thread_data, const Packet *p, co
     SCEnter();
     JsonFileLogThread *aft = (JsonFileLogThread *)thread_data;
 
-    BUG_ON(ff->flags & FILE_LOGGED);
+    DEBUG_VALIDATE_BUG_ON(ff->flags & FILE_LOGGED);
 
     SCLogDebug("ff %p", ff);
 
-    FileWriteJsonRecord(aft, p, ff, tx, tx_id, dir, aft->filelog_ctx->eve_ctx);
+    FileWriteJsonRecord(tv, aft, p, ff, tx, tx_id, dir, aft->filelog_ctx->eve_ctx);
     return 0;
 }
 
@@ -300,7 +299,7 @@ static void OutputFileLogDeinitSub(OutputCtx *output_ctx)
  *  \param conf Pointer to ConfNode containing this loggers configuration.
  *  \return NULL if failure, LogFileCtx* to the file_ctx if succesful
  * */
-static OutputInitResult OutputFileLogInitSub(ConfNode *conf, OutputCtx *parent_ctx)
+static OutputInitResult OutputFileLogInitSub(SCConfNode *conf, OutputCtx *parent_ctx)
 {
     OutputInitResult result = { NULL, false };
     OutputJsonCtx *ojc = parent_ctx->data;
@@ -316,14 +315,14 @@ static OutputInitResult OutputFileLogInitSub(ConfNode *conf, OutputCtx *parent_c
     }
 
     if (conf) {
-        const char *force_filestore = ConfNodeLookupChildValue(conf, "force-filestore");
-        if (force_filestore != NULL && ConfValIsTrue(force_filestore)) {
+        const char *force_filestore = SCConfNodeLookupChildValue(conf, "force-filestore");
+        if (force_filestore != NULL && SCConfValIsTrue(force_filestore)) {
             FileForceFilestoreEnable();
             SCLogConfig("forcing filestore of all files");
         }
 
-        const char *force_magic = ConfNodeLookupChildValue(conf, "force-magic");
-        if (force_magic != NULL && ConfValIsTrue(force_magic)) {
+        const char *force_magic = SCConfNodeLookupChildValue(conf, "force-magic");
+        if (force_magic != NULL && SCConfValIsTrue(force_magic)) {
             FileForceMagicEnable();
             SCLogConfig("forcing magic lookup for logged files");
         }
@@ -331,7 +330,7 @@ static OutputInitResult OutputFileLogInitSub(ConfNode *conf, OutputCtx *parent_c
         FileForceHashParseCfg(conf);
     }
 
-    if (conf != NULL && ConfNodeLookupChild(conf, "xff") != NULL) {
+    if (conf != NULL && SCConfNodeLookupChild(conf, "xff") != NULL) {
         output_file_ctx->xff_cfg = SCCalloc(1, sizeof(HttpXFFCfg));
         if (output_file_ctx->xff_cfg != NULL) {
             HttpXFFGetCfg(conf, output_file_ctx->xff_cfg);
@@ -353,7 +352,6 @@ static OutputInitResult OutputFileLogInitSub(ConfNode *conf, OutputCtx *parent_c
 void JsonFileLogRegister (void)
 {
     /* register as child of eve-log */
-    OutputRegisterFileSubModule(LOGGER_JSON_FILE, "eve-log", "JsonFileLog",
-        "eve-log.files", OutputFileLogInitSub, JsonFileLogger,
-        JsonFileLogThreadInit, JsonFileLogThreadDeinit, NULL);
+    OutputRegisterFileSubModule(LOGGER_JSON_FILE, "eve-log", "JsonFileLog", "eve-log.files",
+            OutputFileLogInitSub, JsonFileLogger, JsonFileLogThreadInit, JsonFileLogThreadDeinit);
 }

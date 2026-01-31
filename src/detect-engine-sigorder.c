@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2013 Open Information Security Foundation
+/* Copyright (C) 2007-2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -66,6 +66,44 @@
 #define DETECT_XBITS_TYPE_SET_READ 3
 #define DETECT_XBITS_TYPE_SET      4
 
+/**
+ * \brief Different kinds of helper data that can be used by the signature
+ *        ordering module.  Used by the "user" field in SCSigSignatureWrapper
+ */
+typedef enum {
+    DETECT_SIGORDER_FLOWBITS,
+    DETECT_SIGORDER_FLOWVAR,
+    DETECT_SIGORDER_PKTVAR,
+    DETECT_SIGORDER_FLOWINT,
+    DETECT_SIGORDER_HOSTBITS,
+    DETECT_SIGORDER_IPPAIRBITS,
+    DETECT_SIGORDER_MAX
+} DetectSigorderUserDataType;
+
+/**
+ * \brief Signature wrapper used by signature ordering module while ordering
+ *        signatures
+ */
+typedef struct SCSigSignatureWrapper_ {
+    /* the wrapped signature */
+    Signature *sig;
+
+    /* user data that is to be associated with this sigwrapper */
+    int user[DETECT_SIGORDER_MAX];
+
+    struct SCSigSignatureWrapper_ *next;
+} SCSigSignatureWrapper;
+
+/**
+ * \brief Structure holding the signature ordering function used by the
+ *        signature ordering module
+ */
+typedef struct SCSigOrderFunc_ {
+    /* Pointer to the Signature Ordering function */
+    int (*SWCompare)(SCSigSignatureWrapper *sw1, SCSigSignatureWrapper *sw2);
+
+    struct SCSigOrderFunc_ *next;
+} SCSigOrderFunc;
 
 /**
  * \brief Registers a keyword-based, signature ordering function
@@ -109,8 +147,6 @@ static void SCSigRegisterSignatureOrderingFunc(DetectEngineCtx *de_ctx,
         de_ctx->sc_sig_order_funcs = temp;
     else
         prev->next = temp;
-
-    return;
 }
 
 /**
@@ -193,14 +229,11 @@ static inline int SCSigGetFlowintType(Signature *sig)
     while (sm != NULL) {
         if (sm->type == DETECT_FLOWINT) {
             fi = (DetectFlowintData *)sm->ctx;
-            if (fi->modifier == FLOWINT_MODIFIER_LT ||
-                fi->modifier == FLOWINT_MODIFIER_LE ||
-                fi->modifier == FLOWINT_MODIFIER_EQ ||
-                fi->modifier == FLOWINT_MODIFIER_NE ||
-                fi->modifier == FLOWINT_MODIFIER_GE ||
-                fi->modifier == FLOWINT_MODIFIER_GT ||
-                fi->modifier == FLOWINT_MODIFIER_NOTSET ||
-                fi->modifier == FLOWINT_MODIFIER_ISSET) {
+            if (fi->modifier == FLOWINT_MODIFIER_LT || fi->modifier == FLOWINT_MODIFIER_LE ||
+                    fi->modifier == FLOWINT_MODIFIER_EQ || fi->modifier == FLOWINT_MODIFIER_NE ||
+                    fi->modifier == FLOWINT_MODIFIER_GE || fi->modifier == FLOWINT_MODIFIER_GT ||
+                    fi->modifier == FLOWINT_MODIFIER_ISNOTSET ||
+                    fi->modifier == FLOWINT_MODIFIER_ISSET) {
                 read++;
             } else {
 #ifdef DEBUG
@@ -441,7 +474,7 @@ static inline int SCSigGetXbitsType(Signature *sig, enum VarTypes type)
  */
 static inline void SCSigProcessUserDataForFlowbits(SCSigSignatureWrapper *sw)
 {
-    sw->user[SC_RADIX_USER_DATA_FLOWBITS] = SCSigGetFlowbitsType(sw->sig);
+    sw->user[DETECT_SIGORDER_FLOWBITS] = SCSigGetFlowbitsType(sw->sig);
 }
 
 /**
@@ -453,12 +486,12 @@ static inline void SCSigProcessUserDataForFlowbits(SCSigSignatureWrapper *sw)
  */
 static inline void SCSigProcessUserDataForFlowvar(SCSigSignatureWrapper *sw)
 {
-    sw->user[SC_RADIX_USER_DATA_FLOWVAR] = SCSigGetFlowvarType(sw->sig);
+    sw->user[DETECT_SIGORDER_FLOWVAR] = SCSigGetFlowvarType(sw->sig);
 }
 
 static inline void SCSigProcessUserDataForFlowint(SCSigSignatureWrapper *sw)
 {
-    sw->user[SC_RADIX_USER_DATA_FLOWINT] = SCSigGetFlowintType(sw->sig);
+    sw->user[DETECT_SIGORDER_FLOWINT] = SCSigGetFlowintType(sw->sig);
 }
 
 /**
@@ -470,7 +503,7 @@ static inline void SCSigProcessUserDataForFlowint(SCSigSignatureWrapper *sw)
  */
 static inline void SCSigProcessUserDataForPktvar(SCSigSignatureWrapper *sw)
 {
-    sw->user[SC_RADIX_USER_DATA_PKTVAR] = SCSigGetPktvarType(sw->sig);
+    sw->user[DETECT_SIGORDER_PKTVAR] = SCSigGetPktvarType(sw->sig);
 }
 
 /**
@@ -482,7 +515,7 @@ static inline void SCSigProcessUserDataForPktvar(SCSigSignatureWrapper *sw)
  */
 static inline void SCSigProcessUserDataForHostbits(SCSigSignatureWrapper *sw)
 {
-    sw->user[SC_RADIX_USER_DATA_HOSTBITS] = SCSigGetXbitsType(sw->sig, VAR_TYPE_HOST_BIT);
+    sw->user[DETECT_SIGORDER_HOSTBITS] = SCSigGetXbitsType(sw->sig, VAR_TYPE_HOST_BIT);
 }
 
 /**
@@ -494,7 +527,7 @@ static inline void SCSigProcessUserDataForHostbits(SCSigSignatureWrapper *sw)
  */
 static inline void SCSigProcessUserDataForIPPairbits(SCSigSignatureWrapper *sw)
 {
-    sw->user[SC_RADIX_USER_DATA_IPPAIRBITS] = SCSigGetXbitsType(sw->sig, VAR_TYPE_IPPAIR_BIT);
+    sw->user[DETECT_SIGORDER_IPPAIRBITS] = SCSigGetXbitsType(sw->sig, VAR_TYPE_IPPAIR_BIT);
 }
 
 /* Return 1 if sw1 comes before sw2 in the final list. */
@@ -611,8 +644,7 @@ static int SCSigOrderByActionCompare(SCSigSignatureWrapper *sw1,
 static int SCSigOrderByFlowbitsCompare(SCSigSignatureWrapper *sw1,
                                        SCSigSignatureWrapper *sw2)
 {
-    return sw1->user[SC_RADIX_USER_DATA_FLOWBITS] -
-        sw2->user[SC_RADIX_USER_DATA_FLOWBITS];
+    return sw1->user[DETECT_SIGORDER_FLOWBITS] - sw2->user[DETECT_SIGORDER_FLOWBITS];
 }
 
 /**
@@ -625,8 +657,7 @@ static int SCSigOrderByFlowbitsCompare(SCSigSignatureWrapper *sw1,
 static int SCSigOrderByFlowvarCompare(SCSigSignatureWrapper *sw1,
                                       SCSigSignatureWrapper *sw2)
 {
-    return sw1->user[SC_RADIX_USER_DATA_FLOWVAR] -
-        sw2->user[SC_RADIX_USER_DATA_FLOWVAR];
+    return sw1->user[DETECT_SIGORDER_FLOWVAR] - sw2->user[DETECT_SIGORDER_FLOWVAR];
 }
 
 /**
@@ -639,15 +670,13 @@ static int SCSigOrderByFlowvarCompare(SCSigSignatureWrapper *sw1,
 static int SCSigOrderByPktvarCompare(SCSigSignatureWrapper *sw1,
                                      SCSigSignatureWrapper *sw2)
 {
-    return sw1->user[SC_RADIX_USER_DATA_PKTVAR] -
-        sw2->user[SC_RADIX_USER_DATA_PKTVAR];
+    return sw1->user[DETECT_SIGORDER_PKTVAR] - sw2->user[DETECT_SIGORDER_PKTVAR];
 }
 
 static int SCSigOrderByFlowintCompare(SCSigSignatureWrapper *sw1,
                                       SCSigSignatureWrapper *sw2)
 {
-    return sw1->user[SC_RADIX_USER_DATA_FLOWINT] -
-        sw2->user[SC_RADIX_USER_DATA_FLOWINT];
+    return sw1->user[DETECT_SIGORDER_FLOWINT] - sw2->user[DETECT_SIGORDER_FLOWINT];
 }
 
 /**
@@ -660,8 +689,7 @@ static int SCSigOrderByFlowintCompare(SCSigSignatureWrapper *sw1,
 static int SCSigOrderByHostbitsCompare(SCSigSignatureWrapper *sw1,
                                        SCSigSignatureWrapper *sw2)
 {
-    return sw1->user[SC_RADIX_USER_DATA_HOSTBITS] -
-        sw2->user[SC_RADIX_USER_DATA_HOSTBITS];
+    return sw1->user[DETECT_SIGORDER_HOSTBITS] - sw2->user[DETECT_SIGORDER_HOSTBITS];
 }
 
 /**
@@ -674,8 +702,7 @@ static int SCSigOrderByHostbitsCompare(SCSigSignatureWrapper *sw1,
 static int SCSigOrderByIPPairbitsCompare(SCSigSignatureWrapper *sw1,
                                          SCSigSignatureWrapper *sw2)
 {
-    return sw1->user[SC_RADIX_USER_DATA_IPPAIRBITS] -
-        sw2->user[SC_RADIX_USER_DATA_IPPAIRBITS];
+    return sw1->user[DETECT_SIGORDER_IPPAIRBITS] - sw2->user[DETECT_SIGORDER_IPPAIRBITS];
 }
 
 /**
@@ -691,6 +718,50 @@ static int SCSigOrderByPriorityCompare(SCSigSignatureWrapper *sw1,
     if (sw1->sig->prio > sw2->sig->prio) {
         return -1;
     } else if (sw1->sig->prio < sw2->sig->prio) {
+        return 1;
+    }
+    return 0;
+}
+
+static int SCSigOrderByIId(SCSigSignatureWrapper *sw1, SCSigSignatureWrapper *sw2)
+{
+    if (sw1->sig->iid > sw2->sig->iid) {
+        return -1;
+    } else if (sw1->sig->iid < sw2->sig->iid) {
+        return 1;
+    }
+    return 0;
+}
+
+/* sort by:
+ * alproto, progress, iid
+ */
+static int SCSigOrderByAppFirewall(SCSigSignatureWrapper *sw1, SCSigSignatureWrapper *sw2)
+{
+    int sw1dir = (sw1->sig->flags & SIG_FLAG_TOSERVER) != 0 ? 0 : 1;
+    int sw2dir = (sw2->sig->flags & SIG_FLAG_TOSERVER) != 0 ? 0 : 1;
+
+    if (sw1dir > sw2dir) {
+        return -1;
+    } else if (sw1dir < sw2dir) {
+        return 1;
+    }
+
+    if (sw1->sig->alproto > sw2->sig->alproto) {
+        return -1;
+    } else if (sw1->sig->alproto < sw2->sig->alproto) {
+        return 1;
+    }
+
+    if (sw1->sig->app_progress_hook > sw2->sig->app_progress_hook) {
+        return -1;
+    } else if (sw1->sig->app_progress_hook < sw2->sig->app_progress_hook) {
+        return 1;
+    }
+
+    if (sw1->sig->iid > sw2->sig->iid) {
+        return -1;
+    } else if (sw1->sig->iid < sw2->sig->iid) {
         return 1;
     }
     return 0;
@@ -737,43 +808,54 @@ void SCSigOrderSignatures(DetectEngineCtx *de_ctx)
         return;
     }
 
-    Signature *sig = NULL;
-    SCSigSignatureWrapper *sigw = NULL;
-    SCSigSignatureWrapper *sigw_list = NULL;
-#ifdef DEBUG
-    int i = 0;
-#endif
     SCLogDebug("ordering signatures in memory");
+    SCSigSignatureWrapper *sigw = NULL;
+    SCSigSignatureWrapper *td_sigw_list = NULL; /* unified td list */
 
-    sig = de_ctx->sig_list;
+    SCSigSignatureWrapper *fw_pf_sigw_list = NULL; /* hook: packet_filter */
+    SCSigSignatureWrapper *fw_af_sigw_list = NULL; /* hook: app_filter */
+
+    Signature *sig = de_ctx->sig_list;
     while (sig != NULL) {
         sigw = SCSigAllocSignatureWrapper(sig);
         /* Push signature wrapper onto a list, order doesn't matter here. */
-        sigw->next = sigw_list;
-        sigw_list = sigw;
-
+        if (sig->init_data->firewall_rule) {
+            if (sig->type == SIG_TYPE_PKT) {
+                sigw->next = fw_pf_sigw_list;
+                fw_pf_sigw_list = sigw;
+            } else {
+                // TODO review types.
+                sigw->next = fw_af_sigw_list;
+                fw_af_sigw_list = sigw;
+            }
+        } else {
+            sigw->next = td_sigw_list;
+            td_sigw_list = sigw;
+        }
         sig = sig->next;
-#ifdef DEBUG
-        i++;
-#endif
     }
 
-    /* Sort the list */
-    sigw_list = SCSigOrder(sigw_list, de_ctx->sc_sig_order_funcs);
-
-    SCLogDebug("Total Signatures to be processed by the"
-           "sigordering module: %d", i);
-
+    /* despite having Append in the name, the new Sig/Rule funcs actually prepend with some special
+     * logic around bidir sigs. So to respect the firewall rule order, we sort this part of the list
+     * by the add order. */
+    if (fw_pf_sigw_list) {
+        SCSigOrderFunc OrderFn = { .SWCompare = SCSigOrderByIId, .next = NULL };
+        fw_pf_sigw_list = SCSigOrder(fw_pf_sigw_list, &OrderFn);
+    }
+    if (fw_af_sigw_list) {
+        SCSigOrderFunc OrderFn = { .SWCompare = SCSigOrderByAppFirewall, .next = NULL };
+        fw_af_sigw_list = SCSigOrder(fw_af_sigw_list, &OrderFn);
+    }
+    if (td_sigw_list) {
+        /* Sort the list */
+        td_sigw_list = SCSigOrder(td_sigw_list, de_ctx->sc_sig_order_funcs);
+    }
     /* Recreate the sig list in order */
     de_ctx->sig_list = NULL;
-    sigw = sigw_list;
-#ifdef DEBUG
-    i = 0;
-#endif
-    while (sigw != NULL) {
-#ifdef DEBUG
-        i++;
-#endif
+
+    /* firewall list for hook packet_filter */
+    for (sigw = fw_pf_sigw_list; sigw != NULL;) {
+        SCLogDebug("post-sort packet_filter: sid %u", sigw->sig->id);
         sigw->sig->next = NULL;
         if (de_ctx->sig_list == NULL) {
             /* First entry on the list */
@@ -783,12 +865,44 @@ void SCSigOrderSignatures(DetectEngineCtx *de_ctx)
             sig->next = sigw->sig;
             sig = sig->next;
         }
+
         SCSigSignatureWrapper *sigw_to_free = sigw;
         sigw = sigw->next;
         SCFree(sigw_to_free);
     }
+    /* firewall list for hook app_filter */
+    for (sigw = fw_af_sigw_list; sigw != NULL;) {
+        SCLogDebug("post-sort app_filter: sid %u", sigw->sig->id);
+        sigw->sig->next = NULL;
+        if (de_ctx->sig_list == NULL) {
+            /* First entry on the list */
+            de_ctx->sig_list = sigw->sig;
+            sig = de_ctx->sig_list;
+        } else {
+            sig->next = sigw->sig;
+            sig = sig->next;
+        }
 
-    SCLogDebug("total signatures reordered by the sigordering module: %d", i);
+        SCSigSignatureWrapper *sigw_to_free = sigw;
+        sigw = sigw->next;
+        SCFree(sigw_to_free);
+    }
+    /* threat detect list for hook app_td */
+    for (sigw = td_sigw_list; sigw != NULL;) {
+        sigw->sig->next = NULL;
+        if (de_ctx->sig_list == NULL) {
+            /* First entry on the list */
+            de_ctx->sig_list = sigw->sig;
+            sig = de_ctx->sig_list;
+        } else {
+            sig->next = sigw->sig;
+            sig = sig->next;
+        }
+
+        SCSigSignatureWrapper *sigw_to_free = sigw;
+        sigw = sigw->next;
+        SCFree(sigw_to_free);
+    }
 }
 
 /**
@@ -1883,7 +1997,7 @@ static int SCSigOrderingTest12(void)
     Packet *p = NULL;
     uint8_t buf[] = "test message";
     Flow f;
-
+    memset(&f, 0, sizeof(f));
     FLOW_INITIALIZE(&f);
     f.flags |= FLOW_IPV4;
     f.alproto = ALPROTO_UNKNOWN;
@@ -1920,11 +2034,10 @@ static int SCSigOrderingTest12(void)
     FAIL_IF_NOT(UTHCheckPacketMatchResults(p, sids, results, 2));
 
     UTHFreePackets(&p, 1);
+    FLOW_DESTROY(&f);
 
     DetectEngineCtxFree(de_ctx);
-
     FlowShutdown();
-
     PASS;
 }
 

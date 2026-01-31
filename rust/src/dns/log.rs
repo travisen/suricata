@@ -1,4 +1,4 @@
-/* Copyright (C) 2017 Open Information Security Foundation
+/* Copyright (C) 2017-2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -19,6 +19,7 @@ use std;
 use std::collections::HashMap;
 use std::string::String;
 
+use crate::detect::EnumString;
 use crate::dns::dns::*;
 use crate::jsonbuilder::{JsonBuilder, JsonError};
 
@@ -85,185 +86,190 @@ pub const LOG_FORMAT_GROUPED: u64 = BIT_U64!(60);
 pub const LOG_FORMAT_DETAILED: u64 = BIT_U64!(61);
 pub const LOG_HTTPS: u64 = BIT_U64!(62);
 
+pub const DNS_LOG_VERSION_1: u8 = 1;
+pub const DNS_LOG_VERSION_2: u8 = 2;
+pub const DNS_LOG_VERSION_3: u8 = 3;
+pub const DNS_LOG_VERSION_DEFAULT: u8 = DNS_LOG_VERSION_3;
+
 fn dns_log_rrtype_enabled(rtype: u16, flags: u64) -> bool {
     if flags == !0 {
         return true;
     }
 
-    match rtype {
-        DNS_RECORD_TYPE_A => {
+    match DNSRecordType::from_u(rtype) {
+        Some(DNSRecordType::A) => {
             return flags & LOG_A != 0;
         }
-        DNS_RECORD_TYPE_NS => {
+        Some(DNSRecordType::NS) => {
             return flags & LOG_NS != 0;
         }
-        DNS_RECORD_TYPE_MD => {
+        Some(DNSRecordType::MD) => {
             return flags & LOG_MD != 0;
         }
-        DNS_RECORD_TYPE_MF => {
+        Some(DNSRecordType::MF) => {
             return flags & LOG_MF != 0;
         }
-        DNS_RECORD_TYPE_CNAME => {
+        Some(DNSRecordType::CNAME) => {
             return flags & LOG_CNAME != 0;
         }
-        DNS_RECORD_TYPE_SOA => {
+        Some(DNSRecordType::SOA) => {
             return flags & LOG_SOA != 0;
         }
-        DNS_RECORD_TYPE_MB => {
+        Some(DNSRecordType::MB) => {
             return flags & LOG_MB != 0;
         }
-        DNS_RECORD_TYPE_MG => {
+        Some(DNSRecordType::MG) => {
             return flags & LOG_MG != 0;
         }
-        DNS_RECORD_TYPE_MR => {
+        Some(DNSRecordType::MR) => {
             return flags & LOG_MR != 0;
         }
-        DNS_RECORD_TYPE_NULL => {
+        Some(DNSRecordType::NULL) => {
             return flags & LOG_NULL != 0;
         }
-        DNS_RECORD_TYPE_WKS => {
+        Some(DNSRecordType::WKS) => {
             return flags & LOG_WKS != 0;
         }
-        DNS_RECORD_TYPE_PTR => {
+        Some(DNSRecordType::PTR) => {
             return flags & LOG_PTR != 0;
         }
-        DNS_RECORD_TYPE_HINFO => {
+        Some(DNSRecordType::HINFO) => {
             return flags & LOG_HINFO != 0;
         }
-        DNS_RECORD_TYPE_MINFO => {
+        Some(DNSRecordType::MINFO) => {
             return flags & LOG_MINFO != 0;
         }
-        DNS_RECORD_TYPE_MX => {
+        Some(DNSRecordType::MX) => {
             return flags & LOG_MX != 0;
         }
-        DNS_RECORD_TYPE_TXT => {
+        Some(DNSRecordType::TXT) => {
             return flags & LOG_TXT != 0;
         }
-        DNS_RECORD_TYPE_RP => {
+        Some(DNSRecordType::RP) => {
             return flags & LOG_RP != 0;
         }
-        DNS_RECORD_TYPE_AFSDB => {
+        Some(DNSRecordType::AFSDB) => {
             return flags & LOG_AFSDB != 0;
         }
-        DNS_RECORD_TYPE_X25 => {
+        Some(DNSRecordType::X25) => {
             return flags & LOG_X25 != 0;
         }
-        DNS_RECORD_TYPE_ISDN => {
+        Some(DNSRecordType::ISDN) => {
             return flags & LOG_ISDN != 0;
         }
-        DNS_RECORD_TYPE_RT => {
+        Some(DNSRecordType::RT) => {
             return flags & LOG_RT != 0;
         }
-        DNS_RECORD_TYPE_NSAP => {
+        Some(DNSRecordType::NSAP) => {
             return flags & LOG_NSAP != 0;
         }
-        DNS_RECORD_TYPE_NSAPPTR => {
+        Some(DNSRecordType::NSAPPTR) => {
             return flags & LOG_NSAPPTR != 0;
         }
-        DNS_RECORD_TYPE_SIG => {
+        Some(DNSRecordType::SIG) => {
             return flags & LOG_SIG != 0;
         }
-        DNS_RECORD_TYPE_KEY => {
+        Some(DNSRecordType::KEY) => {
             return flags & LOG_KEY != 0;
         }
-        DNS_RECORD_TYPE_PX => {
+        Some(DNSRecordType::PX) => {
             return flags & LOG_PX != 0;
         }
-        DNS_RECORD_TYPE_GPOS => {
+        Some(DNSRecordType::GPOS) => {
             return flags & LOG_GPOS != 0;
         }
-        DNS_RECORD_TYPE_AAAA => {
+        Some(DNSRecordType::AAAA) => {
             return flags & LOG_AAAA != 0;
         }
-        DNS_RECORD_TYPE_LOC => {
+        Some(DNSRecordType::LOC) => {
             return flags & LOG_LOC != 0;
         }
-        DNS_RECORD_TYPE_NXT => {
+        Some(DNSRecordType::NXT) => {
             return flags & LOG_NXT != 0;
         }
-        DNS_RECORD_TYPE_SRV => {
+        Some(DNSRecordType::SRV) => {
             return flags & LOG_SRV != 0;
         }
-        DNS_RECORD_TYPE_ATMA => {
+        Some(DNSRecordType::ATMA) => {
             return flags & LOG_ATMA != 0;
         }
-        DNS_RECORD_TYPE_NAPTR => {
+        Some(DNSRecordType::NAPTR) => {
             return flags & LOG_NAPTR != 0;
         }
-        DNS_RECORD_TYPE_KX => {
+        Some(DNSRecordType::KX) => {
             return flags & LOG_KX != 0;
         }
-        DNS_RECORD_TYPE_CERT => {
+        Some(DNSRecordType::CERT) => {
             return flags & LOG_CERT != 0;
         }
-        DNS_RECORD_TYPE_A6 => {
+        Some(DNSRecordType::A6) => {
             return flags & LOG_A6 != 0;
         }
-        DNS_RECORD_TYPE_DNAME => {
+        Some(DNSRecordType::DNAME) => {
             return flags & LOG_DNAME != 0;
         }
-        DNS_RECORD_TYPE_OPT => {
+        Some(DNSRecordType::OPT) => {
             return flags & LOG_OPT != 0;
         }
-        DNS_RECORD_TYPE_APL => {
+        Some(DNSRecordType::APL) => {
             return flags & LOG_APL != 0;
         }
-        DNS_RECORD_TYPE_DS => {
+        Some(DNSRecordType::DS) => {
             return flags & LOG_DS != 0;
         }
-        DNS_RECORD_TYPE_SSHFP => {
+        Some(DNSRecordType::SSHFP) => {
             return flags & LOG_SSHFP != 0;
         }
-        DNS_RECORD_TYPE_IPSECKEY => {
+        Some(DNSRecordType::IPSECKEY) => {
             return flags & LOG_IPSECKEY != 0;
         }
-        DNS_RECORD_TYPE_RRSIG => {
+        Some(DNSRecordType::RRSIG) => {
             return flags & LOG_RRSIG != 0;
         }
-        DNS_RECORD_TYPE_NSEC => {
+        Some(DNSRecordType::NSEC) => {
             return flags & LOG_NSEC != 0;
         }
-        DNS_RECORD_TYPE_DNSKEY => {
+        Some(DNSRecordType::DNSKEY) => {
             return flags & LOG_DNSKEY != 0;
         }
-        DNS_RECORD_TYPE_DHCID => {
+        Some(DNSRecordType::DHCID) => {
             return flags & LOG_DHCID != 0;
         }
-        DNS_RECORD_TYPE_NSEC3 => return flags & LOG_NSEC3 != 0,
-        DNS_RECORD_TYPE_NSEC3PARAM => {
+        Some(DNSRecordType::NSEC3) => return flags & LOG_NSEC3 != 0,
+        Some(DNSRecordType::NSEC3PARAM) => {
             return flags & LOG_NSEC3PARAM != 0;
         }
-        DNS_RECORD_TYPE_TLSA => {
+        Some(DNSRecordType::TLSA) => {
             return flags & LOG_TLSA != 0;
         }
-        DNS_RECORD_TYPE_HIP => {
+        Some(DNSRecordType::HIP) => {
             return flags & LOG_HIP != 0;
         }
-        DNS_RECORD_TYPE_CDS => {
+        Some(DNSRecordType::CDS) => {
             return flags & LOG_CDS != 0;
         }
-        DNS_RECORD_TYPE_CDNSKEY => {
+        Some(DNSRecordType::CDNSKEY) => {
             return flags & LOG_CDNSKEY != 0;
         }
-        DNS_RECORD_TYPE_HTTPS => {
+        Some(DNSRecordType::HTTPS) => {
             return flags & LOG_HTTPS != 0;
         }
-        DNS_RECORD_TYPE_SPF => {
+        Some(DNSRecordType::SPF) => {
             return flags & LOG_SPF != 0;
         }
-        DNS_RECORD_TYPE_TKEY => {
+        Some(DNSRecordType::TKEY) => {
             return flags & LOG_TKEY != 0;
         }
-        DNS_RECORD_TYPE_TSIG => {
+        Some(DNSRecordType::TSIG) => {
             return flags & LOG_TSIG != 0;
         }
-        DNS_RECORD_TYPE_MAILA => {
+        Some(DNSRecordType::MAILA) => {
             return flags & LOG_MAILA != 0;
         }
-        DNS_RECORD_TYPE_ANY => {
+        Some(DNSRecordType::ANY) => {
             return flags & LOG_ANY != 0;
         }
-        DNS_RECORD_TYPE_URI => {
+        Some(DNSRecordType::URI) => {
             return flags & LOG_URI != 0;
         }
         _ => {
@@ -273,102 +279,24 @@ fn dns_log_rrtype_enabled(rtype: u16, flags: u64) -> bool {
 }
 
 pub fn dns_rrtype_string(rrtype: u16) -> String {
-    match rrtype {
-        DNS_RECORD_TYPE_A => "A",
-        DNS_RECORD_TYPE_NS => "NS",
-        DNS_RECORD_TYPE_AAAA => "AAAA",
-        DNS_RECORD_TYPE_CNAME => "CNAME",
-        DNS_RECORD_TYPE_TXT => "TXT",
-        DNS_RECORD_TYPE_MX => "MX",
-        DNS_RECORD_TYPE_SOA => "SOA",
-        DNS_RECORD_TYPE_PTR => "PTR",
-        DNS_RECORD_TYPE_SIG => "SIG",
-        DNS_RECORD_TYPE_KEY => "KEY",
-        DNS_RECORD_TYPE_WKS => "WKS",
-        DNS_RECORD_TYPE_TKEY => "TKEY",
-        DNS_RECORD_TYPE_TSIG => "TSIG",
-        DNS_RECORD_TYPE_ANY => "ANY",
-        DNS_RECORD_TYPE_RRSIG => "RRSIG",
-        DNS_RECORD_TYPE_NSEC => "NSEC",
-        DNS_RECORD_TYPE_DNSKEY => "DNSKEY",
-        DNS_RECORD_TYPE_HINFO => "HINFO",
-        DNS_RECORD_TYPE_MINFO => "MINFO",
-        DNS_RECORD_TYPE_RP => "RP",
-        DNS_RECORD_TYPE_AFSDB => "AFSDB",
-        DNS_RECORD_TYPE_X25 => "X25",
-        DNS_RECORD_TYPE_ISDN => "ISDN",
-        DNS_RECORD_TYPE_RT => "RT",
-        DNS_RECORD_TYPE_NSAP => "NSAP",
-        DNS_RECORD_TYPE_NSAPPTR => "NSAPPT",
-        DNS_RECORD_TYPE_PX => "PX",
-        DNS_RECORD_TYPE_GPOS => "GPOS",
-        DNS_RECORD_TYPE_LOC => "LOC",
-        DNS_RECORD_TYPE_SRV => "SRV",
-        DNS_RECORD_TYPE_ATMA => "ATMA",
-        DNS_RECORD_TYPE_NAPTR => "NAPTR",
-        DNS_RECORD_TYPE_KX => "KX",
-        DNS_RECORD_TYPE_CERT => "CERT",
-        DNS_RECORD_TYPE_A6 => "A6",
-        DNS_RECORD_TYPE_DNAME => "DNAME",
-        DNS_RECORD_TYPE_OPT => "OPT",
-        DNS_RECORD_TYPE_APL => "APL",
-        DNS_RECORD_TYPE_DS => "DS",
-        DNS_RECORD_TYPE_SSHFP => "SSHFP",
-        DNS_RECORD_TYPE_IPSECKEY => "IPSECKEY",
-        DNS_RECORD_TYPE_DHCID => "DHCID",
-        DNS_RECORD_TYPE_NSEC3 => "NSEC3",
-        DNS_RECORD_TYPE_NSEC3PARAM => "NSEC3PARAM",
-        DNS_RECORD_TYPE_TLSA => "TLSA",
-        DNS_RECORD_TYPE_HIP => "HIP",
-        DNS_RECORD_TYPE_CDS => "CDS",
-        DNS_RECORD_TYPE_CDNSKEY => "CDSNKEY",
-        DNS_RECORD_TYPE_HTTPS => "HTTPS",
-        DNS_RECORD_TYPE_MAILA => "MAILA",
-        DNS_RECORD_TYPE_URI => "URI",
-        DNS_RECORD_TYPE_MB => "MB",
-        DNS_RECORD_TYPE_MG => "MG",
-        DNS_RECORD_TYPE_MR => "MR",
-        DNS_RECORD_TYPE_NULL => "NULL",
-        DNS_RECORD_TYPE_SPF => "SPF",
-        DNS_RECORD_TYPE_NXT => "NXT",
-        DNS_RECORD_TYPE_MD => "ND",
-        DNS_RECORD_TYPE_MF => "MF",
-        _ => {
-            return rrtype.to_string();
-        }
+    if let Some(rt) = DNSRecordType::from_u(rrtype) {
+        return rt.to_str().to_uppercase();
     }
-    .to_string()
+    return rrtype.to_string();
 }
 
 pub fn dns_rcode_string(flags: u16) -> String {
-    match flags & 0x000f {
-        DNS_RCODE_NOERROR => "NOERROR",
-        DNS_RCODE_FORMERR => "FORMERR",
-        DNS_RCODE_SERVFAIL => "SERVFAIL",
-        DNS_RCODE_NXDOMAIN => "NXDOMAIN",
-        DNS_RCODE_NOTIMP => "NOTIMP",
-        DNS_RCODE_REFUSED => "REFUSED",
-        DNS_RCODE_YXDOMAIN => "YXDOMAIN",
-        DNS_RCODE_YXRRSET => "YXRRSET",
-        DNS_RCODE_NXRRSET => "NXRRSET",
-        DNS_RCODE_NOTAUTH => "NOTAUTH",
-        DNS_RCODE_NOTZONE => "NOTZONE",
-        DNS_RCODE_BADVERS => "BADVERS/BADSIG",
-        DNS_RCODE_BADKEY => "BADKEY",
-        DNS_RCODE_BADTIME => "BADTIME",
-        DNS_RCODE_BADMODE => "BADMODE",
-        DNS_RCODE_BADNAME => "BADNAME",
-        DNS_RCODE_BADALG => "BADALG",
-        DNS_RCODE_BADTRUNC => "BADTRUNC",
-        _ => {
-            return (flags & 0x000f).to_string();
-        }
+    if flags & 0x000f == DNSRcode::BADVERS as u16 {
+        return "BADVERS/BADSIG".to_string();
     }
-    .to_string()
+    if let Some(rc) = DNSRcode::from_u(flags & 0x000f) {
+        return rc.to_str().to_uppercase();
+    }
+    return (flags & 0x000f).to_string();
 }
 
 /// Format bytes as an IP address string.
-pub fn dns_print_addr(addr: &Vec<u8>) -> std::string::String {
+pub fn dns_print_addr(addr: &[u8]) -> std::string::String {
     if addr.len() == 4 {
         return format!("{}.{}.{}.{}", addr[0], addr[1], addr[2], addr[3]);
     } else if addr.len() == 16 {
@@ -394,12 +322,29 @@ pub fn dns_print_addr(addr: &Vec<u8>) -> std::string::String {
     }
 }
 
-/// Log SOA section fields.
-fn dns_log_soa(soa: &DNSRDataSOA) -> Result<JsonBuilder, JsonError> {
+/// Log OPT section fields
+pub(crate) fn dns_log_opt(opt: &DNSRDataOPT) -> Result<JsonBuilder, JsonError> {
     let mut js = JsonBuilder::try_new_object()?;
 
-    js.set_string_from_bytes("mname", &soa.mname)?;
-    js.set_string_from_bytes("rname", &soa.rname)?;
+    js.set_uint("code", opt.code as u64)?;
+    js.set_hex("data", &opt.data)?;
+
+    js.close()?;
+    Ok(js)
+}
+
+/// Log SOA section fields.
+pub(crate) fn dns_log_soa(soa: &DNSRDataSOA) -> Result<JsonBuilder, JsonError> {
+    let mut js = JsonBuilder::try_new_object()?;
+
+    js.set_string_from_bytes("mname", &soa.mname.value)?;
+    if soa.mname.flags.contains(DNSNameFlags::TRUNCATED) {
+        js.set_bool("mname_truncated", true)?;
+    }
+    js.set_string_from_bytes("rname", &soa.rname.value)?;
+    if soa.rname.flags.contains(DNSNameFlags::TRUNCATED) {
+        js.set_bool("rname_truncated", true)?;
+    }
     js.set_uint("serial", soa.serial as u64)?;
     js.set_uint("refresh", soa.refresh as u64)?;
     js.set_uint("retry", soa.retry as u64)?;
@@ -411,7 +356,7 @@ fn dns_log_soa(soa: &DNSRDataSOA) -> Result<JsonBuilder, JsonError> {
 }
 
 /// Log SSHFP section fields.
-fn dns_log_sshfp(sshfp: &DNSRDataSSHFP) -> Result<JsonBuilder, JsonError> {
+pub(crate) fn dns_log_sshfp(sshfp: &DNSRDataSSHFP) -> Result<JsonBuilder, JsonError> {
     let mut js = JsonBuilder::try_new_object()?;
 
     let mut hex = Vec::new();
@@ -428,22 +373,29 @@ fn dns_log_sshfp(sshfp: &DNSRDataSSHFP) -> Result<JsonBuilder, JsonError> {
 }
 
 /// Log SRV section fields.
-fn dns_log_srv(srv: &DNSRDataSRV) -> Result<JsonBuilder, JsonError> {
+pub(crate) fn dns_log_srv(srv: &DNSRDataSRV) -> Result<JsonBuilder, JsonError> {
     let mut js = JsonBuilder::try_new_object()?;
 
     js.set_uint("priority", srv.priority as u64)?;
     js.set_uint("weight", srv.weight as u64)?;
     js.set_uint("port", srv.port as u64)?;
-    js.set_string_from_bytes("name", &srv.target)?;
+    js.set_string_from_bytes("name", &srv.target.value)?;
 
     js.close()?;
     return Ok(js);
 }
 
-fn dns_log_json_answer_detail(answer: &DNSAnswerEntry) -> Result<JsonBuilder, JsonError> {
+/// Log a single DNS answer entry.
+///
+/// For items that may be array, such as TXT records, i will designate
+/// which entry to log.
+fn dns_log_json_answer_detail(answer: &DNSAnswerEntry, i: usize) -> Result<JsonBuilder, JsonError> {
     let mut jsa = JsonBuilder::try_new_object()?;
 
-    jsa.set_string_from_bytes("rrname", &answer.name)?;
+    jsa.set_string_from_bytes("rrname", &answer.name.value)?;
+    if answer.name.flags.contains(DNSNameFlags::TRUNCATED) {
+        jsa.set_bool("rrname_truncated", true)?;
+    }
     jsa.set_string("rrtype", &dns_rrtype_string(answer.rrtype))?;
     jsa.set_uint("ttl", answer.ttl as u64)?;
 
@@ -451,12 +403,20 @@ fn dns_log_json_answer_detail(answer: &DNSAnswerEntry) -> Result<JsonBuilder, Js
         DNSRData::A(addr) | DNSRData::AAAA(addr) => {
             jsa.set_string("rdata", &dns_print_addr(addr))?;
         }
-        DNSRData::CNAME(bytes)
-        | DNSRData::MX(bytes)
-        | DNSRData::NS(bytes)
-        | DNSRData::TXT(bytes)
-        | DNSRData::NULL(bytes)
-        | DNSRData::PTR(bytes) => {
+        DNSRData::CNAME(name) | DNSRData::MX(name) | DNSRData::NS(name) | DNSRData::PTR(name) => {
+            jsa.set_string_from_bytes("rdata", &name.value)?;
+            if name.flags.contains(DNSNameFlags::TRUNCATED) {
+                jsa.set_bool("rdata_truncated", true)?;
+            }
+        }
+        DNSRData::TXT(txt) => {
+            if let Some(txt) = txt.get(i) {
+                jsa.set_string_from_bytes("rdata", txt)?;
+            } else {
+                debug_validate_fail!("txt entry does not exist");
+            }
+        }
+        DNSRData::NULL(bytes) => {
             jsa.set_string_from_bytes("rdata", bytes)?;
         }
         DNSRData::SOA(soa) => {
@@ -467,6 +427,13 @@ fn dns_log_json_answer_detail(answer: &DNSAnswerEntry) -> Result<JsonBuilder, Js
         }
         DNSRData::SRV(srv) => {
             jsa.set_object("srv", &dns_log_srv(srv)?)?;
+        }
+        DNSRData::OPT(opt) => {
+            jsa.open_array("opt")?;
+            for val in opt {
+                jsa.append_object(&dns_log_opt(val)?)?;
+            }
+            jsa.close()?;
         }
         _ => {}
     }
@@ -480,7 +447,6 @@ fn dns_log_json_answer(
 ) -> Result<(), JsonError> {
     let header = &response.header;
 
-    js.set_uint("version", 2)?;
     js.set_string("type", "answer")?;
     js.set_uint("id", header.tx_id as u64)?;
     js.set_string("flags", format!("{:x}", header.flags).as_str())?;
@@ -507,7 +473,10 @@ fn dns_log_json_answer(
     js.set_uint("opcode", opcode as u64)?;
 
     if let Some(query) = response.queries.first() {
-        js.set_string_from_bytes("rrname", &query.name)?;
+        js.set_string_from_bytes("rrname", &query.name.value)?;
+        if query.name.flags.contains(DNSNameFlags::TRUNCATED) {
+            js.set_bool("rrname_truncated", true)?;
+        }
         js.set_string("rrtype", &dns_rrtype_string(query.rrtype))?;
     }
     js.set_string("rcode", &dns_rcode_string(header.flags))?;
@@ -531,12 +500,31 @@ fn dns_log_json_answer(
                             a.append_string(&dns_print_addr(addr))?;
                         }
                     }
-                    DNSRData::CNAME(bytes)
-                    | DNSRData::MX(bytes)
-                    | DNSRData::NS(bytes)
-                    | DNSRData::TXT(bytes)
-                    | DNSRData::NULL(bytes)
-                    | DNSRData::PTR(bytes) => {
+                    DNSRData::CNAME(name)
+                    | DNSRData::MX(name)
+                    | DNSRData::NS(name)
+                    | DNSRData::PTR(name) => {
+                        // Flags like truncated not logged here as it would break the schema.
+                        if !answer_types.contains_key(&type_string) {
+                            answer_types
+                                .insert(type_string.to_string(), JsonBuilder::try_new_array()?);
+                        }
+                        if let Some(a) = answer_types.get_mut(&type_string) {
+                            a.append_string_from_bytes(&name.value)?;
+                        }
+                    }
+                    DNSRData::TXT(txt_strings) => {
+                        if !answer_types.contains_key(&type_string) {
+                            answer_types
+                                .insert(type_string.to_string(), JsonBuilder::try_new_array()?);
+                        }
+                        if let Some(a) = answer_types.get_mut(&type_string) {
+                            for txt in txt_strings {
+                                a.append_string_from_bytes(txt)?;
+                            }
+                        }
+                    }
+                    DNSRData::NULL(bytes) => {
                         if !answer_types.contains_key(&type_string) {
                             answer_types
                                 .insert(type_string.to_string(), JsonBuilder::try_new_array()?);
@@ -577,7 +565,16 @@ fn dns_log_json_answer(
             }
 
             if flags & LOG_FORMAT_DETAILED != 0 {
-                js_answers.append_object(&dns_log_json_answer_detail(answer)?)?;
+                match &answer.data {
+                    DNSRData::TXT(asdf) => {
+                        for i in 0..asdf.len() {
+                            js_answers.append_object(&dns_log_json_answer_detail(answer, i)?)?;
+                        }
+                    }
+                    _ => {
+                        js_answers.append_object(&dns_log_json_answer_detail(answer, 0)?)?;
+                    }
+                }
             }
         }
 
@@ -600,17 +597,175 @@ fn dns_log_json_answer(
     if !response.authorities.is_empty() {
         js.open_array("authorities")?;
         for auth in &response.authorities {
-            let auth_detail = dns_log_json_answer_detail(auth)?;
-            js.append_object(&auth_detail)?;
+            match &auth.data {
+                DNSRData::TXT(txt) => {
+                    for i in 0..txt.len() {
+                        let auth_detail = dns_log_json_answer_detail(auth, i)?;
+                        js.append_object(&auth_detail)?;
+                    }
+                }
+                _ => {
+                    let auth_detail = dns_log_json_answer_detail(auth, 0)?;
+                    js.append_object(&auth_detail)?;
+                }
+            }
         }
         js.close()?;
+    }
+
+    if !response.additionals.is_empty() {
+        let mut is_js_open = false;
+        for add in &response.additionals {
+            if let DNSRData::OPT(rdata) = &add.data {
+                if rdata.is_empty() {
+                    continue;
+                }
+            }
+            if !is_js_open {
+                js.open_array("additionals")?;
+                is_js_open = true;
+            }
+            match &add.data {
+                DNSRData::TXT(txt) => {
+                    for i in 0..txt.len() {
+                        let add_detail = dns_log_json_answer_detail(add, i)?;
+                        js.append_object(&add_detail)?;
+                    }
+                }
+                _ => {
+                    let add_detail = dns_log_json_answer_detail(add, 0)?;
+                    js.append_object(&add_detail)?;
+                }
+            }
+        }
+        if is_js_open {
+            js.close()?;
+        }
     }
 
     Ok(())
 }
 
+/// V3 style answer logging.
+fn dns_log_json_answers(
+    jb: &mut JsonBuilder, response: &DNSMessage, flags: u64,
+) -> Result<(), JsonError> {
+    if !response.answers.is_empty() {
+        let mut js_answers = JsonBuilder::try_new_array()?;
+
+        // For grouped answers we use a HashMap keyed by the rrtype.
+        let mut answer_types = HashMap::new();
+
+        for answer in &response.answers {
+            if flags & LOG_FORMAT_GROUPED != 0 {
+                let type_string = dns_rrtype_string(answer.rrtype);
+                match &answer.data {
+                    DNSRData::A(addr) | DNSRData::AAAA(addr) => {
+                        if !answer_types.contains_key(&type_string) {
+                            answer_types
+                                .insert(type_string.to_string(), JsonBuilder::try_new_array()?);
+                        }
+                        if let Some(a) = answer_types.get_mut(&type_string) {
+                            a.append_string(&dns_print_addr(addr))?;
+                        }
+                    }
+                    DNSRData::CNAME(name)
+                    | DNSRData::MX(name)
+                    | DNSRData::NS(name)
+                    | DNSRData::PTR(name) => {
+                        if !answer_types.contains_key(&type_string) {
+                            answer_types
+                                .insert(type_string.to_string(), JsonBuilder::try_new_array()?);
+                        }
+                        if let Some(a) = answer_types.get_mut(&type_string) {
+                            a.append_string_from_bytes(&name.value)?;
+                        }
+                    }
+                    DNSRData::TXT(txt) => {
+                        if !answer_types.contains_key(&type_string) {
+                            answer_types
+                                .insert(type_string.to_string(), JsonBuilder::try_new_array()?);
+                        }
+                        if let Some(a) = answer_types.get_mut(&type_string) {
+                            for txt in txt {
+                                a.append_string_from_bytes(txt)?;
+                            }
+                        }
+                    }
+                    DNSRData::NULL(bytes) => {
+                        if !answer_types.contains_key(&type_string) {
+                            answer_types
+                                .insert(type_string.to_string(), JsonBuilder::try_new_array()?);
+                        }
+                        if let Some(a) = answer_types.get_mut(&type_string) {
+                            a.append_string_from_bytes(bytes)?;
+                        }
+                    }
+                    DNSRData::SOA(soa) => {
+                        if !answer_types.contains_key(&type_string) {
+                            answer_types
+                                .insert(type_string.to_string(), JsonBuilder::try_new_array()?);
+                        }
+                        if let Some(a) = answer_types.get_mut(&type_string) {
+                            a.append_object(&dns_log_soa(soa)?)?;
+                        }
+                    }
+                    DNSRData::SSHFP(sshfp) => {
+                        if !answer_types.contains_key(&type_string) {
+                            answer_types
+                                .insert(type_string.to_string(), JsonBuilder::try_new_array()?);
+                        }
+                        if let Some(a) = answer_types.get_mut(&type_string) {
+                            a.append_object(&dns_log_sshfp(sshfp)?)?;
+                        }
+                    }
+                    DNSRData::SRV(srv) => {
+                        if !answer_types.contains_key(&type_string) {
+                            answer_types
+                                .insert(type_string.to_string(), JsonBuilder::try_new_array()?);
+                        }
+                        if let Some(a) = answer_types.get_mut(&type_string) {
+                            a.append_object(&dns_log_srv(srv)?)?;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            if flags & LOG_FORMAT_DETAILED != 0 {
+                match &answer.data {
+                    DNSRData::TXT(txt) => {
+                        for i in 0..txt.len() {
+                            js_answers.append_object(&dns_log_json_answer_detail(answer, i)?)?;
+                        }
+                    }
+                    _ => {
+                        js_answers.append_object(&dns_log_json_answer_detail(answer, 0)?)?;
+                    }
+                }
+            }
+        }
+
+        js_answers.close()?;
+
+        if flags & LOG_FORMAT_DETAILED != 0 {
+            jb.set_object("answers", &js_answers)?;
+        }
+
+        if flags & LOG_FORMAT_GROUPED != 0 {
+            jb.open_object("grouped")?;
+            for (k, mut v) in answer_types.drain() {
+                v.close()?;
+                jb.set_object(&k, &v)?;
+            }
+            jb.close()?;
+        }
+    }
+    Ok(())
+}
+
 fn dns_log_query(
-    tx: &mut DNSTransaction, i: u16, flags: u64, jb: &mut JsonBuilder,
+    tx: &DNSTransaction, i: u16, flags: u64, jb: &mut JsonBuilder,
 ) -> Result<bool, JsonError> {
     let index = i as usize;
     if let Some(request) = &tx.request {
@@ -619,7 +774,10 @@ fn dns_log_query(
             if dns_log_rrtype_enabled(query.rrtype, flags) {
                 jb.set_string("type", "query")?;
                 jb.set_uint("id", request.header.tx_id as u64)?;
-                jb.set_string_from_bytes("rrname", &query.name)?;
+                jb.set_string_from_bytes("rrname", &query.name.value)?;
+                if query.name.flags.contains(DNSNameFlags::TRUNCATED) {
+                    jb.set_bool("rrname_truncated", true)?;
+                }
                 jb.set_string("rrtype", &dns_rrtype_string(query.rrtype))?;
                 jb.set_uint("tx_id", tx.id - 1)?;
                 if request.header.flags & 0x0040 != 0 {
@@ -636,8 +794,8 @@ fn dns_log_query(
 }
 
 #[no_mangle]
-pub extern "C" fn rs_dns_log_json_query(
-    tx: &mut DNSTransaction, i: u16, flags: u64, jb: &mut JsonBuilder,
+pub extern "C" fn SCDnsLogJsonQuery(
+    tx: &DNSTransaction, i: u16, flags: u64, jb: &mut JsonBuilder,
 ) -> bool {
     match dns_log_query(tx, i, flags, jb) {
         Ok(false) | Err(_) => {
@@ -649,9 +807,163 @@ pub extern "C" fn rs_dns_log_json_query(
     }
 }
 
+/// Common logger for DNS requests and responses.
+///
+/// It is expected that the JsonBuilder is an open object that the DNS
+/// transaction will be logged into. This function will not create the
+/// "dns" object.
+///
+/// This logger implements V3 style DNS logging.
+fn log_json(tx: &DNSTransaction, flags: u64, jb: &mut JsonBuilder) -> Result<(), JsonError> {
+    jb.open_object("dns")?;
+    jb.set_int("version", 3)?;
+
+    let message = if let Some(request) = &tx.request {
+        jb.set_string("type", "request")?;
+        request
+    } else if let Some(response) = &tx.response {
+        jb.set_string("type", "response")?;
+        response
+    } else {
+        debug_validate_fail!("unreachable");
+        return Ok(());
+    };
+
+    // The internal Suricata transaction ID.
+    jb.set_uint("tx_id", tx.id - 1)?;
+
+    // The on the wire DNS transaction ID.
+    jb.set_uint("id", tx.tx_id() as u64)?;
+
+    // Log header fields. Should this be a sub-object?
+    let header = &message.header;
+    jb.set_string("flags", format!("{:x}", header.flags).as_str())?;
+    if header.flags & 0x8000 != 0 {
+        jb.set_bool("qr", true)?;
+    }
+    if header.flags & 0x0400 != 0 {
+        jb.set_bool("aa", true)?;
+    }
+    if header.flags & 0x0200 != 0 {
+        jb.set_bool("tc", true)?;
+    }
+    if header.flags & 0x0100 != 0 {
+        jb.set_bool("rd", true)?;
+    }
+    if header.flags & 0x0080 != 0 {
+        jb.set_bool("ra", true)?;
+    }
+    if header.flags & 0x0040 != 0 {
+        jb.set_bool("z", true)?;
+    }
+    let opcode = ((header.flags >> 11) & 0xf) as u8;
+    jb.set_uint("opcode", opcode as u64)?;
+    jb.set_string("rcode", &dns_rcode_string(header.flags))?;
+
+    if !message.queries.is_empty() {
+        jb.open_array("queries")?;
+        for query in &message.queries {
+            if dns_log_rrtype_enabled(query.rrtype, flags) {
+                jb.start_object()?
+                    .set_string_from_bytes("rrname", &query.name.value)?
+                    .set_string("rrtype", &dns_rrtype_string(query.rrtype))?;
+                if query.name.flags.contains(DNSNameFlags::TRUNCATED) {
+                    jb.set_bool("rrname_truncated", true)?;
+                }
+                jb.close()?;
+            }
+        }
+        jb.close()?;
+    }
+
+    if !message.answers.is_empty() {
+        dns_log_json_answers(jb, message, flags)?;
+    }
+
+    if !message.authorities.is_empty() {
+        jb.open_array("authorities")?;
+        for auth in &message.authorities {
+            match &auth.data {
+                DNSRData::TXT(txt) => {
+                    for i in 0..txt.len() {
+                        let auth_detail = dns_log_json_answer_detail(auth, i)?;
+                        jb.append_object(&auth_detail)?;
+                    }
+                }
+                _ => {
+                    let auth_detail = dns_log_json_answer_detail(auth, 0)?;
+                    jb.append_object(&auth_detail)?;
+                }
+            }
+        }
+        jb.close()?;
+    }
+
+    if !message.additionals.is_empty() {
+        let mut is_jb_open = false;
+        for add in &message.additionals {
+            if let DNSRData::OPT(rdata) = &add.data {
+                if rdata.is_empty() {
+                    continue;
+                }
+            }
+            if !is_jb_open {
+                jb.open_array("additionals")?;
+                is_jb_open = true;
+            }
+            match &add.data {
+                DNSRData::TXT(txt) => {
+                    for i in 0..txt.len() {
+                        let add_detail = dns_log_json_answer_detail(add, i)?;
+                        jb.append_object(&add_detail)?;
+                    }
+                }
+                _ => {
+                    let add_detail = dns_log_json_answer_detail(add, 0)?;
+                    jb.append_object(&add_detail)?;
+                }
+            }
+        }
+        if is_jb_open {
+            jb.close()?;
+        }
+    }
+
+    jb.close()?;
+    Ok(())
+}
+
+/// FFI wrapper around the common V3 style DNS logger.
 #[no_mangle]
-pub extern "C" fn rs_dns_log_json_answer(
-    tx: &mut DNSTransaction, flags: u64, js: &mut JsonBuilder,
+pub extern "C" fn SCDnsLogJson(tx: &DNSTransaction, flags: u64, jb: &mut JsonBuilder) -> bool {
+    log_json(tx, flags, jb).is_ok()
+}
+
+/// Check if a DNS transaction should be logged based on the
+/// configured flags.
+#[no_mangle]
+pub extern "C" fn SCDnsLogEnabled(tx: &DNSTransaction, flags: u64) -> bool {
+    let message = if let Some(request) = &tx.request {
+        request
+    } else if let Some(response) = &tx.response {
+        response
+    } else {
+        // Should be unreachable...
+        return false;
+    };
+
+    for query in &message.queries {
+        if dns_log_rrtype_enabled(query.rrtype, flags) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Note: For v2 style logging.
+#[no_mangle]
+pub extern "C" fn SCDnsLogJsonAnswer(
+    tx: &DNSTransaction, flags: u64, js: &mut JsonBuilder,
 ) -> bool {
     if let Some(response) = &tx.response {
         for query in &response.queries {
@@ -663,8 +975,9 @@ pub extern "C" fn rs_dns_log_json_answer(
     return false;
 }
 
+/// Note: For v2 style logging.
 #[no_mangle]
-pub extern "C" fn rs_dns_do_log_answer(tx: &mut DNSTransaction, flags: u64) -> bool {
+pub extern "C" fn SCDnsLogAnswerEnabled(tx: &DNSTransaction, flags: u64) -> bool {
     if let Some(response) = &tx.response {
         for query in &response.queries {
             if dns_log_rrtype_enabled(query.rrtype, flags) {

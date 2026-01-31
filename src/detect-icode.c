@@ -70,6 +70,7 @@ void DetectICodeRegister (void)
 #endif
     sigmatch_table[DETECT_ICODE].SupportsPrefilter = PrefilterICodeIsPrefilterable;
     sigmatch_table[DETECT_ICODE].SetupPrefilter = PrefilterSetupICode;
+    sigmatch_table[DETECT_ICODE].flags = SIGMATCH_SUPPORT_FIREWALL | SIGMATCH_INFO_UINT8;
 }
 
 /**
@@ -87,14 +88,14 @@ void DetectICodeRegister (void)
 static int DetectICodeMatch (DetectEngineThreadCtx *det_ctx, Packet *p,
         const Signature *s, const SigMatchCtx *ctx)
 {
-    if (PKT_IS_PSEUDOPKT(p))
-        return 0;
+    DEBUG_VALIDATE_BUG_ON(PKT_IS_PSEUDOPKT(p));
 
     uint8_t picode;
-    if (PKT_IS_ICMPV4(p)) {
-        picode = ICMPV4_GET_CODE(p);
-    } else if (PKT_IS_ICMPV6(p)) {
-        picode = ICMPV6_GET_CODE(p);
+    if (PacketIsICMPv4(p)) {
+        picode = p->icmp_s.code;
+    } else if (PacketIsICMPv6(p)) {
+        const ICMPV6Hdr *icmpv6h = PacketGetICMPv6(p);
+        picode = ICMPV6_GET_CODE(icmpv6h);
     } else {
         /* Packet not ICMPv4 nor ICMPv6 */
         return 0;
@@ -120,20 +121,17 @@ static int DetectICodeSetup(DetectEngineCtx *de_ctx, Signature *s, const char *i
     DetectU8Data *icd = NULL;
 
     icd = DetectU8Parse(icodestr);
-    if (icd == NULL) goto error;
+    if (icd == NULL)
+        return -1;
 
-    if (SigMatchAppendSMToList(de_ctx, s, DETECT_ICODE, (SigMatchCtx *)icd, DETECT_SM_LIST_MATCH) ==
-            NULL) {
-        goto error;
+    if (SCSigMatchAppendSMToList(
+                de_ctx, s, DETECT_ICODE, (SigMatchCtx *)icd, DETECT_SM_LIST_MATCH) == NULL) {
+        SCDetectU8Free(icd);
+        return -1;
     }
     s->flags |= SIG_FLAG_REQUIRE_PACKET;
 
     return 0;
-
-error:
-    if (icd != NULL)
-        rs_detect_u8_free(icd);
-    return -1;
 }
 
 /**
@@ -143,7 +141,7 @@ error:
  */
 void DetectICodeFree(DetectEngineCtx *de_ctx, void *ptr)
 {
-    rs_detect_u8_free(ptr);
+    SCDetectU8Free(ptr);
 }
 
 /* prefilter code */
@@ -151,15 +149,14 @@ void DetectICodeFree(DetectEngineCtx *de_ctx, void *ptr)
 static void PrefilterPacketICodeMatch(DetectEngineThreadCtx *det_ctx,
         Packet *p, const void *pectx)
 {
-    if (PKT_IS_PSEUDOPKT(p)) {
-        SCReturn;
-    }
+    DEBUG_VALIDATE_BUG_ON(PKT_IS_PSEUDOPKT(p));
 
     uint8_t picode;
-    if (PKT_IS_ICMPV4(p)) {
-        picode = ICMPV4_GET_CODE(p);
-    } else if (PKT_IS_ICMPV6(p)) {
-        picode = ICMPV6_GET_CODE(p);
+    if (PacketIsICMPv4(p)) {
+        picode = p->icmp_s.code;
+    } else if (PacketIsICMPv6(p)) {
+        const ICMPV6Hdr *icmpv6h = PacketGetICMPv6(p);
+        picode = ICMPV6_GET_CODE(icmpv6h);
     } else {
         /* Packet not ICMPv4 nor ICMPv6 */
         return;
@@ -174,20 +171,13 @@ static void PrefilterPacketICodeMatch(DetectEngineThreadCtx *det_ctx,
 
 static int PrefilterSetupICode(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
 {
-    return PrefilterSetupPacketHeaderU8Hash(de_ctx, sgh, DETECT_ICODE, PrefilterPacketU8Set,
-            PrefilterPacketU8Compare, PrefilterPacketICodeMatch);
+    return PrefilterSetupPacketHeaderU8Hash(de_ctx, sgh, DETECT_ICODE, SIG_MASK_REQUIRE_REAL_PKT,
+            PrefilterPacketU8Set, PrefilterPacketU8Compare, PrefilterPacketICodeMatch);
 }
 
 static bool PrefilterICodeIsPrefilterable(const Signature *s)
 {
-    const SigMatch *sm;
-    for (sm = s->init_data->smlists[DETECT_SM_LIST_MATCH] ; sm != NULL; sm = sm->next) {
-        switch (sm->type) {
-            case DETECT_ICODE:
-                return true;
-        }
-    }
-    return false;
+    return PrefilterIsPrefilterableById(s, DETECT_ICODE);
 }
 
 #ifdef UNITTESTS
@@ -309,7 +299,6 @@ static int DetectICodeParseTest08(void)
     DetectU8Data *icd = DetectU8Parse("> 8 <> 20");
     FAIL_IF_NOT_NULL(icd);
 
-    DetectICodeFree(NULL, icd);
     PASS;
 }
 
@@ -322,7 +311,6 @@ static int DetectICodeParseTest09(void)
     DetectU8Data *icd = DetectU8Parse("8<<20");
     FAIL_IF_NOT_NULL(icd);
 
-    DetectICodeFree(NULL, icd);
     PASS;
 }
 
@@ -333,17 +321,17 @@ static int DetectICodeParseTest09(void)
  */
 static int DetectICodeMatchTest01(void)
 {
-
-    Packet *p = NULL;
     Signature *s = NULL;
     ThreadVars th_v;
     DetectEngineThreadCtx *det_ctx;
 
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
 
-    p = UTHBuildPacket(NULL, 0, IPPROTO_ICMP);
-
-    p->icmpv4h->code = 10;
+    Packet *p = UTHBuildPacket(NULL, 0, IPPROTO_ICMP);
+    FAIL_IF_NULL(p);
+    FAIL_IF_NOT(PacketIsICMPv4(p));
+    p->icmp_s.code = p->l4.hdrs.icmpv4h->code = 10;
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     FAIL_IF_NULL(de_ctx);
@@ -379,7 +367,7 @@ static int DetectICodeMatchTest01(void)
     DetectEngineCtxFree(de_ctx);
 
     UTHFreePackets(&p, 1);
-
+    StatsThreadCleanup(&th_v.stats);
     PASS;
 }
 

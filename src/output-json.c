@@ -25,13 +25,9 @@
  */
 
 #include "suricata-common.h"
-#include "detect.h"
 #include "flow.h"
 #include "conf.h"
 
-#include "threads.h"
-#include "tm-threads.h"
-#include "threadvars.h"
 #include "util-debug.h"
 #include "util-time.h"
 #include "util-var-name.h"
@@ -40,11 +36,7 @@
 #include "util-unittest.h"
 #include "util-unittest-helper.h"
 
-#include "detect-parse.h"
 #include "detect-engine.h"
-#include "detect-engine-mpm.h"
-#include "detect-reference.h"
-#include "app-layer-parser.h"
 #include "util-classification-config.h"
 #include "util-syslog.h"
 
@@ -56,16 +48,14 @@
 #include "output-json.h"
 
 #include "util-byte.h"
-#include "util-privs.h"
 #include "util-print.h"
 #include "util-proto-name.h"
 #include "util-optimize.h"
 #include "util-buffer.h"
 #include "util-logopenfile.h"
 #include "util-log-redis.h"
-#include "util-device.h"
+#include "util-device-private.h"
 #include "util-validate.h"
-#include "util-plugin.h"
 
 #include "flow-var.h"
 #include "flow-bit.h"
@@ -73,16 +63,15 @@
 
 #include "source-pcap-file-helper.h"
 
-#include "suricata-plugin.h"
-
 #define DEFAULT_LOG_FILENAME "eve.json"
 #define MODULE_NAME "OutputJSON"
 
 #define MAX_JSON_SIZE 2048
 
 static void OutputJsonDeInitCtx(OutputCtx *);
-static void CreateEveCommunityFlowId(JsonBuilder *js, const Flow *f, const uint16_t seed);
-static int CreateJSONEther(JsonBuilder *parent, const Packet *p, const Flow *f);
+static void CreateEveCommunityFlowId(SCJsonBuilder *js, const Flow *f, const uint16_t seed);
+static int CreateJSONEther(
+        SCJsonBuilder *parent, const Packet *p, const Flow *f, enum SCOutputJsonLogDirection dir);
 
 static const char *TRAFFIC_ID_PREFIX = "traffic/id/";
 static const char *TRAFFIC_LABEL_PREFIX = "traffic/label/";
@@ -132,31 +121,31 @@ json_t *SCJsonString(const char *val)
 /* Default Sensor ID value */
 static int64_t sensor_id = -1; /* -1 = not defined */
 
-void EveFileInfo(JsonBuilder *jb, const File *ff, const uint64_t tx_id, const uint16_t flags)
+void EveFileInfo(SCJsonBuilder *jb, const File *ff, const uint64_t tx_id, const uint16_t flags)
 {
-    jb_set_string_from_bytes(jb, "filename", ff->name, ff->name_len);
+    SCJbSetStringFromBytes(jb, "filename", ff->name, ff->name_len);
 
     if (ff->sid_cnt > 0) {
-        jb_open_array(jb, "sid");
+        SCJbOpenArray(jb, "sid");
         for (uint32_t i = 0; ff->sid != NULL && i < ff->sid_cnt; i++) {
-            jb_append_uint(jb, ff->sid[i]);
+            SCJbAppendUint(jb, ff->sid[i]);
         }
-        jb_close(jb);
+        SCJbClose(jb);
     }
 
 #ifdef HAVE_MAGIC
     if (ff->magic)
-        jb_set_string(jb, "magic", (char *)ff->magic);
+        SCJbSetString(jb, "magic", (char *)ff->magic);
 #endif
-    jb_set_bool(jb, "gaps", ff->flags & FILE_HAS_GAPS);
+    SCJbSetBool(jb, "gaps", ff->flags & FILE_HAS_GAPS);
     switch (ff->state) {
         case FILE_STATE_CLOSED:
             JB_SET_STRING(jb, "state", "CLOSED");
             if (ff->flags & FILE_MD5) {
-                jb_set_hex(jb, "md5", (uint8_t *)ff->md5, (uint32_t)sizeof(ff->md5));
+                SCJbSetHex(jb, "md5", (uint8_t *)ff->md5, (uint32_t)sizeof(ff->md5));
             }
             if (ff->flags & FILE_SHA1) {
-                jb_set_hex(jb, "sha1", (uint8_t *)ff->sha1, (uint32_t)sizeof(ff->sha1));
+                SCJbSetHex(jb, "sha1", (uint8_t *)ff->sha1, (uint32_t)sizeof(ff->sha1));
             }
             break;
         case FILE_STATE_TRUNCATED:
@@ -171,12 +160,12 @@ void EveFileInfo(JsonBuilder *jb, const File *ff, const uint64_t tx_id, const ui
     }
 
     if (ff->flags & FILE_SHA256) {
-        jb_set_hex(jb, "sha256", (uint8_t *)ff->sha256, (uint32_t)sizeof(ff->sha256));
+        SCJbSetHex(jb, "sha256", (uint8_t *)ff->sha256, (uint32_t)sizeof(ff->sha256));
     }
 
     if (flags & FILE_STORED) {
         JB_SET_TRUE(jb, "stored");
-        jb_set_uint(jb, "file_id", ff->file_store_id);
+        SCJbSetUint(jb, "file_id", ff->file_store_id);
     } else {
         JB_SET_FALSE(jb, "stored");
         if (flags & FILE_STORE) {
@@ -184,15 +173,15 @@ void EveFileInfo(JsonBuilder *jb, const File *ff, const uint64_t tx_id, const ui
         }
     }
 
-    jb_set_uint(jb, "size", FileTrackedSize(ff));
+    SCJbSetUint(jb, "size", FileTrackedSize(ff));
     if (ff->end > 0) {
-        jb_set_uint(jb, "start", ff->start);
-        jb_set_uint(jb, "end", ff->end);
+        SCJbSetUint(jb, "start", ff->start);
+        SCJbSetUint(jb, "end", ff->end);
     }
-    jb_set_uint(jb, "tx_id", tx_id);
+    SCJbSetUint(jb, "tx_id", tx_id);
 }
 
-static void EveAddPacketVars(const Packet *p, JsonBuilder *js_vars)
+static void EveAddPacketVars(const Packet *p, SCJsonBuilder *js_vars)
 {
     if (p == NULL || p->pktvar == NULL) {
         return;
@@ -202,40 +191,27 @@ static void EveAddPacketVars(const Packet *p, JsonBuilder *js_vars)
     while (pv != NULL) {
         if (pv->key || pv->id > 0) {
             if (!open) {
-                jb_open_array(js_vars, "pktvars");
+                SCJbOpenArray(js_vars, "pktvars");
                 open = true;
             }
-            jb_start_object(js_vars);
+            SCJbStartObject(js_vars);
 
             if (pv->key != NULL) {
                 uint32_t offset = 0;
+                DEBUG_VALIDATE_BUG_ON(pv->key_len > UINT16_MAX);
                 uint8_t keybuf[pv->key_len + 1];
-                PrintStringsToBuffer(keybuf, &offset,
-                        sizeof(keybuf),
-                        pv->key, pv->key_len);
-                uint32_t len = pv->value_len;
-                uint8_t printable_buf[len + 1];
-                offset = 0;
-                PrintStringsToBuffer(printable_buf, &offset,
-                        sizeof(printable_buf),
-                        pv->value, pv->value_len);
-                jb_set_string(js_vars, (char *)keybuf, (char *)printable_buf);
+                PrintStringsToBuffer(keybuf, &offset, pv->key_len + 1, pv->key, pv->key_len);
+                SCJbSetPrintAsciiString(js_vars, (char *)keybuf, pv->value, pv->value_len);
             } else {
                 const char *varname = VarNameStoreLookupById(pv->id, VAR_TYPE_PKT_VAR);
-                uint32_t len = pv->value_len;
-                uint8_t printable_buf[len + 1];
-                uint32_t offset = 0;
-                PrintStringsToBuffer(printable_buf, &offset,
-                        sizeof(printable_buf),
-                        pv->value, pv->value_len);
-                jb_set_string(js_vars, varname, (char *)printable_buf);
+                SCJbSetPrintAsciiString(js_vars, varname, pv->value, pv->value_len);
             }
-            jb_close(js_vars);
+            SCJbClose(js_vars);
         }
         pv = pv->next;
     }
     if (open) {
-        jb_close(js_vars);
+        SCJbClose(js_vars);
     }
 }
 
@@ -255,16 +231,17 @@ static bool SCStringHasPrefix(const char *s, const char *prefix)
     return false;
 }
 
-static void EveAddFlowVars(const Flow *f, JsonBuilder *js_root, JsonBuilder **js_traffic)
+static void EveAddFlowVars(const Flow *f, SCJsonBuilder *js_root, SCJsonBuilder **js_traffic)
 {
     if (f == NULL || f->flowvar == NULL) {
         return;
     }
-    JsonBuilder *js_flowvars = NULL;
-    JsonBuilder *js_traffic_id = NULL;
-    JsonBuilder *js_traffic_label = NULL;
-    JsonBuilder *js_flowints = NULL;
-    JsonBuilder *js_flowbits = NULL;
+    SCJsonBuilder *js_flowvars = NULL;
+    SCJsonBuilder *js_traffic_id = NULL;
+    SCJsonBuilder *js_traffic_label = NULL;
+    SCJsonBuilder *js_flowints = NULL;
+    SCJsonBuilder *js_entropyvals = NULL;
+    SCJsonBuilder *js_flowbits = NULL;
     GenericVar *gv = f->flowvar;
     while (gv != NULL) {
         if (gv->type == DETECT_FLOWVAR || gv->type == DETECT_FLOWINT) {
@@ -274,57 +251,54 @@ static void EveAddFlowVars(const Flow *f, JsonBuilder *js_root, JsonBuilder **js
                         VAR_TYPE_FLOW_VAR);
                 if (varname) {
                     if (js_flowvars == NULL) {
-                        js_flowvars = jb_new_array();
+                        js_flowvars = SCJbNewArray();
                         if (js_flowvars == NULL)
                             break;
                     }
 
-                    uint32_t len = fv->data.fv_str.value_len;
-                    uint8_t printable_buf[len + 1];
-                    uint32_t offset = 0;
-                    PrintStringsToBuffer(printable_buf, &offset,
-                            sizeof(printable_buf),
-                            fv->data.fv_str.value, fv->data.fv_str.value_len);
-
-                    jb_start_object(js_flowvars);
-                    jb_set_string(js_flowvars, varname, (char *)printable_buf);
-                    jb_close(js_flowvars);
+                    SCJbStartObject(js_flowvars);
+                    SCJbSetPrintAsciiString(
+                            js_flowvars, varname, fv->data.fv_str.value, fv->data.fv_str.value_len);
+                    SCJbClose(js_flowvars);
                 }
             } else if (fv->datatype == FLOWVAR_TYPE_STR && fv->key != NULL) {
                 if (js_flowvars == NULL) {
-                    js_flowvars = jb_new_array();
+                    js_flowvars = SCJbNewArray();
                     if (js_flowvars == NULL)
                         break;
                 }
 
+                // fv->keylen is uint16
                 uint8_t keybuf[fv->keylen + 1];
                 uint32_t offset = 0;
-                PrintStringsToBuffer(keybuf, &offset,
-                        sizeof(keybuf),
-                        fv->key, fv->keylen);
+                PrintStringsToBuffer(keybuf, &offset, fv->keylen + 1, fv->key, fv->keylen);
 
-                uint32_t len = fv->data.fv_str.value_len;
-                uint8_t printable_buf[len + 1];
-                offset = 0;
-                PrintStringsToBuffer(printable_buf, &offset,
-                        sizeof(printable_buf),
-                        fv->data.fv_str.value, fv->data.fv_str.value_len);
+                SCJbStartObject(js_flowvars);
+                SCJbSetPrintAsciiString(js_flowvars, (const char *)keybuf, fv->data.fv_str.value,
+                        fv->data.fv_str.value_len);
+                SCJbClose(js_flowvars);
+            } else if (fv->datatype == FLOWVAR_TYPE_FLOAT) {
+                const char *varname = VarNameStoreLookupById(fv->idx, VAR_TYPE_FLOW_FLOAT);
+                if (varname) {
+                    if (js_entropyvals == NULL) {
+                        js_entropyvals = SCJbNewObject();
+                        if (js_entropyvals == NULL)
+                            break;
+                    }
+                    SCJbSetFloat(js_entropyvals, varname, fv->data.fv_float.value);
+                }
 
-                jb_start_object(js_flowvars);
-                jb_set_string(js_flowvars, (const char *)keybuf, (char *)printable_buf);
-                jb_close(js_flowvars);
             } else if (fv->datatype == FLOWVAR_TYPE_INT) {
                 const char *varname = VarNameStoreLookupById(fv->idx,
                         VAR_TYPE_FLOW_INT);
                 if (varname) {
                     if (js_flowints == NULL) {
-                        js_flowints = jb_new_object();
+                        js_flowints = SCJbNewObject();
                         if (js_flowints == NULL)
                             break;
                     }
-                    jb_set_uint(js_flowints, varname, fv->data.fv_int.value);
+                    SCJbSetUint(js_flowints, varname, fv->data.fv_int.value);
                 }
-
             }
         } else if (gv->type == DETECT_FLOWBITS) {
             FlowBit *fb = (FlowBit *)gv;
@@ -333,103 +307,111 @@ static void EveAddFlowVars(const Flow *f, JsonBuilder *js_root, JsonBuilder **js
             if (varname) {
                 if (SCStringHasPrefix(varname, TRAFFIC_ID_PREFIX)) {
                     if (js_traffic_id == NULL) {
-                        js_traffic_id = jb_new_array();
+                        js_traffic_id = SCJbNewArray();
                         if (unlikely(js_traffic_id == NULL)) {
                             break;
                         }
                     }
-                    jb_append_string(js_traffic_id, &varname[traffic_id_prefix_len]);
+                    SCJbAppendString(js_traffic_id, &varname[traffic_id_prefix_len]);
                 } else if (SCStringHasPrefix(varname, TRAFFIC_LABEL_PREFIX)) {
                     if (js_traffic_label == NULL) {
-                        js_traffic_label = jb_new_array();
+                        js_traffic_label = SCJbNewArray();
                         if (unlikely(js_traffic_label == NULL)) {
                             break;
                         }
                     }
-                    jb_append_string(js_traffic_label, &varname[traffic_label_prefix_len]);
+                    SCJbAppendString(js_traffic_label, &varname[traffic_label_prefix_len]);
                 } else {
                     if (js_flowbits == NULL) {
-                        js_flowbits = jb_new_array();
+                        js_flowbits = SCJbNewArray();
                         if (unlikely(js_flowbits == NULL))
                             break;
                     }
-                    jb_append_string(js_flowbits, varname);
+                    SCJbAppendString(js_flowbits, varname);
                 }
             }
         }
         gv = gv->next;
     }
     if (js_flowbits) {
-        jb_close(js_flowbits);
-        jb_set_object(js_root, "flowbits", js_flowbits);
-        jb_free(js_flowbits);
+        SCJbClose(js_flowbits);
+        SCJbSetObject(js_root, "flowbits", js_flowbits);
+        SCJbFree(js_flowbits);
     }
     if (js_flowints) {
-        jb_close(js_flowints);
-        jb_set_object(js_root, "flowints", js_flowints);
-        jb_free(js_flowints);
+        SCJbClose(js_flowints);
+        SCJbSetObject(js_root, "flowints", js_flowints);
+        SCJbFree(js_flowints);
+    }
+    if (js_entropyvals) {
+        SCJbClose(js_entropyvals);
+        SCJbSetObject(js_root, "entropy", js_entropyvals);
+        SCJbFree(js_entropyvals);
     }
     if (js_flowvars) {
-        jb_close(js_flowvars);
-        jb_set_object(js_root, "flowvars", js_flowvars);
-        jb_free(js_flowvars);
+        SCJbClose(js_flowvars);
+        SCJbSetObject(js_root, "flowvars", js_flowvars);
+        SCJbFree(js_flowvars);
     }
 
     if (js_traffic_id != NULL || js_traffic_label != NULL) {
-        *js_traffic = jb_new_object();
+        *js_traffic = SCJbNewObject();
         if (likely(*js_traffic != NULL)) {
             if (js_traffic_id != NULL) {
-                jb_close(js_traffic_id);
-                jb_set_object(*js_traffic, "id", js_traffic_id);
-                jb_free(js_traffic_id);
+                SCJbClose(js_traffic_id);
+                SCJbSetObject(*js_traffic, "id", js_traffic_id);
+                SCJbFree(js_traffic_id);
             }
             if (js_traffic_label != NULL) {
-                jb_close(js_traffic_label);
-                jb_set_object(*js_traffic, "label", js_traffic_label);
-                jb_free(js_traffic_label);
+                SCJbClose(js_traffic_label);
+                SCJbSetObject(*js_traffic, "label", js_traffic_label);
+                SCJbFree(js_traffic_label);
             }
-            jb_close(*js_traffic);
+            SCJbClose(*js_traffic);
         }
     }
 }
 
-void EveAddMetadata(const Packet *p, const Flow *f, JsonBuilder *js)
+void EveAddMetadata(const Packet *p, const Flow *f, SCJsonBuilder *js)
 {
     if ((p && p->pktvar) || (f && f->flowvar)) {
-        JsonBuilder *js_vars = jb_new_object();
+        SCJsonBuilder *js_vars = SCJbNewObject();
         if (js_vars) {
             if (f && f->flowvar) {
-                JsonBuilder *js_traffic = NULL;
+                SCJsonBuilder *js_traffic = NULL;
                 EveAddFlowVars(f, js_vars, &js_traffic);
                 if (js_traffic != NULL) {
-                    jb_set_object(js, "traffic", js_traffic);
-                    jb_free(js_traffic);
+                    SCJbSetObject(js, "traffic", js_traffic);
+                    SCJbFree(js_traffic);
                 }
             }
             if (p && p->pktvar) {
                 EveAddPacketVars(p, js_vars);
             }
-            jb_close(js_vars);
-            jb_set_object(js, "metadata", js_vars);
-            jb_free(js_vars);
+            SCJbClose(js_vars);
+            SCJbSetObject(js, "metadata", js_vars);
+            SCJbFree(js_vars);
         }
     }
 }
 
-void EveAddCommonOptions(const OutputJsonCommonSettings *cfg,
-        const Packet *p, const Flow *f, JsonBuilder *js)
+void EveAddCommonOptions(const OutputJsonCommonSettings *cfg, const Packet *p, const Flow *f,
+        SCJsonBuilder *js, enum SCOutputJsonLogDirection dir)
 {
+    if (cfg->include_suricata_version) {
+        SCJbSetString(js, "suricata_version", PROG_VER);
+    }
     if (cfg->include_metadata) {
         EveAddMetadata(p, f, js);
     }
     if (cfg->include_ethernet) {
-        CreateJSONEther(js, p, f);
+        CreateJSONEther(js, p, f, dir);
     }
     if (cfg->include_community_id && f != NULL) {
         CreateEveCommunityFlowId(js, f, cfg->community_id_seed);
     }
     if (f != NULL && f->tenant_id > 0) {
-        jb_set_uint(js, "tenant_id", f->tenant_id);
+        SCJbSetUint(js, "tenant_id", f->tenant_id);
     }
 }
 
@@ -440,24 +422,32 @@ void EveAddCommonOptions(const OutputJsonCommonSettings *cfg,
  * \param js JSON object
  * \param max_length If non-zero, restricts the number of packet data bytes handled.
  */
-void EvePacket(const Packet *p, JsonBuilder *js, unsigned long max_length)
+void EvePacket(const Packet *p, SCJsonBuilder *js, uint32_t max_length)
 {
-    unsigned long max_len = max_length == 0 ? GET_PKT_LEN(p) : max_length;
-    jb_set_base64(js, "packet", GET_PKT_DATA(p), max_len);
+    uint32_t max_len = max_length == 0 ? GET_PKT_LEN(p) : max_length;
+    SCJbSetBase64(js, "packet", GET_PKT_DATA(p), max_len);
 
-    if (!jb_open_object(js, "packet_info")) {
+    if (!SCJbOpenObject(js, "packet_info")) {
         return;
     }
-    if (!jb_set_uint(js, "linktype", p->datalink)) {
+    if (!SCJbSetUint(js, "linktype", p->datalink)) {
+        SCJbClose(js);
         return;
     }
-    jb_close(js);
+
+    const char *dl_name = DatalinkValueToName(p->datalink);
+
+    // Intentionally ignore the return value from SCJbSetString and proceed
+    // so the jb object is closed
+    (void)SCJbSetString(js, "linktype_name", dl_name == NULL ? "n/a" : dl_name);
+
+    SCJbClose(js);
 }
 
 /** \brief jsonify tcp flags field
  *  Only add 'true' fields in an attempt to keep things reasonably compact.
  */
-void EveTcpFlags(const uint8_t flags, JsonBuilder *js)
+void EveTcpFlags(const uint8_t flags, SCJsonBuilder *js)
 {
     if (flags & TH_SYN)
         JB_SET_TRUE(js, "syn");
@@ -477,19 +467,19 @@ void EveTcpFlags(const uint8_t flags, JsonBuilder *js)
         JB_SET_TRUE(js, "cwr");
 }
 
-void JsonAddrInfoInit(const Packet *p, enum OutputJsonLogDirection dir, JsonAddrInfo *addr)
+void JsonAddrInfoInit(const Packet *p, enum SCOutputJsonLogDirection dir, JsonAddrInfo *addr)
 {
     char srcip[46] = {0}, dstip[46] = {0};
     Port sp, dp;
 
     switch (dir) {
         case LOG_DIR_PACKET:
-            if (PKT_IS_IPV4(p)) {
+            if (PacketIsIPv4(p)) {
                 PrintInet(AF_INET, (const void *)GET_IPV4_SRC_ADDR_PTR(p),
                         srcip, sizeof(srcip));
                 PrintInet(AF_INET, (const void *)GET_IPV4_DST_ADDR_PTR(p),
                         dstip, sizeof(dstip));
-            } else if (PKT_IS_IPV6(p)) {
+            } else if (PacketIsIPv6(p)) {
                 PrintInet(AF_INET6, (const void *)GET_IPV6_SRC_ADDR(p),
                         srcip, sizeof(srcip));
                 PrintInet(AF_INET6, (const void *)GET_IPV6_DST_ADDR(p),
@@ -504,12 +494,12 @@ void JsonAddrInfoInit(const Packet *p, enum OutputJsonLogDirection dir, JsonAddr
         case LOG_DIR_FLOW:
         case LOG_DIR_FLOW_TOSERVER:
             if ((PKT_IS_TOSERVER(p))) {
-                if (PKT_IS_IPV4(p)) {
+                if (PacketIsIPv4(p)) {
                     PrintInet(AF_INET, (const void *)GET_IPV4_SRC_ADDR_PTR(p),
                             srcip, sizeof(srcip));
                     PrintInet(AF_INET, (const void *)GET_IPV4_DST_ADDR_PTR(p),
                             dstip, sizeof(dstip));
-                } else if (PKT_IS_IPV6(p)) {
+                } else if (PacketIsIPv6(p)) {
                     PrintInet(AF_INET6, (const void *)GET_IPV6_SRC_ADDR(p),
                             srcip, sizeof(srcip));
                     PrintInet(AF_INET6, (const void *)GET_IPV6_DST_ADDR(p),
@@ -518,12 +508,12 @@ void JsonAddrInfoInit(const Packet *p, enum OutputJsonLogDirection dir, JsonAddr
                 sp = p->sp;
                 dp = p->dp;
             } else {
-                if (PKT_IS_IPV4(p)) {
+                if (PacketIsIPv4(p)) {
                     PrintInet(AF_INET, (const void *)GET_IPV4_DST_ADDR_PTR(p),
                             srcip, sizeof(srcip));
                     PrintInet(AF_INET, (const void *)GET_IPV4_SRC_ADDR_PTR(p),
                             dstip, sizeof(dstip));
-                } else if (PKT_IS_IPV6(p)) {
+                } else if (PacketIsIPv6(p)) {
                     PrintInet(AF_INET6, (const void *)GET_IPV6_DST_ADDR(p),
                             srcip, sizeof(srcip));
                     PrintInet(AF_INET6, (const void *)GET_IPV6_SRC_ADDR(p),
@@ -535,12 +525,12 @@ void JsonAddrInfoInit(const Packet *p, enum OutputJsonLogDirection dir, JsonAddr
             break;
         case LOG_DIR_FLOW_TOCLIENT:
             if ((PKT_IS_TOCLIENT(p))) {
-                if (PKT_IS_IPV4(p)) {
+                if (PacketIsIPv4(p)) {
                     PrintInet(AF_INET, (const void *)GET_IPV4_SRC_ADDR_PTR(p),
                             srcip, sizeof(srcip));
                     PrintInet(AF_INET, (const void *)GET_IPV4_DST_ADDR_PTR(p),
                             dstip, sizeof(dstip));
-                } else if (PKT_IS_IPV6(p)) {
+                } else if (PacketIsIPv6(p)) {
                     PrintInet(AF_INET6, (const void *)GET_IPV6_SRC_ADDR(p),
                             srcip, sizeof(srcip));
                     PrintInet(AF_INET6, (const void *)GET_IPV6_DST_ADDR(p),
@@ -549,12 +539,12 @@ void JsonAddrInfoInit(const Packet *p, enum OutputJsonLogDirection dir, JsonAddr
                 sp = p->sp;
                 dp = p->dp;
             } else {
-                if (PKT_IS_IPV4(p)) {
+                if (PacketIsIPv4(p)) {
                     PrintInet(AF_INET, (const void *)GET_IPV4_DST_ADDR_PTR(p),
                             srcip, sizeof(srcip));
                     PrintInet(AF_INET, (const void *)GET_IPV4_SRC_ADDR_PTR(p),
                             dstip, sizeof(dstip));
-                } else if (PKT_IS_IPV6(p)) {
+                } else if (PacketIsIPv6(p)) {
                     PrintInet(AF_INET6, (const void *)GET_IPV6_DST_ADDR(p),
                             srcip, sizeof(srcip));
                     PrintInet(AF_INET6, (const void *)GET_IPV6_SRC_ADDR(p),
@@ -578,15 +568,17 @@ void JsonAddrInfoInit(const Packet *p, enum OutputJsonLogDirection dir, JsonAddr
         case IPPROTO_SCTP:
             addr->sp = sp;
             addr->dp = dp;
+            addr->log_port = true;
             break;
         default:
+            addr->log_port = false;
             break;
     }
 
-    if (SCProtoNameValid(IP_GET_IPPROTO(p))) {
-        strlcpy(addr->proto, known_proto[IP_GET_IPPROTO(p)], sizeof(addr->proto));
+    if (SCProtoNameValid(PacketGetIPProto(p))) {
+        strlcpy(addr->proto, known_proto[PacketGetIPProto(p)], sizeof(addr->proto));
     } else {
-        snprintf(addr->proto, sizeof(addr->proto), "%" PRIu32, IP_GET_IPPROTO(p));
+        snprintf(addr->proto, sizeof(addr->proto), "%" PRIu32, PacketGetIPProto(p));
     }
 }
 
@@ -617,7 +609,7 @@ static bool CalculateCommunityFlowIdv4(const Flow *f,
     dp = htons(dp);
 
     ipv4.seed = htons(seed);
-    if (ntohl(src) < ntohl(dst) || (src == dst && sp < dp)) {
+    if (ntohl(src) < ntohl(dst) || (src == dst && ntohs(sp) < ntohs(dp))) {
         ipv4.src = src;
         ipv4.dst = dst;
         ipv4.sp = sp;
@@ -635,7 +627,7 @@ static bool CalculateCommunityFlowIdv4(const Flow *f,
     if (SCSha1HashBuffer((const uint8_t *)&ipv4, sizeof(ipv4), hash, sizeof(hash)) == 1) {
         strlcpy((char *)base64buf, "1:", COMMUNITY_ID_BUF_SIZE);
         unsigned long out_len = COMMUNITY_ID_BUF_SIZE - 2;
-        if (Base64Encode(hash, sizeof(hash), base64buf+2, &out_len) == SC_BASE64_OK) {
+        if (SCBase64Encode(hash, sizeof(hash), base64buf + 2, &out_len) == SC_BASE64_OK) {
             return true;
         }
     }
@@ -666,7 +658,7 @@ static bool CalculateCommunityFlowIdv6(const Flow *f,
 
     ipv6.seed = htons(seed);
     int cmp_r = memcmp(&f->src, &f->dst, sizeof(f->src));
-    if ((cmp_r < 0) || (cmp_r == 0 && sp < dp)) {
+    if ((cmp_r < 0) || (cmp_r == 0 && ntohs(sp) < ntohs(dp))) {
         memcpy(&ipv6.src, &f->src.addr_data32, 16);
         memcpy(&ipv6.dst, &f->dst.addr_data32, 16);
         ipv6.sp = sp;
@@ -684,55 +676,54 @@ static bool CalculateCommunityFlowIdv6(const Flow *f,
     if (SCSha1HashBuffer((const uint8_t *)&ipv6, sizeof(ipv6), hash, sizeof(hash)) == 1) {
         strlcpy((char *)base64buf, "1:", COMMUNITY_ID_BUF_SIZE);
         unsigned long out_len = COMMUNITY_ID_BUF_SIZE - 2;
-        if (Base64Encode(hash, sizeof(hash), base64buf+2, &out_len) == SC_BASE64_OK) {
+        if (SCBase64Encode(hash, sizeof(hash), base64buf + 2, &out_len) == SC_BASE64_OK) {
             return true;
         }
     }
     return false;
 }
 
-static void CreateEveCommunityFlowId(JsonBuilder *js, const Flow *f, const uint16_t seed)
+static void CreateEveCommunityFlowId(SCJsonBuilder *js, const Flow *f, const uint16_t seed)
 {
     unsigned char buf[COMMUNITY_ID_BUF_SIZE];
     if (f->flags & FLOW_IPV4) {
         if (CalculateCommunityFlowIdv4(f, seed, buf)) {
-            jb_set_string(js, "community_id", (const char *)buf);
+            SCJbSetString(js, "community_id", (const char *)buf);
         }
     } else if (f->flags & FLOW_IPV6) {
         if (CalculateCommunityFlowIdv6(f, seed, buf)) {
-            jb_set_string(js, "community_id", (const char *)buf);
+            SCJbSetString(js, "community_id", (const char *)buf);
         }
     }
 }
 
-void CreateEveFlowId(JsonBuilder *js, const Flow *f)
+void CreateEveFlowId(SCJsonBuilder *js, const Flow *f)
 {
     if (f == NULL) {
         return;
     }
-    int64_t flow_id = FlowGetId(f);
-    jb_set_uint(js, "flow_id", flow_id);
+    uint64_t flow_id = FlowGetId(f);
+    SCJbSetUint(js, "flow_id", flow_id);
     if (f->parent_id) {
-        jb_set_uint(js, "parent_id", f->parent_id);
+        SCJbSetUint(js, "parent_id", f->parent_id);
     }
 }
 
-static inline void JSONFormatAndAddMACAddr(JsonBuilder *js, const char *key,
-                                   uint8_t *val, bool is_array)
+void JSONFormatAndAddMACAddr(SCJsonBuilder *js, const char *key, const uint8_t *val, bool is_array)
 {
     char eth_addr[19];
     (void) snprintf(eth_addr, 19, "%02x:%02x:%02x:%02x:%02x:%02x",
                     val[0], val[1], val[2], val[3], val[4], val[5]);
     if (is_array) {
-        jb_append_string(js, eth_addr);
+        SCJbAppendString(js, eth_addr);
     } else {
-        jb_set_string(js, key, eth_addr);
+        SCJbSetString(js, key, eth_addr);
     }
 }
 
 /* only required to traverse the MAC address set */
 typedef struct JSONMACAddrInfo {
-    JsonBuilder *src, *dst;
+    SCJsonBuilder *src, *dst;
 } JSONMACAddrInfo;
 
 static int MacSetIterateToJSON(uint8_t *val, MacSetSide side, void *data)
@@ -746,94 +737,148 @@ static int MacSetIterateToJSON(uint8_t *val, MacSetSide side, void *data)
     return 0;
 }
 
-static int CreateJSONEther(JsonBuilder *js, const Packet *p, const Flow *f)
+static int CreateJSONEther(
+        SCJsonBuilder *js, const Packet *p, const Flow *f, enum SCOutputJsonLogDirection dir)
 {
     if (p != NULL) {
         /* this is a packet context, so we need to add scalar fields */
-        if (p->ethh != NULL) {
-            jb_open_object(js, "ether");
-            uint8_t *src = p->ethh->eth_src;
-            uint8_t *dst = p->ethh->eth_dst;
+        if (PacketIsEthernet(p)) {
+            const EthernetHdr *ethh = PacketGetEthernet(p);
+            SCJbOpenObject(js, "ether");
+            SCJbSetUint(js, "ether_type", SCNtohs(ethh->eth_type));
+            const uint8_t *src;
+            const uint8_t *dst;
+            switch (dir) {
+                case LOG_DIR_FLOW_TOSERVER:
+                    // fallthrough
+                case LOG_DIR_FLOW:
+                    if (PKT_IS_TOCLIENT(p)) {
+                        src = ethh->eth_dst;
+                        dst = ethh->eth_src;
+                    } else {
+                        src = ethh->eth_src;
+                        dst = ethh->eth_dst;
+                    }
+                    break;
+                case LOG_DIR_FLOW_TOCLIENT:
+                    if (PKT_IS_TOSERVER(p)) {
+                        src = ethh->eth_dst;
+                        dst = ethh->eth_src;
+                    } else {
+                        src = ethh->eth_src;
+                        dst = ethh->eth_dst;
+                    }
+                    break;
+                case LOG_DIR_PACKET:
+                default:
+                    src = ethh->eth_src;
+                    dst = ethh->eth_dst;
+                    break;
+            }
             JSONFormatAndAddMACAddr(js, "src_mac", src, false);
             JSONFormatAndAddMACAddr(js, "dest_mac", dst, false);
-            jb_close(js);
+            SCJbClose(js);
+        } else if (f != NULL) {
+            /* When pseudopackets do not have associated ethernet metadata,
+               use the first set of mac addresses stored with their flow.
+               The first set of macs should come from the flow's first packet,
+               providing the most fitting representation of the event's ethernet. */
+            MacSet *ms = FlowGetStorageById(f, MacSetGetFlowStorageID());
+            if (ms != NULL && MacSetSize(ms) > 0) {
+                uint8_t *src = MacSetGetFirst(ms, MAC_SET_SRC);
+                uint8_t *dst = MacSetGetFirst(ms, MAC_SET_DST);
+                if (dst != NULL && src != NULL) {
+                    SCJbOpenObject(js, "ether");
+                    JSONFormatAndAddMACAddr(js, "src_mac", src, false);
+                    JSONFormatAndAddMACAddr(js, "dest_mac", dst, false);
+                    SCJbClose(js);
+                }
+            }
         }
     } else if (f != NULL) {
         /* we are creating an ether object in a flow context, so we need to
            append to arrays */
         MacSet *ms = FlowGetStorageById(f, MacSetGetFlowStorageID());
         if (ms != NULL && MacSetSize(ms) > 0) {
-            jb_open_object(js, "ether");
+            SCJbOpenObject(js, "ether");
             JSONMACAddrInfo info;
-            info.dst = jb_new_array();
-            info.src = jb_new_array();
+            info.dst = SCJbNewArray();
+            info.src = SCJbNewArray();
             int ret = MacSetForEach(ms, MacSetIterateToJSON, &info);
             if (unlikely(ret != 0)) {
                 /* should not happen, JSONFlowAppendMACAddrs is sane */
-                jb_free(info.dst);
-                jb_free(info.src);
-                jb_close(js);
+                SCJbFree(info.dst);
+                SCJbFree(info.src);
+                SCJbClose(js);
                 return ret;
             }
-            jb_close(info.dst);
-            jb_close(info.src);
-            jb_set_object(js, "dest_macs", info.dst);
-            jb_set_object(js, "src_macs", info.src);
-            jb_free(info.dst);
-            jb_free(info.src);
-            jb_close(js);
+            SCJbClose(info.dst);
+            SCJbClose(info.src);
+            /* case is handling netflow too so may need to revert */
+            if (dir == LOG_DIR_FLOW_TOCLIENT) {
+                SCJbSetObject(js, "dest_macs", info.src);
+                SCJbSetObject(js, "src_macs", info.dst);
+            } else {
+                DEBUG_VALIDATE_BUG_ON(dir != LOG_DIR_FLOW_TOSERVER && dir != LOG_DIR_FLOW);
+                SCJbSetObject(js, "dest_macs", info.dst);
+                SCJbSetObject(js, "src_macs", info.src);
+            }
+            SCJbFree(info.dst);
+            SCJbFree(info.src);
+            SCJbClose(js);
         }
     }
     return 0;
 }
 
-JsonBuilder *CreateEveHeader(const Packet *p, enum OutputJsonLogDirection dir,
+SCJsonBuilder *CreateEveHeader(const Packet *p, enum SCOutputJsonLogDirection dir,
         const char *event_type, JsonAddrInfo *addr, OutputJsonCtx *eve_ctx)
 {
     char timebuf[64];
     const Flow *f = (const Flow *)p->flow;
 
-    JsonBuilder *js = jb_new_object();
+    SCJsonBuilder *js = SCJbNewObject();
     if (unlikely(js == NULL)) {
         return NULL;
     }
 
     CreateIsoTimeString(p->ts, timebuf, sizeof(timebuf));
 
-    jb_set_string(js, "timestamp", timebuf);
+    SCJbSetString(js, "timestamp", timebuf);
 
     CreateEveFlowId(js, f);
 
     /* sensor id */
     if (sensor_id >= 0) {
-        jb_set_uint(js, "sensor_id", sensor_id);
+        SCJbSetUint(js, "sensor_id", sensor_id);
     }
 
     /* input interface */
     if (p->livedev) {
-        jb_set_string(js, "in_iface", p->livedev->dev);
+        SCJbSetString(js, "in_iface", p->livedev->dev);
     }
 
     /* pcap_cnt */
-    if (p->pcap_cnt != 0) {
-        jb_set_uint(js, "pcap_cnt", p->pcap_cnt);
+    uint64_t pcap_cnt = PcapPacketCntGet(p);
+    if (pcap_cnt != 0) {
+        SCJbSetUint(js, "pcap_cnt", pcap_cnt);
     }
 
     if (event_type) {
-        jb_set_string(js, "event_type", event_type);
+        SCJbSetString(js, "event_type", event_type);
     }
 
     /* vlan */
     if (p->vlan_idx > 0) {
-        jb_open_array(js, "vlan");
-        jb_append_uint(js, p->vlan_id[0]);
+        SCJbOpenArray(js, "vlan");
+        SCJbAppendUint(js, p->vlan_id[0]);
         if (p->vlan_idx > 1) {
-            jb_append_uint(js, p->vlan_id[1]);
+            SCJbAppendUint(js, p->vlan_id[1]);
         }
         if (p->vlan_idx > 2) {
-            jb_append_uint(js, p->vlan_id[2]);
+            SCJbAppendUint(js, p->vlan_id[2]);
         }
-        jb_close(js);
+        SCJbClose(js);
     }
 
     /* 5-tuple */
@@ -842,46 +887,63 @@ JsonBuilder *CreateEveHeader(const Packet *p, enum OutputJsonLogDirection dir,
         JsonAddrInfoInit(p, dir, &addr_info);
         addr = &addr_info;
     }
-    jb_set_string(js, "src_ip", addr->src_ip);
-    jb_set_uint(js, "src_port", addr->sp);
-    jb_set_string(js, "dest_ip", addr->dst_ip);
-    jb_set_uint(js, "dest_port", addr->dp);
-    jb_set_string(js, "proto", addr->proto);
+    if (addr->src_ip[0] != '\0') {
+        SCJbSetString(js, "src_ip", addr->src_ip);
+    }
+    if (addr->log_port) {
+        SCJbSetUint(js, "src_port", addr->sp);
+    }
+    if (addr->dst_ip[0] != '\0') {
+        SCJbSetString(js, "dest_ip", addr->dst_ip);
+    }
+    if (addr->log_port) {
+        SCJbSetUint(js, "dest_port", addr->dp);
+    }
+    if (addr->proto[0] != '\0') {
+        SCJbSetString(js, "proto", addr->proto);
+    }
+
+    /* ip version */
+    if (PacketIsIPv4(p)) {
+        SCJbSetUint(js, "ip_v", 4);
+    } else if (PacketIsIPv6(p)) {
+        SCJbSetUint(js, "ip_v", 6);
+    }
 
     /* icmp */
     switch (p->proto) {
         case IPPROTO_ICMP:
-            if (p->icmpv4h) {
-                jb_set_uint(js, "icmp_type", p->icmpv4h->type);
-                jb_set_uint(js, "icmp_code", p->icmpv4h->code);
+            if (PacketIsICMPv4(p)) {
+                SCJbSetUint(js, "icmp_type", p->icmp_s.type);
+                SCJbSetUint(js, "icmp_code", p->icmp_s.code);
             }
             break;
         case IPPROTO_ICMPV6:
-            if (p->icmpv6h) {
-                jb_set_uint(js, "icmp_type", p->icmpv6h->type);
-                jb_set_uint(js, "icmp_code", p->icmpv6h->code);
+            if (PacketIsICMPv6(p)) {
+                SCJbSetUint(js, "icmp_type", PacketGetICMPv6(p)->type);
+                SCJbSetUint(js, "icmp_code", PacketGetICMPv6(p)->code);
             }
             break;
     }
 
-    jb_set_string(js, "pkt_src", PktSrcToString(p->pkt_src));
+    SCJbSetString(js, "pkt_src", PktSrcToString(p->pkt_src));
 
     if (eve_ctx != NULL) {
-        EveAddCommonOptions(&eve_ctx->cfg, p, f, js);
+        EveAddCommonOptions(&eve_ctx->cfg, p, f, js, dir);
     }
 
     return js;
 }
 
-JsonBuilder *CreateEveHeaderWithTxId(const Packet *p, enum OutputJsonLogDirection dir,
+SCJsonBuilder *CreateEveHeaderWithTxId(const Packet *p, enum SCOutputJsonLogDirection dir,
         const char *event_type, JsonAddrInfo *addr, uint64_t tx_id, OutputJsonCtx *eve_ctx)
 {
-    JsonBuilder *js = CreateEveHeader(p, dir, event_type, addr, eve_ctx);
+    SCJsonBuilder *js = CreateEveHeader(p, dir, event_type, addr, eve_ctx);
     if (unlikely(js == NULL))
         return NULL;
 
     /* tx id for correlation with other events */
-    jb_set_uint(js, "tx_id", tx_id);
+    SCJbSetUint(js, "tx_id", tx_id);
 
     return js;
 }
@@ -895,7 +957,8 @@ int OutputJSONMemBufferCallback(const char *str, size_t size, void *data)
         MemBufferExpand(memb, wrapper->expand_by);
     }
 
-    MemBufferWriteRaw((*memb), str, size);
+    DEBUG_VALIDATE_BUG_ON(size > UINT32_MAX);
+    MemBufferWriteRaw((*memb), (const uint8_t *)str, (uint32_t)size);
     return 0;
 }
 
@@ -911,7 +974,7 @@ int OutputJSONBuffer(json_t *js, LogFileCtx *file_ctx, MemBuffer **buffer)
     }
 
     if (file_ctx->prefix) {
-        MemBufferWriteRaw((*buffer), file_ctx->prefix, file_ctx->prefix_len);
+        MemBufferWriteRaw((*buffer), (const uint8_t *)file_ctx->prefix, file_ctx->prefix_len);
     }
 
     OutputJSONMemBufferWrapper wrapper = {
@@ -928,35 +991,57 @@ int OutputJSONBuffer(json_t *js, LogFileCtx *file_ctx, MemBuffer **buffer)
     return 0;
 }
 
-int OutputJsonBuilderBuffer(JsonBuilder *js, OutputJsonThreadCtx *ctx)
+void OutputJsonFlush(OutputJsonThreadCtx *ctx)
+{
+    LogFileCtx *file_ctx = ctx->file_ctx;
+    LogFileFlush(file_ctx);
+}
+
+void OutputJsonBuilderBuffer(
+        ThreadVars *tv, const Packet *p, Flow *f, SCJsonBuilder *js, OutputJsonThreadCtx *ctx)
 {
     LogFileCtx *file_ctx = ctx->file_ctx;
     MemBuffer **buffer = &ctx->buffer;
     if (file_ctx->sensor_name) {
-        jb_set_string(js, "host", file_ctx->sensor_name);
+        SCJbSetString(js, "host", file_ctx->sensor_name);
     }
 
     if (file_ctx->is_pcap_offline) {
-        jb_set_string(js, "pcap_filename", PcapFileGetFilename());
+        SCJbSetString(js, "pcap_filename", PcapFileGetFilename());
     }
 
-    jb_close(js);
+    SCEveRunCallbacks(tv, p, f, js);
+
+    SCJbClose(js);
 
     MemBufferReset(*buffer);
 
     if (file_ctx->prefix) {
-        MemBufferWriteRaw((*buffer), file_ctx->prefix, file_ctx->prefix_len);
+        MemBufferWriteRaw((*buffer), (const uint8_t *)file_ctx->prefix, file_ctx->prefix_len);
     }
 
-    size_t jslen = jb_len(js);
-    if (MEMBUFFER_OFFSET(*buffer) + jslen >= MEMBUFFER_SIZE(*buffer)) {
-        MemBufferExpand(buffer, jslen);
+    size_t jslen = SCJbLen(js);
+    DEBUG_VALIDATE_BUG_ON(SCJbLen(js) > UINT32_MAX);
+    size_t remaining = MEMBUFFER_SIZE(*buffer) - MEMBUFFER_OFFSET(*buffer);
+    if (jslen >= remaining) {
+        size_t expand_by = jslen + 1 - remaining;
+        if (MemBufferExpand(buffer, (uint32_t)expand_by) < 0) {
+            if (!ctx->too_large_warning) {
+                /* Log a warning once, and include enough of the log
+                 * message to hopefully identify the event_type. */
+                char partial[120];
+                size_t partial_len = MIN(sizeof(partial), jslen);
+                memcpy(partial, SCJbPtr(js), partial_len - 1);
+                partial[partial_len - 1] = '\0';
+                SCLogWarning("Formatted JSON EVE record too large, will be dropped: %s", partial);
+                ctx->too_large_warning = true;
+            }
+            return;
+        }
     }
 
-    MemBufferWriteRaw((*buffer), jb_ptr(js), jslen);
+    MemBufferWriteRaw((*buffer), SCJbPtr(js), (uint32_t)jslen);
     LogFileWrite(file_ctx, *buffer);
-
-    return 0;
 }
 
 static inline enum LogFileType FileTypeFromConf(const char *typestr)
@@ -983,7 +1068,7 @@ static inline enum LogFileType FileTypeFromConf(const char *typestr)
 }
 
 static int LogFileTypePrepare(
-        OutputJsonCtx *json_ctx, enum LogFileType log_filetype, ConfNode *conf)
+        OutputJsonCtx *json_ctx, enum LogFileType log_filetype, SCConfNode *conf)
 {
 
     if (log_filetype == LOGFILE_TYPE_FILE || log_filetype == LOGFILE_TYPE_UNIX_DGRAM ||
@@ -991,12 +1076,11 @@ static int LogFileTypePrepare(
         if (SCConfLogOpenGeneric(conf, json_ctx->file_ctx, DEFAULT_LOG_FILENAME, 1) < 0) {
             return -1;
         }
-        OutputRegisterFileRotationFlag(&json_ctx->file_ctx->rotation_flag);
     }
 #ifdef HAVE_LIBHIREDIS
     else if (log_filetype == LOGFILE_TYPE_REDIS) {
         SCLogRedisInit();
-        ConfNode *redis_node = ConfNodeLookupChild(conf, "redis");
+        SCConfNode *redis_node = SCConfNodeLookupChild(conf, "redis");
         if (!json_ctx->file_ctx->sensor_name) {
             char hostname[1024];
             gethostname(hostname, 1023);
@@ -1011,19 +1095,24 @@ static int LogFileTypePrepare(
         }
     }
 #endif
-    else if (log_filetype == LOGFILE_TYPE_PLUGIN) {
+    else if (log_filetype == LOGFILE_TYPE_FILETYPE) {
         if (json_ctx->file_ctx->threaded) {
             /* Prepare for threaded log output. */
             if (!SCLogOpenThreadedFile(NULL, NULL, json_ctx->file_ctx)) {
                 return -1;
             }
         }
-        void *init_data = NULL;
-        if (json_ctx->plugin->Init(conf, json_ctx->file_ctx->threaded, &init_data) < 0) {
+        if (json_ctx->filetype->Init(conf, json_ctx->file_ctx->threaded,
+                    &json_ctx->file_ctx->filetype.init_data) < 0) {
             return -1;
         }
-        json_ctx->file_ctx->plugin.plugin = json_ctx->plugin;
-        json_ctx->file_ctx->plugin.init_data = init_data;
+        if (json_ctx->filetype->ThreadInit) {
+            if (json_ctx->filetype->ThreadInit(json_ctx->file_ctx->filetype.init_data, 0,
+                        &json_ctx->file_ctx->filetype.thread_data) < 0) {
+                return -1;
+            }
+        }
+        json_ctx->file_ctx->filetype.filetype = json_ctx->filetype;
     }
 
     return 0;
@@ -1034,7 +1123,7 @@ static int LogFileTypePrepare(
  * \param conf The configuration node for this output.
  * \return A LogFileCtx pointer on success, NULL on failure.
  */
-OutputInitResult OutputJsonInitCtx(ConfNode *conf)
+OutputInitResult OutputJsonInitCtx(SCConfNode *conf)
 {
     OutputInitResult result = { NULL, false };
     OutputCtx *output_ctx = NULL;
@@ -1047,13 +1136,13 @@ OutputInitResult OutputJsonInitCtx(ConfNode *conf)
 
     /* First lookup a sensor-name value in this outputs configuration
      * node (deprecated). If that fails, lookup the global one. */
-    const char *sensor_name = ConfNodeLookupChildValue(conf, "sensor-name");
+    const char *sensor_name = SCConfNodeLookupChildValue(conf, "sensor-name");
     if (sensor_name != NULL) {
         SCLogWarning("Found deprecated eve-log setting \"sensor-name\". "
                      "Please set sensor-name globally.");
     }
     else {
-        (void)ConfGet("sensor-name", &sensor_name);
+        (void)SCConfGet("sensor-name", &sensor_name);
     }
 
     json_ctx->file_ctx = LogFileNewCtx();
@@ -1080,25 +1169,23 @@ OutputInitResult OutputJsonInitCtx(ConfNode *conf)
     output_ctx->DeInit = OutputJsonDeInitCtx;
 
     if (conf) {
-        const char *output_s = ConfNodeLookupChildValue(conf, "filetype");
+        const char *output_s = SCConfNodeLookupChildValue(conf, "filetype");
         // Backwards compatibility
         if (output_s == NULL) {
-            output_s = ConfNodeLookupChildValue(conf, "type");
+            output_s = SCConfNodeLookupChildValue(conf, "type");
         }
 
         enum LogFileType log_filetype = FileTypeFromConf(output_s);
         if (log_filetype == LOGFILE_TYPE_NOTSET) {
-#ifdef HAVE_PLUGINS
-            SCEveFileType *plugin = SCPluginFindFileType(output_s);
-            if (plugin != NULL) {
-                log_filetype = LOGFILE_TYPE_PLUGIN;
-                json_ctx->plugin = plugin;
+            SCEveFileType *filetype = SCEveFindFileType(output_s);
+            if (filetype != NULL) {
+                log_filetype = LOGFILE_TYPE_FILETYPE;
+                json_ctx->filetype = filetype;
             } else
-#endif
                 FatalError("Invalid JSON output option: %s", output_s);
         }
 
-        const char *prefix = ConfNodeLookupChildValue(conf, "prefix");
+        const char *prefix = SCConfNodeLookupChildValue(conf, "prefix");
         if (prefix != NULL)
         {
             SCLogInfo("Using prefix '%s' for JSON messages", prefix);
@@ -1107,12 +1194,12 @@ OutputInitResult OutputJsonInitCtx(ConfNode *conf)
             {
                 FatalError("Failed to allocate memory for eve-log.prefix setting.");
             }
-            json_ctx->file_ctx->prefix_len = strlen(prefix);
+            json_ctx->file_ctx->prefix_len = (uint32_t)strlen(prefix);
         }
 
         /* Threaded file output */
-        const ConfNode *threaded = ConfNodeLookupChild(conf, "threaded");
-        if (threaded && threaded->val && ConfValIsTrue(threaded->val)) {
+        const SCConfNode *threaded = SCConfNodeLookupChild(conf, "threaded");
+        if (threaded && threaded->val && SCConfValIsTrue(threaded->val)) {
             SCLogConfig("Threaded EVE logging configured");
             json_ctx->file_ctx->threaded = true;
         } else {
@@ -1122,7 +1209,7 @@ OutputInitResult OutputJsonInitCtx(ConfNode *conf)
             goto error_exit;
         }
 
-        const char *sensor_id_s = ConfNodeLookupChildValue(conf, "sensor-id");
+        const char *sensor_id_s = SCConfNodeLookupChildValue(conf, "sensor-id");
         if (sensor_id_s != NULL) {
             if (StringParseUint64((uint64_t *)&sensor_id, 10, 0, sensor_id_s) < 0) {
                 FatalError("Failed to initialize JSON output, "
@@ -1132,8 +1219,8 @@ OutputInitResult OutputJsonInitCtx(ConfNode *conf)
         }
 
         /* Check if top-level metadata should be logged. */
-        const ConfNode *metadata = ConfNodeLookupChild(conf, "metadata");
-        if (metadata && metadata->val && ConfValIsFalse(metadata->val)) {
+        const SCConfNode *metadata = SCConfNodeLookupChild(conf, "metadata");
+        if (metadata && metadata->val && SCConfValIsFalse(metadata->val)) {
             SCLogConfig("Disabling eve metadata logging.");
             json_ctx->cfg.include_metadata = false;
         } else {
@@ -1141,23 +1228,31 @@ OutputInitResult OutputJsonInitCtx(ConfNode *conf)
         }
 
         /* Check if ethernet information should be logged. */
-        const ConfNode *ethernet = ConfNodeLookupChild(conf, "ethernet");
-        if (ethernet && ethernet->val && ConfValIsTrue(ethernet->val)) {
+        const SCConfNode *ethernet = SCConfNodeLookupChild(conf, "ethernet");
+        if (ethernet && ethernet->val && SCConfValIsTrue(ethernet->val)) {
             SCLogConfig("Enabling Ethernet MAC address logging.");
             json_ctx->cfg.include_ethernet = true;
         } else {
             json_ctx->cfg.include_ethernet = false;
         }
 
+        const SCConfNode *suriver = SCConfNodeLookupChild(conf, "suricata-version");
+        if (suriver && suriver->val && SCConfValIsTrue(suriver->val)) {
+            SCLogConfig("Enabling Suricata version logging.");
+            json_ctx->cfg.include_suricata_version = true;
+        } else {
+            json_ctx->cfg.include_suricata_version = false;
+        }
+
         /* See if we want to enable the community id */
-        const ConfNode *community_id = ConfNodeLookupChild(conf, "community-id");
-        if (community_id && community_id->val && ConfValIsTrue(community_id->val)) {
+        const SCConfNode *community_id = SCConfNodeLookupChild(conf, "community-id");
+        if (community_id && community_id->val && SCConfValIsTrue(community_id->val)) {
             SCLogConfig("Enabling eve community_id logging.");
             json_ctx->cfg.include_community_id = true;
         } else {
             json_ctx->cfg.include_community_id = false;
         }
-        const char *cid_seed = ConfNodeLookupChildValue(conf, "community-id-seed");
+        const char *cid_seed = SCConfNodeLookupChildValue(conf, "community-id-seed");
         if (cid_seed != NULL) {
             if (StringParseUint16(&json_ctx->cfg.community_id_seed,
                         10, 0, cid_seed) < 0)
@@ -1169,7 +1264,7 @@ OutputInitResult OutputJsonInitCtx(ConfNode *conf)
         }
 
         /* Do we have a global eve xff configuration? */
-        const ConfNode *xff = ConfNodeLookupChild(conf, "xff");
+        const SCConfNode *xff = SCConfNodeLookupChild(conf, "xff");
         if (xff != NULL) {
             json_ctx->xff_cfg = SCCalloc(1, sizeof(HttpXFFCfg));
             if (likely(json_ctx->xff_cfg != NULL)) {
@@ -1177,11 +1272,10 @@ OutputInitResult OutputJsonInitCtx(ConfNode *conf)
             }
         }
 
-        const char *pcapfile_s = ConfNodeLookupChildValue(conf, "pcap-file");
-        if (pcapfile_s != NULL && ConfValIsTrue(pcapfile_s)) {
+        const char *pcapfile_s = SCConfNodeLookupChildValue(conf, "pcap-file");
+        if (pcapfile_s != NULL && SCConfValIsTrue(pcapfile_s)) {
             json_ctx->file_ctx->is_pcap_offline =
-                (RunmodeGetCurrent() == RUNMODE_PCAP_FILE ||
-                 RunmodeGetCurrent() == RUNMODE_UNIX_SOCKET);
+                    (SCRunmodeGet() == RUNMODE_PCAP_FILE || SCRunmodeGet() == RUNMODE_UNIX_SOCKET);
         }
         json_ctx->file_ctx->type = log_filetype;
     }

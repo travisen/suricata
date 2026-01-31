@@ -17,10 +17,11 @@
 
 use std;
 use crate::core::*;
+use crate::direction::Direction;
 use crate::filetracker::*;
-use crate::filecontainer::*;
 
 use crate::smb::smb::*;
+use suricata_sys::sys::SCFileFlowFlagsToFlags;
 
 /// File tracking transaction. Single direction only.
 #[derive(Default, Debug)]
@@ -46,7 +47,7 @@ impl SMBTransactionFile {
 
     pub fn update_file_flags(&mut self, flow_file_flags: u16) {
         let dir_flag = if self.direction == Direction::ToServer { STREAM_TOSERVER } else { STREAM_TOCLIENT };
-        self.file_tracker.file_flags = unsafe { FileFlowFlagsToFlags(flow_file_flags, dir_flag) };
+        self.file_tracker.file_flags = unsafe { SCFileFlowFlagsToFlags(flow_file_flags, dir_flag) };
     }
 }
 
@@ -126,6 +127,8 @@ impl SMBState {
                     tx.tx_data.update_file_flags(self.state_data.file_flags);
                     d.update_file_flags(tx.tx_data.file_flags);
                 }
+                tx.tx_data.updated_tc = true;
+                tx.tx_data.updated_ts = true;
                 return Some(tx);
             }
         }
@@ -152,6 +155,8 @@ impl SMBState {
                     tx.tx_data.update_file_flags(self.state_data.file_flags);
                     d.update_file_flags(tx.tx_data.file_flags);
                 }
+                tx.tx_data.updated_tc = true;
+                tx.tx_data.updated_ts = true;
                 return Some(tx);
             }
         }
@@ -229,8 +234,8 @@ impl SMBState {
 }
 
 use crate::applayer::AppLayerGetFileState;
-#[no_mangle]
-pub unsafe extern "C" fn rs_smb_gettxfiles(_state: *mut std::ffi::c_void, tx: *mut std::ffi::c_void, direction: u8) -> AppLayerGetFileState {
+
+pub(super) unsafe extern "C" fn smb_gettxfiles(tx: *mut std::ffi::c_void, direction: u8) -> AppLayerGetFileState {
     let tx = cast_pointer!(tx, SMBTransaction);
     if let Some(SMBTransactionTypeData::FILE(ref mut tdf)) = tx.type_data {
         let tx_dir : u8 = tdf.direction.into();

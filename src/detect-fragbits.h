@@ -21,24 +21,8 @@
  * \author Breno Silva <breno.silva@gmail.com>
  */
 
-#ifndef __DETECT_FRAGBITS_H__
-#define __DETECT_FRAGBITS_H__
-
-
-/**
- * \struct DetectFragBitsData_
- * DetectFragBitsData_ is used to store fragbits: input value
- */
-
-/**
- * \typedef DetectFragBitsData
- * A typedef for DetectFragBitsData_
- */
-
-typedef struct DetectFragBitsData_ {
-    uint8_t fragbits; /**< IP fragbits */
-    uint8_t modifier; /**< !(1) +(2) *(3) modifiers */
-} DetectFragBitsData;
+#ifndef SURICATA_DETECT_FRAGBITS_H
+#define SURICATA_DETECT_FRAGBITS_H
 
 /**
  * Registration function for fragbits: keyword
@@ -46,4 +30,4 @@ typedef struct DetectFragBitsData_ {
 
 void DetectFragBitsRegister (void);
 
-#endif /*__DETECT_FRAGBITS_H__ */
+#endif /*SURICATA_DETECT_FRAGBITS_H */

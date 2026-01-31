@@ -153,6 +153,8 @@ this way, the receiver of the packet knows which fragments belong to
 the same packet. (IP ID does not take care of the order, in that case
 offset is used. It clarifies the order of the fragments.)
 
+id uses an :ref:`unsigned 16-bits integer <rules-integer-keywords>`.
+
 Format of id::
 
   id:<number>;
@@ -218,13 +220,16 @@ You can match on the following bits::
 Matching on this bits can be more specified with the following
 modifiers::
 
-  +         match on the specified bits, plus any others
+  +         match on all the specified bits (plus any others)
   *         match if any of the specified bits are set
-  !         match if the specified bits are not set
+  ! or -    match if not all the specified bits are set
+  =         match on all the specified bits and only them
+
+fragbits uses an :ref:`unsigned 16-bits integer <rules-integer-keywords>` with bitmasks.
 
 Format::
 
-  fragbits:[*+!]<[MDR]>;
+  fragbits:[*+!=]<[MDR]>;
 
 Example of fragbits in a rule:
 
@@ -242,6 +247,8 @@ Fragment option. The fragmentation offset field is convenient for
 reassembly. The id is used to determine which fragments belong to
 which packet and the fragmentation offset field clarifies the order of
 the fragments.
+
+fragoffset uses an :ref:`unsigned 16-bits integer <rules-integer-keywords>`.
 
 You can use the following modifiers::
 
@@ -322,9 +329,10 @@ The following modifiers can be set to change the match criteria:
 ========  ===================================
 Modifier  Description
 ========  ===================================
-``+``     match on the bits, plus any others
+``+``     match on all the bits, plus any others
 ``*``     match if any of the bits are set
-``!``     match if the bits are not set
+``!``     match if the bits are not set (or ``-``)
+``=``     match on all the bits, and only them
 ========  ===================================
 
 To handle writing rules for session initiation packets such as ECN where a SYN
@@ -332,37 +340,45 @@ packet is sent with CWR and ECE flags set, an option mask may be used by
 appending a comma and masked values. For example, a rule that checks for a SYN
 flag, regardless of the values of the reserved bits is ``tcp.flags:S,CE;``
 
+tcp.flags uses an :ref:`unsigned 8-bits integer <rules-integer-keywords>` with bitmasks.
+
 Format of tcp.flags::
 
     tcp.flags:[modifier]<test flags>[,<ignore flags>];
     tcp.flags:[!|*|+]<FSRPAUCE0>[,<FSRPAUCE>];
 
-Example::
+Example:
 
-  alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"Example tcp.flags sig"; \
- :example-rule-emphasis:`tcp.flags:FPU,CE;` classtype:misc-activity; sid:1; rev:1;)
+.. container:: example-rule
 
-It is also possible to use the `tcp.flags` content as a fast_pattern by using the `prefilter` keyword. For more information on `prefilter` usage see :doc:`prefilter-keywords`
+   alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"Example tcp.flags sig";
+   :example-rule-emphasis:`tcp.flags:FPU,CE;` classtype:misc-activity; sid:1; rev:1;)
 
-Example::
+It is also possible to use the `tcp.flags` content as a fast_pattern by using the `prefilter` keyword. For more information on `prefilter` usage see :doc:`prefilter-keywords`.
+Example:
 
-  alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"Example tcp.flags sig"; \
- :example-rule-emphasis:`tcp.flags:FPU,CE; prefilter;` classtype:misc-activity; sid:1; rev:1;)  
+.. container:: example-rule
+
+   alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"Example tcp.flags sig";
+   :example-rule-emphasis:`tcp.flags:FPU,CE; prefilter;` classtype:misc-activity; sid:1; rev:1;)
 
 seq
 ^^^
-The seq keyword can be used in a signature to check for a specific TCP
+The ``seq`` keyword can be used in a signature to check for a specific TCP
 sequence number. A sequence number is a number that is generated
 practically at random by both endpoints of a TCP-connection. The
 client and the server both create a sequence number, which increases
-with one with every byte that they send. So this sequence number is
+by one with every byte that they send. So this sequence number is
 different for both sides. This sequence number has to be acknowledged
-by both sides of the connection. Through sequence numbers, TCP
-handles acknowledgement, order and retransmission. Its number
-increases with every data-byte the sender has send. The seq helps
+by both sides of the connection.
+
+Through sequence numbers, TCP handles acknowledgement, order and retransmission.
+Its number increases with every data-byte the sender has sent. The seq helps
 keeping track of to what place in a data-stream a byte belongs. If the
-SYN flag is set at 1, than the sequence number of the first byte of
+SYN flag is set at 1, then the sequence number of the first byte of
 the data is this number plus 1 (so, 2).
+
+seq uses an :ref:`unsigned 32-bits integer <rules-integer-keywords>`.
 
 Example::
 
@@ -382,42 +398,49 @@ Example of seq in a packet (Wireshark):
 ack
 ^^^
 
-The ack is the acknowledgement of the receipt of all previous
+The ``ack`` keyword can be used in a signature to check for a specific TCP
+acknowledgement number.
+
+The ``ack`` is the acknowledgement of the receipt of all previous
 (data)-bytes send by the other side of the TCP-connection. In most
 occasions every packet of a TCP connection has an ACK flag after the
 first SYN and a ack-number which increases with the receipt of every
-new data-byte. The ack keyword can be used in a signature to check
-for a specific TCP acknowledgement number.
+new data-byte.
 
-Format of ack::
+ack uses an :ref:`unsigned 32-bits integer <rules-integer-keywords>`.
+
+Format of ``ack``::
 
   ack:1;
 
-Example of ack in a signature:
+Example of ``ack`` in a signature:
 
 .. container:: example-rule
 
     alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"GPL SCAN NULL"; flow:stateless; :example-rule-emphasis:`ack:0;` flags:0; seq:0; reference:arachnids,4; classtype:attempted-recon; sid:2100623; rev:7;)
 
-Example of ack in a packet (Wireshark):
+Example of ``ack`` in a packet (Wireshark):
 
 .. image:: header-keywords/Wireshark_ack.png
 
 window
 ^^^^^^
 
-The window keyword is used to check for a specific TCP window size.
+The ``window`` keyword is used to check for a specific TCP window size.
+
 The TCP window size is a mechanism that has control of the
 data-flow. The window is set by the receiver (receiver advertised
 window size) and indicates the amount of bytes that can be
 received. This amount of data has to be acknowledged by the receiver
-first, before the sender can send the same amount of new data. This
-mechanism is used to prevent the receiver from being overflowed by
-data. The value of the window size is limited and can be 2 to 65.535
-bytes. To make more use of your bandwidth you can use a bigger
-TCP-window.
+first, before the sender can send the same amount of new data.
 
-The format of the window keyword::
+This mechanism is used to prevent the receiver from being overflowed by
+data. The value of the window size is limited and can be 2 to 65.535 bytes.
+To make more use of your bandwidth you can use a bigger TCP-window.
+
+window uses an :ref:`unsigned 16-bits integer <rules-integer-keywords>`.
+
+The format of the window keyword is::
 
   window:[!]<number>;
 
@@ -433,9 +456,9 @@ tcp.mss
 Match on the TCP MSS option value. Will not match if the option is not
 present.
 
-tcp.mss uses an :ref:`unsigned 16-bit integer <rules-integer-keywords>`.
+``tcp.mss`` uses an :ref:`unsigned 16-bit integer <rules-integer-keywords>`.
 
-The format of the keyword::
+The format of the keyword is::
 
   tcp.mss:<min>-<max>;
   tcp.mss:[<|>]<number>;
@@ -446,6 +469,26 @@ Example rule:
 .. container:: example-rule
 
     alert tcp $EXTERNAL_NET any -> $HOME_NET any (flow:stateless; flags:S,12; :example-rule-emphasis:`tcp.mss:<536;` sid:1234; rev:5;)
+
+tcp.wscale
+^^^^^^^^^^
+
+Match on the TCP window scaling option value. Will not match if the option is not
+present.
+
+``tcp.wscale`` uses an :ref:`unsigned 8-bit integer <rules-integer-keywords>`.
+
+The format of the keyword is::
+
+  tcp.wscale:<min>-<max>;
+  tcp.wscale:[<|>]<number>;
+  tcp.wscale:<value>;
+
+Example rule:
+
+.. container:: example-rule
+
+    alert tcp $EXTERNAL_NET any -> $HOME_NET any (flow:stateless; flags:S,12; :example-rule-emphasis:`tcp.wscale:>10;` sid:1234; rev:5;)
 
 tcp.hdr
 ^^^^^^^
@@ -673,6 +716,8 @@ receiver has received the packet, it will send a reply using the same
 id so the sender will recognize it and connects it with the correct
 ICMP-request.
 
+icmp_id uses an :ref:`unsigned 16-bits integer <rules-integer-keywords>`.
+
 Format of the icmp_id keyword::
 
   icmp_id:<number>;
@@ -696,6 +741,8 @@ ICMP messages all have sequence numbers. This can be useful (together
 with the id) for checking which reply message belongs to which request
 message.
 
+icmp_seq uses an :ref:`unsigned 16-bits integer <rules-integer-keywords>`.
+
 Format of the icmp_seq keyword::
 
   icmp_seq:<number>;
@@ -710,6 +757,12 @@ Example of icmp_seq in a rule:
 .. container:: example-rule
 
     alert icmp $EXTERNAL_NET any -> $HOME_NET any (msg:"GPL SCAN Broadscan Smurf Scanner"; dsize:4; icmp_id:0; :example-rule-emphasis:`icmp_seq:0;` itype:8; classtype:attempted-recon; sid:2100478; rev:4;)
+
+.. note:: Some pcap analysis tools, like wireshark, may give both a little
+  endian and big endian value for ``icmp_seq``. The ``icmp_seq`` keyword
+  matches on the big endian value, this is due to Suricata using the network
+  byte order (big endian) to perform the match comparison.
+
 
 icmpv4.hdr
 ^^^^^^^^^^

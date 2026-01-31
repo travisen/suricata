@@ -17,16 +17,19 @@
 
 //! FTP parser and application layer module.
 
-use nom7::bytes::complete::{tag, take_until};
-use nom7::character::complete::{digit1, multispace0};
-use nom7::combinator::{complete, map_res, opt, verify};
-use nom7::sequence::{delimited, tuple};
-use nom7::{Err, IResult};
+use nom8::bytes::complete::{tag, take_until};
+use nom8::character::complete::{digit1, multispace0};
+use nom8::combinator::{complete, map_res, opt, verify};
+use nom8::sequence::delimited;
+use nom8::{Err, IResult, Parser};
 use std;
 use std::str;
 use std::str::FromStr;
 
+pub mod constant;
 pub mod event;
+pub mod ftp;
+pub mod response;
 
 // We transform an integer string into a i64, ignoring surrounding whitespaces
 // We look for a digit suite, and try to convert it.
@@ -36,18 +39,18 @@ fn getu16(i: &[u8]) -> IResult<&[u8], u16> {
     map_res(
         map_res(delimited(multispace0, digit1, multispace0), str::from_utf8),
         FromStr::from_str,
-    )(i)
+    ).parse(i)
 }
 
 fn parse_u16(i: &[u8]) -> IResult<&[u8], u16> {
-    map_res(map_res(digit1, str::from_utf8), u16::from_str)(i)
+    map_res(map_res(digit1, str::from_utf8), u16::from_str).parse(i)
 }
 
 // PORT 192,168,0,13,234,10
-pub fn ftp_active_port(i: &[u8]) -> IResult<&[u8], u16> {
-    let (i, _) = tag("PORT")(i)?;
-    let (i, _) = delimited(multispace0, digit1, multispace0)(i)?;
-    let (i, _) = tuple((
+fn ftp_active_port(i: &[u8]) -> IResult<&[u8], u16> {
+    let (i, _) = tag("PORT").parse(i)?;
+    let (i, _) = delimited(multispace0, digit1, multispace0).parse(i)?;
+    let (i, _) = (
         tag(","),
         digit1,
         tag(","),
@@ -55,19 +58,19 @@ pub fn ftp_active_port(i: &[u8]) -> IResult<&[u8], u16> {
         tag(","),
         digit1,
         tag(","),
-    ))(i)?;
-    let (i, part1) = verify(parse_u16, |&v| v <= std::u8::MAX as u16)(i)?;
-    let (i, _) = tag(",")(i)?;
-    let (i, part2) = verify(parse_u16, |&v| v <= std::u8::MAX as u16)(i)?;
+    ).parse(i)?;
+    let (i, part1) = verify(parse_u16, |&v| v <= u8::MAX as u16).parse(i)?;
+    let (i, _) = tag(",").parse(i)?;
+    let (i, part2) = verify(parse_u16, |&v| v <= u8::MAX as u16).parse(i)?;
     Ok((i, part1 * 256 + part2))
 }
 
 // 227 Entering Passive Mode (212,27,32,66,221,243).
-pub fn ftp_pasv_response(i: &[u8]) -> IResult<&[u8], u16> {
-    let (i, _) = tag("227")(i)?;
-    let (i, _) = take_until("(")(i)?;
-    let (i, _) = tag("(")(i)?;
-    let (i, _) = tuple((
+fn ftp_pasv_response(i: &[u8]) -> IResult<&[u8], u16> {
+    let (i, _) = tag("227").parse(i)?;
+    let (i, _) = take_until("(").parse(i)?;
+    let (i, _) = tag("(").parse(i)?;
+    let (i, _) = (
         digit1,
         tag(","),
         digit1,
@@ -76,18 +79,21 @@ pub fn ftp_pasv_response(i: &[u8]) -> IResult<&[u8], u16> {
         tag(","),
         digit1,
         tag(","),
-    ))(i)?;
-    let (i, part1) = verify(getu16, |&v| v <= std::u8::MAX as u16)(i)?;
-    let (i, _) = tag(",")(i)?;
-    let (i, part2) = verify(getu16, |&v| v <= std::u8::MAX as u16)(i)?;
+    ).parse(i)?;
+    let (i, part1) = verify(getu16, |&v| v <= u8::MAX as u16).parse(i)?;
+    let (i, _) = tag(",").parse(i)?;
+    let (i, part2) = verify(getu16, |&v| v <= u8::MAX as u16).parse(i)?;
     // may also be completed by a final point
-    let (i, _) = tag(")")(i)?;
-    let (i, _) = opt(complete(tag(".")))(i)?;
+    let (i, _) = tag(")").parse(i)?;
+    let (i, _) = opt(complete(tag("."))).parse(i)?;
     Ok((i, part1 * 256 + part2))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn rs_ftp_active_port(input: *const u8, len: u32) -> u16 {
+pub unsafe extern "C" fn SCFTPParsePort(input: *const u8, len: u32) -> u16 {
+    if input.is_null() {
+        return 0;
+    }
     let buf = build_slice!(input, len as usize);
     match ftp_active_port(buf) {
         Ok((_, dport)) => {
@@ -104,8 +110,11 @@ pub unsafe extern "C" fn rs_ftp_active_port(input: *const u8, len: u32) -> u16 {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn rs_ftp_pasv_response(input: *const u8, len: u32) -> u16 {
-    let buf = std::slice::from_raw_parts(input, len as usize);
+pub unsafe extern "C" fn SCFTPParsePortPasv(input: *const u8, len: u32) -> u16 {
+    if input.is_null() {
+        return 0;
+    }
+    let buf = build_slice!(input, len as usize);
     match ftp_pasv_response(buf) {
         Ok((_, dport)) => {
             return dport;
@@ -122,31 +131,34 @@ pub unsafe extern "C" fn rs_ftp_pasv_response(input: *const u8, len: u32) -> u16
 
 // 229 Entering Extended Passive Mode (|||48758|).
 pub fn ftp_epsv_response(i: &[u8]) -> IResult<&[u8], u16> {
-    let (i, _) = tag("229")(i)?;
-    let (i, _) = take_until("|||")(i)?;
-    let (i, _) = tag("|||")(i)?;
+    let (i, _) = tag("229").parse(i)?;
+    let (i, _) = take_until("|||").parse(i)?;
+    let (i, _) = tag("|||").parse(i)?;
     let (i, port) = getu16(i)?;
-    let (i, _) = tag("|)")(i)?;
-    let (i, _) = opt(complete(tag(".")))(i)?;
+    let (i, _) = tag("|)").parse(i)?;
+    let (i, _) = opt(complete(tag("."))).parse(i)?;
     Ok((i, port))
 }
 
 // EPRT |2|2a01:e34:ee97:b130:8c3e:45ea:5ac6:e301|41813|
-pub fn ftp_active_eprt(i: &[u8]) -> IResult<&[u8], u16> {
-    let (i, _) = tag("EPRT")(i)?;
-    let (i, _) = take_until("|")(i)?;
-    let (i, _) = tag("|")(i)?;
-    let (i, _) = take_until("|")(i)?;
-    let (i, _) = tag("|")(i)?;
-    let (i, _) = take_until("|")(i)?;
-    let (i, _) = tag("|")(i)?;
+fn ftp_active_eprt(i: &[u8]) -> IResult<&[u8], u16> {
+    let (i, _) = tag("EPRT").parse(i)?;
+    let (i, _) = take_until("|").parse(i)?;
+    let (i, _) = tag("|").parse(i)?;
+    let (i, _) = take_until("|").parse(i)?;
+    let (i, _) = tag("|").parse(i)?;
+    let (i, _) = take_until("|").parse(i)?;
+    let (i, _) = tag("|").parse(i)?;
     let (i, port) = getu16(i)?;
-    let (i, _) = tag("|")(i)?;
+    let (i, _) = tag("|").parse(i)?;
     Ok((i, port))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn rs_ftp_active_eprt(input: *const u8, len: u32) -> u16 {
+pub unsafe extern "C" fn SCFTPParsePortEprt(input: *const u8, len: u32) -> u16 {
+    if input.is_null() {
+        return 0;
+    }
     let buf = build_slice!(input, len as usize);
     match ftp_active_eprt(buf) {
         Ok((_, dport)) => {
@@ -162,8 +174,11 @@ pub unsafe extern "C" fn rs_ftp_active_eprt(input: *const u8, len: u32) -> u16 {
     return 0;
 }
 #[no_mangle]
-pub unsafe extern "C" fn rs_ftp_epsv_response(input: *const u8, len: u32) -> u16 {
-    let buf = std::slice::from_raw_parts(input, len as usize);
+pub unsafe extern "C" fn SCFTPParsePortEpsv(input: *const u8, len: u32) -> u16 {
+    if input.is_null() {
+        return 0;
+    }
+    let buf = build_slice!(input, len as usize);
     match ftp_epsv_response(buf) {
         Ok((_, dport)) => {
             return dport;

@@ -72,53 +72,6 @@ char *BytesToString(const uint8_t *bytes, size_t nbytes)
     return string;
 }
 
-/** \brief Turn byte array into string.
- *
- *  All non-printables are copied over, except for '\0', which is
- *  turned into literal \0 in the string.
- *
- *  \param bytes byte array
- *  \param nbytes number of bytes
- *  \param outstr[out] buffer to fill
- *  \param outlen size of outstr. Must be at least 2 * nbytes + 1 in size
- */
-void BytesToStringBuffer(const uint8_t *bytes, size_t nbytes, char *outstr, size_t outlen)
-{
-    DEBUG_VALIDATE_BUG_ON(outlen < (nbytes * 2 + 1));
-
-    size_t n = nbytes + 1;
-    size_t nulls = 0;
-
-    size_t u;
-    for (u = 0; u < nbytes; u++) {
-        if (bytes[u] == '\0')
-            nulls++;
-    }
-    n += nulls;
-
-    char string[n];
-
-    if (nulls == 0) {
-        /* no nulls */
-        memcpy(string, bytes, nbytes);
-        string[nbytes] = '\0';
-    } else {
-        /* nulls present */
-        char *dst = string;
-        for (u = 0; u < nbytes; u++) {
-            if (bytes[u] == '\0') {
-                *dst++ = '\\';
-                *dst++ = '0';
-            } else {
-                *dst++ = bytes[u];
-            }
-        }
-        *dst = '\0';
-    }
-
-    strlcpy(outstr, string, outlen);
-}
-
 int ByteExtractUint64(uint64_t *res, int e, uint16_t len, const uint8_t *bytes)
 {
     uint64_t i64;
@@ -140,6 +93,9 @@ int ByteExtractUint64(uint64_t *res, int e, uint16_t len, const uint8_t *bytes)
     return ret;
 }
 
+/**
+ * \retval Greater than 0 if successful, 0 or negative on failure.
+ */
 int ByteExtractUint32(uint32_t *res, int e, uint16_t len, const uint8_t *bytes)
 {
     uint64_t i64;
@@ -228,7 +184,7 @@ int ByteExtractString(uint64_t *res, int base, size_t len, const char *str, bool
         return -1;
     }
 
-    return (endptr - ptr);
+    return (int)(endptr - ptr);
 }
 
 int ByteExtractStringUint64(uint64_t *res, int base, size_t len, const char *str)
@@ -334,6 +290,9 @@ int StringParseUint32(uint32_t *res, int base, size_t len, const char *str)
     return ret;
 }
 
+/**
+ * \retval Greater than 0 if successful, 0 or negative on failure.
+ */
 int StringParseUint16(uint16_t *res, int base, size_t len, const char *str)
 {
     uint64_t i64;
@@ -358,6 +317,9 @@ int StringParseUint16(uint16_t *res, int base, size_t len, const char *str)
     return ret;
 }
 
+/**
+ * \retval Greater than 0 if successful, 0 or negative on failure.
+ */
 int StringParseUint8(uint8_t *res, int base, size_t len, const char *str)
 {
     uint64_t i64;
@@ -459,6 +421,9 @@ int StringParseU16RangeCheck(
     return ret;
 }
 
+/**
+ * \retval Greater than 0 if successful, 0 or negative on failure.
+ */
 int StringParseU8RangeCheck(
         uint8_t *res, int base, size_t len, const char *str, uint8_t min, uint8_t max)
 {
@@ -531,7 +496,7 @@ int ByteExtractStringSigned(int64_t *res, int base, size_t len, const char *str,
 
     //fprintf(stderr, "ByteExtractStringSigned: Extracted base %d: 0x%" PRIx64 "\n", base, *res);
 
-    return (endptr - ptr);
+    return (int)(endptr - ptr);
 }
 
 int ByteExtractStringInt64(int64_t *res, int base, size_t len, const char *str)
@@ -801,6 +766,36 @@ int StringParseI8RangeCheck(
     }
 
     return ret;
+}
+
+int HexToRaw(const uint8_t *in, size_t ins, uint8_t *out, size_t outs)
+{
+    if (ins < 2)
+        return -1;
+    if (ins % 2 != 0)
+        return -1;
+    if (outs != ins / 2)
+        return -1;
+
+    uint8_t hash[outs];
+    memset(hash, 0, outs);
+    size_t i, x;
+    for (x = 0, i = 0; i < ins; i += 2, x++) {
+        char buf[3] = { 0, 0, 0 };
+        buf[0] = in[i];
+        buf[1] = in[i + 1];
+
+        long value = strtol(buf, NULL, 16);
+        if (value >= 0 && value <= 255)
+            hash[x] = (uint8_t)value;
+        else {
+            SCLogError("hash byte out of range %ld", value);
+            return -1;
+        }
+    }
+
+    memcpy(out, hash, outs);
+    return 0;
 }
 
 /* UNITTESTS */

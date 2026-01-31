@@ -314,7 +314,13 @@ Event type: ``flow``::
         "age": 40,
         "state": "closed",
         "reason": "shutdown",
-        "alerted": true
+        "alerted": true,
+        "exception_policy": [
+          {
+            "target": "stream_midstream",
+            "policy": "ignore"
+          }
+        ]
       },
       "ether": {
         "dest_macs": [
@@ -464,7 +470,7 @@ flow, since one packet may match on several rules.
 Verdict
 ~~~~~~~
 
-An object containning info on the final action that will be applied to a given
+An object containing info on the final action that will be applied to a given
 packet, based on all the signatures triggered by it and other possible events
 (e.g., a flow drop). For that reason, it is possible for an alert with
 an action ``allowed`` to have a verdict ``drop``, in IPS mode, for instance, if
@@ -607,6 +613,52 @@ Examples
         "layer": "proto_parser"
       }
     }
+
+.. _eve-format-fileinfo:
+
+Event type: fileinfo
+--------------------
+
+Note that the checksum values for ``md5``, ``sha1``, and ``sha256`` are
+available when
+
+* The command line option ``disable-hashing`` was not used
+* There are no gaps (areas missing)
+
+Fields
+~~~~~~
+
+
+* "end: The offset of the last byte captured
+* "file_id": Integer value representing the id of a file that has been stored
+* "filename": Name of the file as observed in network traffic
+* "gaps": Boolean value indicating if there were gaps in the file
+* "magic": [optional, requires libmagic] The magic value for the file
+* "md5": Iff closed, md5 sum
+* "sha1": Iff closed, sha1 sum
+* "sha256": The sha256 value for the file, if available
+* "sid": One or more signature ids that triggered a `filestore`
+* "size": The observed size of the file, in bytes
+* "start": The offset of the first byte captured
+* "state": The state of the file when the record is written
+* "stored": Boolean value indicating whether the file has been stored
+* "storing": Boolean value indicating whether the file is in the process of being stored;
+  true when not yet stored
+* "tx_id": The transaction id in effect
+
+
+Offset values
+^^^^^^^^^^^^^
+
+This example shows the offset values from a ``fileinfo`` event -- note the ``http`` content
+range `start` and `end` value are replicated in the ``fileinfo`` fields::
+
+        http.content_range.raw: bytes 500-1000/146515
+        http.content_range.start: 500
+        http.content_range.end: 1000
+        http.content_range.size: 146515
+        fileinfo.start: 500
+        fileinfo.end: 1000
 
 .. _eve-format-http:
 
@@ -757,27 +809,32 @@ Event with ``dump-all-headers`` set to "both":
 Event type: DNS
 ---------------
 
-A new version of dns logging has been introduced to improve how dns answers
-are logged.
-
-With that new version, dns answers are logged in one event
-rather than an event for each answer.
-
-It's possible to customize how a dns answer will be logged with the following
-formats:
+DNS has 2 logging style that can be used together or independently:
 
 * "detailed": "rrname", "rrtype", "rdata" and "ttl" fields are logged for each answer
 * "grouped": answers logged are aggregated by their type (A, AAAA, NS, ...)
 
+If no format is chosen, "detailed" will be used by default.
+
 It will be still possible to use the old DNS logging format, you can control it
 with "version" option in dns configuration section.
+
+Suricata 8.0.0 introduces version 3 of the DNS logging format. This
+update unifies the DNS logging style used by ``dns`` events as well as
+the ``dns`` object in ``alert`` records. See :doc:`DNS Logging Changes
+for 8.0 <../../upgrade/8.0-dns-logging-changes>` for more details on the
+changes to logging format.
+
+.. note:: Suricata 7 style DNS logging can be retained by setting the
+          ``version`` field to 2, however this will be removed in
+          Suricata 9.
 
 Fields
 ~~~~~~
 
 Outline of fields seen in the different kinds of DNS events:
 
-* "type": Indicating DNS message type, can be "answer" or "query".
+* "type": Indicating DNS message type, can be "request" or "response".
 * "id": Identifier field
 * "version": Indicating DNS logging version in use
 * "flags": Indicating DNS answer flag, in hexadecimal (ex: 8180 , please note 0x is not output)
@@ -788,10 +845,11 @@ Outline of fields seen in the different kinds of DNS events:
 * "ra": Indicating in case of DNS answer flag, Recursion Available flag (ex: true if set)
 * "z": Indicating in case of DNS answer flag, Reserved bit (ex: true if set)
 * "rcode": (ex: NOERROR)
-* "rrname": Resource Record Name (ex: a domain name)
-* "rrtype": Resource Record Type (ex: A, AAAA, NS, PTR)
-* "rdata": Resource Data (ex: IP that domain name resolves to)
 * "ttl": Time-To-Live for this resource record
+* "queries": A list of query objects
+* "answers": A list of answer objects
+* "authorities": A list of authority objects
+* "additionals": A list of additional objects
 
 More complex DNS record types may log additional fields for resource data:
 
@@ -822,9 +880,7 @@ One can control which RR types are logged by using the "types" field in the
 suricata.yaml file. If this field is not specified, all RR types are logged.
 More than 50 values can be specified with this field as shown below:
 
-
-::
-
+Configuration::
 
     - eve-log:
         enabled: yes
@@ -838,6 +894,11 @@ More than 50 values can be specified with this field as shown below:
         types:
           - alert
           - dns:
+
+            # Logging format. In 8.0 version 3 is the default. Can be
+            # set to 2 to keep compatibility with Suricata 7.0.
+            # version: 3
+
             # Control logging of requests and responses:
             # - requests: enable logging of DNS queries
             # - responses: enable logging of DNS answers
@@ -859,25 +920,24 @@ More than 50 values can be specified with this field as shown below:
 Examples
 ~~~~~~~~
 
-Example of a DNS query for the IPv4 address of "twitter.com" (resource record type 'A'):
-
-::
-
+Example of a DNS query for the IPv4 address of "twitter.com" (resource record type 'A')::
 
   "dns": {
-      "type": "query",
+      "version": 3,
+      "type": "request",
       "id": 16000,
-      "rrname": "twitter.com",
-      "rrtype":"A"
+      "queries": [
+        {
+          "rrname": "twitter.com",
+          "rrtype": "A"
+        }
+      ]
   }
 
-Example of a DNS answer with "detailed" format:
-
-::
-
+Example of a DNS answer with "detailed" format::
 
   "dns": {
-      "version": 2,
+      "version": 3,
       "type": "answer",
       "id": 45444,
       "flags": "8180",
@@ -885,6 +945,12 @@ Example of a DNS answer with "detailed" format:
       "rd": true,
       "ra": true,
       "rcode": "NOERROR",
+      "queries": [
+        {
+          "rrname": "www.suricata.io",
+          "rrtype": "A"
+        }
+      ],
       "answers": [
         {
           "rrname": "www.suricata.io",
@@ -907,12 +973,10 @@ Example of a DNS answer with "detailed" format:
       ]
   }
 
-Example of a DNS answer with "grouped" format:
-
-::
+Example of a DNS answer with "grouped" format::
 
   "dns": {
-      "version": 2,
+      "version": 3,
       "type": "answer",
       "id": 18523,
       "flags": "8180",
@@ -929,26 +993,6 @@ Example of a DNS answer with "grouped" format:
           "suricata.io"
         ]
       }
-  }
-
-
-Example of a old DNS answer with an IPv4 (resource record type 'A') return:
-
-::
-
-
-  "dns": {
-      "type": "answer",
-      "id":16000,
-      "flags":"8180",
-      "qr":true,
-      "rd":true,
-      "ra":true,
-      "rcode":"NOERROR"
-      "rrname": "twitter.com",
-      "rrtype":"A",
-      "ttl":8,
-      "rdata": "199.16.156.6"
   }
 
 Event type: FTP
@@ -1045,13 +1089,21 @@ If extended logging is enabled the following fields are also included:
 * "notafter": The NotAfter field from the TLS certificate
 * "ja3": The JA3 fingerprint consisting of both a JA3 hash and a JA3 string
 * "ja3s": The JA3S fingerprint consisting of both a JA3 hash and a JA3 string
+* "ja4": The JA4 client fingerprint for TLS
+* "client_alpns": array of strings with ALPN values
+* "server_alpns": array of strings with ALPN values
 
-JA3 must be enabled in the Suricata config file (set 'app-layer.protocols.tls.ja3-fingerprints' to 'yes').
+JA3 and JA4 must be enabled in the Suricata config file (set 'app-layer.protocols.tls.ja3-fingerprints'/'app-layer.protocols.tls.ja4-fingerprints' to 'yes').
 
 In addition to this, custom logging also allows the following fields:
 
 * "certificate": The TLS certificate base64 encoded
 * "chain": The entire TLS certificate chain base64 encoded
+* "client_handshake": structure containing "version", "ciphers" ([u16]), "exts" ([u16]), "sig_algs" ([u16]),
+  for client hello supported cipher suites, extensions, and signature algorithms,
+  respectively, in the order that they're mentioned (ie. unsorted)
+* "server_handshake": structure containing "version", "chosen cipher", "exts" ([u16]), for server hello
+  in the order that they're mentioned (ie. unsorted)
 
 Examples
 ~~~~~~~~
@@ -1118,6 +1170,37 @@ Example of TFTP logging:
       "mode": "octet"
    }
 
+Event type: KRB5
+----------------
+
+KRB5 Fields
+~~~~~~~~~~~
+
+* "cname" (string): The client PrincipalName
+* "encryption" (string): Encryption used (only in AS-REP and TGS-REP)
+* "error_code" (string): Error code, if request has failed
+* "failed_request" (string): The request type for which the response had an error_code
+* "msg_type" (string): The message type: AS-REQ, AS-REP, etc...
+* "realm" (string): The server Realm
+* "sname" (string): The server PrincipalName
+* "ticket_encryption" (string): Encryption used for ticket
+* "ticket_weak_encryption" (boolean): Whether the encryption used for ticket is a weak cipher
+* "weak_encryption" (boolean): Whether the encryption used in AS-REP or TGS-REP is a weak cipher
+
+Examples of KRB5 logging:
+
+Pipe open::
+
+    "krb5": {
+      "msg_type": "KRB_TGS_REP",
+      "cname": "robin",
+      "realm": "CYLERA.LAB",
+      "sname": "ldap/dc01",
+      "encryption": "aes256-cts-hmac-sha1-96",
+      "weak_encryption": false,
+      "ticket_encryption": "aes256-cts-hmac-sha1-96",
+      "ticket_weak_encryption": false
+    }
 
 Event type: SMB
 ---------------
@@ -1147,6 +1230,21 @@ SMB Fields
 * "request.native_lm" (string): SMB1 native Lan Manager string
 * "response.native_os" (string): SMB1 native OS string
 * "response.native_lm" (string): SMB1 native Lan Manager string
+
+One can restrict which transactions are logged by using the "types" field in the
+suricata.yaml file. If this field is not specified, all transactions types are logged.
+9 values can be specified with this field as shown below:
+
+Configuration::
+
+    - eve-log:
+        enabled: yes
+        type: file
+        filename: eve.json
+        types:
+          - smb:
+              types: [file, tree_connect, negotiate, dcerpc, create,
+                session_setup, ioctl, rename, set_file_path_info, generic]
 
 Examples of SMB logging:
 
@@ -1323,6 +1421,74 @@ DCERPC BIND/BINDACK::
       ],
       "call_id": 2
     }
+
+NTLMSSP fields
+~~~~~~~~~~~~~~
+
+* "domain" (string): the Windows domain.
+* "user" (string): the user.
+* "host" (string): the host.
+* "version" (string): the client version.
+
+Example::
+
+    "ntlmssp": {
+      "domain": "VNET3",
+      "user": "administrator",
+      "host": "BLU",
+      "version": "60.230 build 13699 rev 188"
+    }
+
+More complete example::
+
+  "smb": {
+    "id": 3,
+    "dialect": "NT LM 0.12",
+    "command": "SMB1_COMMAND_SESSION_SETUP_ANDX",
+    "status": "STATUS_SUCCESS",
+    "status_code": "0x0",
+    "session_id": 2048,
+    "tree_id": 0,
+    "ntlmssp": {
+      "domain": "VNET3",
+      "user": "administrator",
+      "host": "BLU",
+      "version": "60.230 build 13699 rev 188"
+    },
+    "request": {
+      "native_os": "Unix",
+      "native_lm": "Samba 3.9.0-SVN-build-11572"
+    },
+    "response": {
+      "native_os": "Windows (TM) Code Name \"Longhorn\" Ultimate 5231",
+      "native_lm": "Windows (TM) Code Name \"Longhorn\" Ultimate 6.0"
+    }
+  }
+
+Kerberos fields
+~~~~~~~~~~~~~~~
+
+* "kerberos.realm" (string): the Kerberos Realm.
+* "kerberos.snames (array of strings): snames.
+
+Example::
+
+  "smb": {
+    "dialect": "2.10",
+    "command": "SMB2_COMMAND_SESSION_SETUP",
+    "status": "STATUS_SUCCESS",
+    "status_code": "0x0",
+    "session_id": 35184439197745,
+    "tree_id": 0,
+    "kerberos": {
+      "realm": "CONTOSO.LOCAL",
+      "snames": [
+        "cifs",
+        "DC1.contoso.local"
+      ]
+    }
+  }
+
 
 Event type: BITTORRENT-DHT
 --------------------------
@@ -1547,74 +1713,6 @@ Sample error responses::
     }
   }
 
-NTLMSSP fields
-~~~~~~~~~~~~~~
-
-* "domain" (string): the Windows domain.
-* "user" (string): the user.
-* "host" (string): the host.
-* "version" (string): the client version.
-
-Example::
-
-    "ntlmssp": {
-      "domain": "VNET3",
-      "user": "administrator",
-      "host": "BLU",
-      "version": "60.230 build 13699 rev 188"
-    }
-
-More complete example::
-
-  "smb": {
-    "id": 3,
-    "dialect": "NT LM 0.12",
-    "command": "SMB1_COMMAND_SESSION_SETUP_ANDX",
-    "status": "STATUS_SUCCESS",
-    "status_code": "0x0",
-    "session_id": 2048,
-    "tree_id": 0,
-    "ntlmssp": {
-      "domain": "VNET3",
-      "user": "administrator",
-      "host": "BLU",
-      "version": "60.230 build 13699 rev 188"
-    },
-    "request": {
-      "native_os": "Unix",
-      "native_lm": "Samba 3.9.0-SVN-build-11572"
-    },
-    "response": {
-      "native_os": "Windows (TM) Code Name \"Longhorn\" Ultimate 5231",
-      "native_lm": "Windows (TM) Code Name \"Longhorn\" Ultimate 6.0"
-    }
-  }
-
-Kerberos fields
-~~~~~~~~~~~~~~~
-
-* "kerberos.realm" (string): the Kerberos Realm.
-* "kerberos.snames (array of strings): snames.
-
-Example::
-
-  "smb": {
-    "dialect": "2.10",
-    "command": "SMB2_COMMAND_SESSION_SETUP",
-    "status": "STATUS_SUCCESS",
-    "status_code": "0x0",
-    "session_id": 35184439197745,
-    "tree_id": 0,
-    "kerberos": {
-      "realm": "CONTOSO.LOCAL",
-      "snames": [
-        "cifs",
-        "DC1.contoso.local"
-      ]
-    }
-  }
-
-
 Event type: SSH
 ----------------
 
@@ -1674,6 +1772,15 @@ Fields
 * "state": display state of the flow (include "new", "established", "closed", "bypassed")
 * "reason": mechanism that did trigger the end of the flow (include "timeout", "forced" and "shutdown")
 * "alerted": "true" or "false" depending if an alert has been seen on flow
+* "action": "pass" or "drop" depending if flow was PASS'ed or DROP'ed (no present if none)
+* "tx_cnt": number of transactions seen in the flow (only present if flow has an application layer)
+* "exception_policy": array consisting of exception policies that have been triggered by
+  the flow:
+
+    * "target": if an exception policy was triggered, what setting exceptions
+      led to this (cf. :ref:`Exception Policy - Specific Settings<eps_settings>`).
+    * "policy": if an exception policy was triggered, what policy was applied
+      (to the flow or to any packet(s) from it).
 
 Example ::
 
@@ -1694,7 +1801,14 @@ Example ::
     "bypass": "capture",
     "state": "bypassed",
     "reason": "timeout",
-    "alerted": false
+    "alerted": false,
+    "action": "pass",
+    "exception_policy": [
+      {
+        "target": "stream_midstream",
+        "policy": "pass_flow"
+      }
+    ]
   }
 
 Event type: RDP
@@ -1894,7 +2008,7 @@ Fields
 * "client_protocol_version.major", "client_protocol_version.minor": The RFB protocol version agreed by the client.
 * "authentication.security_type": Security type agreed upon in the logged transaction, e.g. ``2`` is VNC auth.
 * "authentication.vnc.challenge", "authentication.vnc.response": Only available when security type 2 is used. Contains the challenge and response byte buffers exchanged by the server and client as hex strings.
-* "authentication.security-result": Result of the authentication process (``OK``, ``FAIL`` or ``TOOMANY``).
+* "authentication.security_result": Result of the authentication process (``OK``, ``FAIL`` or ``TOOMANY``).
 * "screen_shared": Boolean value describing whether the client requested screen sharing.
 * "framebuffer": Contains metadata about the initial screen setup process. Only available when the handshake completed this far.
 * "framebuffer.width", "framebuffer.height": Screen size as offered by the server.
@@ -1924,7 +2038,7 @@ Example of RFB logging, with full VNC style authentication parameters:
         "challenge": "0805b790b58e967f2b350a0c99de3881",
         "response": "aecb26faeaaa62179636a5934bac1078"
       },
-      "security-result": "OK"
+      "security_result": "OK"
     },
     "screen_shared": false,
     "framebuffer": {
@@ -2494,8 +2608,10 @@ Requests are sent by the frontend (client), which would be the source of a pgsql
 flow. Some of the possible request messages are:
 
 * "startup_message": message sent to start a new PostgreSQL connection
-* "password_message": if password output for PGSQL is enabled in suricata.yaml,
+* "password": if password output for PGSQL is enabled in suricata.yaml,
   carries the password sent during Authentication phase
+* "password_redacted": set to true in case there is a password message, but its
+  logging is disabled
 * "simple_query": issued SQL command during simple query subprotocol. PostgreSQL
   identifies specific sets of commands that change the set of expected messages
   to be exchanged as subprotocols.
@@ -2506,6 +2622,10 @@ flow. Some of the possible request messages are:
   transaction where the query was sent.
 * "message": requests which do not have meaningful payloads are logged like this,
   where the field value is the message type
+* "copy_data_in": object. Part of the CopyIn subprotocol, consolidated data
+  resulting from a ``Copy From Stdin`` query
+* "copy_done": string. Similar to ``command_completed`` but sent after the
+  frontend finishes sending a batch of ``CopyData`` messages
 
 There are several different authentication messages possible, based on selected
 authentication method. (e.g. the SASL authentication will have a set of
@@ -2532,6 +2652,14 @@ pgsql flow. Some of the possible request messages are:
 * "data_size": in bytes. When one or many ``DataRow`` messages are parsed, the
   total size in bytes of the data returned
 * "command_completed": string. Informs the command just completed by the backend
+* "copy_in_response": object. Indicates the beginning of a CopyIn mode, shows
+  how many columns will be copied from STDIN (``columns`` field)
+* "copy_out_response": object. Indicates the beginning of a CopyTo mode, shows
+  how many columns will be copied to STDOUT (``columns`` field)
+* "copy_data_out": object. Consolidated data on the CopyData sent by the backend
+  in a CopyOut transaction
+* "copy_done": string. Similar to ``command_completed`` but sent after the
+  backend finishes sending a batch of ``CopyData`` messages
 * "ssl_accepted": bool. With this event, the initial PGSQL SSL Handshake
   negotiation is complete in terms of tracking and logging. The session will be
   upgraded to use TLS encryption
@@ -2687,6 +2815,10 @@ References:
 .. _PostgreSQL message format - BackendKeyData: https://www.postgresql.org/docs
    /current/protocol-message-formats.html#PROTOCOL-MESSAGE-FORMATS-BACKENDKEYDATA
 
+Field Reference
+~~~~~~~~~~~~~~~
+
+.. include:: ../../_generated/pgsql.rst
 
 Event type: IKE
 ---------------
@@ -2915,11 +3047,14 @@ Fields
 * "cyu": List of found CYUs in the packet
 * "cyu[].hash": CYU hash
 * "cyu[].string": CYU string
+* "ja3": The JA3 fingerprint consisting of both a JA3 hash and a JA3 string
+* "ja3s": The JA3S fingerprint consisting of both a JA3 hash and a JA3 string
+* "ja4": The JA4 client fingerprint for QUIC
 
 Examples
 ~~~~~~~~
 
-Example of QUIC logging with a CYU hash:
+Example of QUIC logging with CYU, JA3 and JA4 hashes (note that the JA4 hash is only an example to illustrate the format and does not correlate with the others):
 
 ::
 
@@ -2931,8 +3066,18 @@ Example of QUIC logging with a CYU hash:
             "hash": "7b3ceb1adc974ad360cfa634e8d0a730",
             "string": "46,PAD-SNI-STK-SNO-VER-CCS-NONC-AEAD-UAID-SCID-TCID-PDMD-SMHL-ICSL-NONP-PUBS-MIDS-SCLS-KEXS-XLCT-CSCT-COPT-CCRT-IRTT-CFCW-SFCW"
         }
-    ]
+    ],
+    "ja3": {
+        "hash": "324f8c50e267adba4b5dd06c964faf67",
+        "string": "771,4865-4866-4867,51-43-13-27-17513-16-45-0-10-57,29-23-24,"
+    },
+    "ja4": "q13d0310h3_55b375c5d22e_cd85d2d88918"
   }
+
+Output Reference
+~~~~~~~~~~~~~~~~
+
+.. include:: ../../_generated/quic.rst
 
 Event type: DHCP
 -----------------
@@ -3001,4 +3146,108 @@ Example of DHCP log entry (extended logging enabled):
     "rebinding_time":43200,
     "client_id":"54:ee:75:51:e0:66",
     "dns_servers":["192.168.1.50","192.168.1.49"]
+  }
+
+Event type: ARP
+---------------
+
+Fields
+~~~~~~
+
+* "hw_type": network link protocol type
+* "proto_type": internetwork protocol for which the request is intended
+* "opcode": operation that the sender is performing (e.g. request, response)
+* "src_mac": source MAC address
+* "src_ip": source IP address
+* "dest_mac": destination MAC address
+* "dest_ip": destination IP address
+
+Examples
+~~~~~~~~
+
+Example of ARP logging: request and response
+
+::
+
+  "arp": {
+    "hw_type": "ethernet",
+    "proto_type": "ipv4",
+    "opcode": "request",
+    "src_mac": "00:1a:6b:6c:0c:cc",
+    "src_ip": "10.10.10.2",
+    "dest_mac": "00:00:00:00:00:00",
+    "dest_ip": "10.10.10.1"
+  }
+
+::
+
+  "arp": {
+    "hw_type": "ethernet",
+    "proto_type": "ipv4",
+    "opcode": "reply",
+    "src_mac": "00:1a:6b:6c:0c:cc",
+    "src_ip": "10.10.10.2",
+    "dest_mac": "00:1d:09:f0:92:ab",
+    "dest_ip": "10.10.10.1"
+  }
+
+Event type: POP3
+----------------
+
+Fields
+~~~~~~
+
+- "request" (optional): a request sent by the pop3 client
+   * "request.command" (string): a pop3 command, for example "USER" or
+     "STAT", if unknown but valid `UnknownCommand` event will be set
+   * "request.args" (array of strings): pop3 command arguments, if
+     incorrect number for command `IncorrectArgumentCount` event will be set
+- "response" (optional): a response sent by the pop3 server
+   * "response.success" (boolean): whether the response is successful, ie. +OK
+   * "response.status" (string): the response status, one of "OK" or "ERR"
+   * "response.header" (string): the content of the first line of the response
+   * "response.data" (array of strings): the response data, which may contain multiple lines
+
+Example of POP3 logging:
+
+::
+
+  "pop3": {
+      "request": {
+          "command": "USER",
+          "args": ["user@example.com"],
+      },
+      "response": {
+          "success": true,
+          "status": "OK",
+          "header": "+OK password required for \"user@example.com\"",
+          "data": []
+      }
+   }
+
+Event type: Netflow
+-------------------
+
+Fields
+~~~~~~
+
+* "age": duration of the flow (measured from timestamp of last packet and first packet)
+* "bytes": total number of bytes to client
+* "end": date of the end of the flow
+* "max_ttl": maximum observed Time-To-Live (TTL) value
+* "min_ttl": minimum observed TTL value
+* "pkts": total number of packets to client
+* "start": date of start of the flow
+* "tx_cnt": number of transactions seen in the flow (only present if flow has an application layer)
+
+Example ::
+
+ "netflow": {
+    "pkts": 1,
+    "bytes": 160,
+    "start": "2013-02-26T17:02:42.907340-0500",
+    "end": "2013-02-26T17:02:42.907340-0500",
+    "age": 0,
+    "min_ttl": 1,
+    "max_ttl": 1
   }

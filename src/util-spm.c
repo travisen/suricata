@@ -53,6 +53,7 @@
 #include "util-spm-bs2bm.h"
 #include "util-spm-bm.h"
 #include "util-spm-hs.h"
+#include "util-spm-mm.h"
 #include "util-clock.h"
 #ifdef BUILD_HYPERSCAN
 #include "hs.h"
@@ -68,7 +69,7 @@ SpmTableElmt spm_table[SPM_TABLE_SIZE];
 uint8_t SinglePatternMatchDefaultMatcher(void)
 {
     const char *spm_algo;
-    if ((ConfGet("spm-algo", &spm_algo)) == 1) {
+    if ((SCConfGet("spm-algo", &spm_algo)) == 1) {
         if (spm_algo != NULL) {
             if (strcmp("auto", spm_algo) == 0) {
                 goto default_matcher;
@@ -89,6 +90,12 @@ uint8_t SinglePatternMatchDefaultMatcher(void)
                        "not compiled into Suricata.");
         }
 #endif
+#ifndef HAVE_MEMMEM
+        if ((spm_algo != NULL) && (strcmp(spm_algo, "mm") == 0)) {
+            FatalError("Memmem (mm) support for spm-algo is "
+                       "not compiled into Suricata.");
+        }
+#endif
         SCLogError("Invalid spm algo supplied "
                    "in the yaml conf file: \"%s\"",
                 spm_algo);
@@ -98,8 +105,8 @@ uint8_t SinglePatternMatchDefaultMatcher(void)
 default_matcher:
     /* When Suricata is built with Hyperscan support, default to using it for
      * SPM. */
-#ifdef BUILD_HYPERSCAN
-    #ifdef HAVE_HS_VALID_PLATFORM
+#if defined(BUILD_HYPERSCAN)
+#ifdef HAVE_HS_VALID_PLATFORM
     /* Enable runtime check for SSSE3. Do not use Hyperscan SPM matcher if
      * check is not successful. */
         if (hs_valid_platform() != HS_SUCCESS) {
@@ -110,9 +117,11 @@ default_matcher:
         } else {
             return SPM_HS;
         }
-    #else
-        return SPM_HS;
-    #endif
+#else
+    return SPM_HS;
+#endif
+#elif defined(HAVE_MEMMEM)
+    return SPM_MM;
 #else
     /* Otherwise, default to Boyer-Moore */
     return SPM_BM;
@@ -124,6 +133,7 @@ void SpmTableSetup(void)
     memset(spm_table, 0, sizeof(spm_table));
 
     SpmBMRegister();
+    SpmMMRegister();
 #ifdef BUILD_HYPERSCAN
     #ifdef HAVE_HS_VALID_PLATFORM
         if (hs_valid_platform() == HS_SUCCESS) {
@@ -221,23 +231,6 @@ uint8_t *Bs2bmSearch(const uint8_t *text, uint32_t textlen,
 }
 
 /**
- * \brief Search a pattern in the text using the Bs2Bm nocase algorithm (build a bad characters array)
- *
- * \param text Text to search in
- * \param textlen length of the text
- * \param needle pattern to search for
- * \param needlelen length of the pattern
- */
-uint8_t *Bs2bmNocaseSearch(const uint8_t *text, uint32_t textlen,
-        const uint8_t *needle, uint16_t needlelen)
-{
-    uint8_t badchars[ALPHABET_SIZE];
-    Bs2BmBadchars(needle, needlelen, badchars);
-
-    return Bs2BmNocase(text, textlen, needle, needlelen, badchars);
-}
-
-/**
  * \brief Search a pattern in the text using Boyer Moore algorithm
  *        (build a bad character shifts array and good prefixes shift array)
  *
@@ -283,9 +276,6 @@ uint8_t *BoyerMooreNocaseSearch(const uint8_t *text, uint32_t textlen,
 /** Comment out this if you want stats
  *  #define ENABLE_SEARCH_STATS 1
  */
-
-/* Number of times to repeat the search (for stats) */
-#define STATS_TIMES 1000000
 
 /**
  * \brief Unittest helper function wrappers for the search algorithms
@@ -420,6 +410,9 @@ static uint8_t *BoyerMooreNocaseWrapper(uint8_t *text, uint8_t *in_needle, int t
 }
 
 #ifdef ENABLE_SEARCH_STATS
+/* Number of times to repeat the search (for stats) */
+#define STATS_TIMES 1000000
+
 /**
  * \brief Unittest helper function wrappers for the search algorithms
  * \param text pointer to the buffer to search in
@@ -2570,28 +2563,18 @@ static int SpmSearchTest01(void) {
         {"foo", 3, "Foo FOo fOo foO FOO foo", 23, 0, 20},
     };
 
-    int ret = 1;
-
-    uint8_t matcher;
-    for (matcher = 0; matcher < SPM_TABLE_SIZE; matcher++) {
+    for (uint8_t matcher = 0; matcher < SPM_TABLE_SIZE; matcher++) {
         const SpmTableElmt *m = &spm_table[matcher];
         if (m->name == NULL) {
             continue;
         }
-        printf("matcher: %s\n", m->name);
-
-        uint32_t i;
-        for (i = 0; i < sizeof(data)/sizeof(data[0]); i++) {
+        for (uint32_t i = 0; i < sizeof(data) / sizeof(data[0]); i++) {
             const SpmTestData *d = &data[i];
-            if (SpmTestSearch(d, matcher) == 0) {
-                printf("  test %" PRIu32 ": fail\n", i);
-                ret = 0;
-            }
+            FAIL_IF(SpmTestSearch(d, matcher) == 0);
         }
-        printf("  %" PRIu32 " tests passed\n", i);
     }
 
-    return ret;
+    PASS;
 }
 
 static int SpmSearchTest02(void) {

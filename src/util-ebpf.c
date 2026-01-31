@@ -30,7 +30,6 @@
  *
  */
 
-#define PCAP_DONT_INCLUDE_PCAP_BPF_H 1
 #define SC_PCAP_DONT_INCLUDE_PCAP_H 1
 
 #include "suricata-common.h"
@@ -44,7 +43,7 @@
 #include "util-ebpf.h"
 #include "util-affinity.h"
 #include "util-cpu.h"
-#include "util-device.h"
+#include "util-device-private.h"
 
 #include "device-storage.h"
 #include "flow-storage.h"
@@ -381,7 +380,7 @@ int EBPFLoadFile(const char *iface, const char *path, const char * section,
         }
     }
 
-    if (found == false) {
+    if (!found) {
         SCLogError("No section '%s' in '%s' file. Will not be able to use the file", section, path);
         return -1;
     }
@@ -587,7 +586,6 @@ void EBPFBypassFree(void *data)
         SCFree(eb->key[1]);
     }
     SCFree(eb);
-    return;
 }
 
 /**
@@ -656,7 +654,7 @@ bool EBPFBypassUpdate(Flow *f, void *data, time_t tsec)
     bool activity = EBPFBypassCheckHalfFlow(f, fc, eb, eb->key[0], 0);
     activity |= EBPFBypassCheckHalfFlow(f, fc, eb, eb->key[1], 1);
     if (!activity) {
-        SCLogDebug("Delete entry: %u (%ld)", FLOW_IS_IPV6(f), FlowGetId(f));
+        SCLogDebug("Delete entry: %u (%" PRIu64 ")", FLOW_IS_IPV6(f), FlowGetId(f));
         /* delete the entries if no time update */
         EBPFDeleteKey(eb->mapfd, eb->key[0]);
         EBPFDeleteKey(eb->mapfd, eb->key[1]);
@@ -839,7 +837,7 @@ static int EBPFForEachFlowV6Table(ThreadVars *th_v,
             bytes_cnt += BPF_PERCPU(values_array, i).bytes;
         }
         /* Get the corresponding Flow in the Flow table to compare and update
-         * its counters  and lastseen if needed */
+         * its counters and lastseen if needed */
         FlowKey flow_key;
         if (tcfg->mode == AFP_MODE_XDP_BYPASS) {
             flow_key.sp = ntohs(next_key.port16[0]);
@@ -968,7 +966,7 @@ static void EBPFRedirectMapAddCPU(int i, void *data)
     }
 }
 
-void EBPFBuildCPUSet(ConfNode *node, char *iface)
+void EBPFBuildCPUSet(SCConfNode *node, char *iface)
 {
     uint32_t key0 = 0;
     int mapfd = EBPFGetMapFDByName(iface, "cpus_count");
@@ -982,9 +980,10 @@ void EBPFBuildCPUSet(ConfNode *node, char *iface)
                         BPF_ANY);
         return;
     }
-    BuildCpusetWithCallback("xdp-cpu-redirect", node,
-            EBPFRedirectMapAddCPU,
-            iface);
+    if (BuildCpusetWithCallback("xdp-cpu-redirect", node, EBPFRedirectMapAddCPU, iface) < 0) {
+        SCLogWarning("Failed to parse XDP CPU redirect configuration");
+        return;
+    }
     bpf_map_update_elem(mapfd, &key0, &g_redirect_iface_cpu_counter,
                         BPF_ANY);
 }
@@ -993,7 +992,7 @@ void EBPFBuildCPUSet(ConfNode *node, char *iface)
  * Setup peer interface in XDP system
  *
  * Ths function set up the peer interface in the XDP maps used by the
- * bypass filter. The first map tx_peer has  type device map and is
+ * bypass filter. The first map tx_peer has type device map and is
  * used to store the peer. The second map tx_peer_int is used by the
  * code to check if we have a peer defined for this interface.
  *

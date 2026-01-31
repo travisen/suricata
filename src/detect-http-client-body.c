@@ -37,6 +37,7 @@
 #include "detect.h"
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-state.h"
 #include "detect-engine-prefilter.h"
@@ -67,8 +68,8 @@ static int DetectHttpClientBodySetupSticky(DetectEngineCtx *de_ctx, Signature *s
 #ifdef UNITTESTS
 static void DetectHttpClientBodyRegisterTests(void);
 #endif
-static void DetectHttpClientBodySetupCallback(const DetectEngineCtx *de_ctx,
-                                              Signature *s);
+static void DetectHttpClientBodySetupCallback(
+        const DetectEngineCtx *de_ctx, Signature *s, const DetectBufferType *map);
 static int g_http_client_body_buffer_id = 0;
 
 static uint8_t DetectEngineInspectBufferHttpBody(DetectEngineCtx *de_ctx,
@@ -84,16 +85,17 @@ static int PrefilterMpmHttpRequestBodyRegister(DetectEngineCtx *de_ctx, SigGroup
 void DetectHttpClientBodyRegister(void)
 {
     /* http_client_body content modifier */
-    sigmatch_table[DETECT_AL_HTTP_CLIENT_BODY].name = "http_client_body";
-    sigmatch_table[DETECT_AL_HTTP_CLIENT_BODY].desc = "content modifier to match only on HTTP request-body";
-    sigmatch_table[DETECT_AL_HTTP_CLIENT_BODY].url = "/rules/http-keywords.html#http-client-body";
-    sigmatch_table[DETECT_AL_HTTP_CLIENT_BODY].Setup = DetectHttpClientBodySetup;
+    sigmatch_table[DETECT_HTTP_CLIENT_BODY].name = "http_client_body";
+    sigmatch_table[DETECT_HTTP_CLIENT_BODY].desc =
+            "content modifier to match only on HTTP request-body";
+    sigmatch_table[DETECT_HTTP_CLIENT_BODY].url = "/rules/http-keywords.html#http-client-body";
+    sigmatch_table[DETECT_HTTP_CLIENT_BODY].Setup = DetectHttpClientBodySetup;
 #ifdef UNITTESTS
-    sigmatch_table[DETECT_AL_HTTP_CLIENT_BODY].RegisterTests = DetectHttpClientBodyRegisterTests;
+    sigmatch_table[DETECT_HTTP_CLIENT_BODY].RegisterTests = DetectHttpClientBodyRegisterTests;
 #endif
-    sigmatch_table[DETECT_AL_HTTP_CLIENT_BODY].flags |= SIGMATCH_NOOPT ;
-    sigmatch_table[DETECT_AL_HTTP_CLIENT_BODY].flags |= SIGMATCH_INFO_CONTENT_MODIFIER;
-    sigmatch_table[DETECT_AL_HTTP_CLIENT_BODY].alternative = DETECT_HTTP_REQUEST_BODY;
+    sigmatch_table[DETECT_HTTP_CLIENT_BODY].flags |= SIGMATCH_NOOPT;
+    sigmatch_table[DETECT_HTTP_CLIENT_BODY].flags |= SIGMATCH_INFO_CONTENT_MODIFIER;
+    sigmatch_table[DETECT_HTTP_CLIENT_BODY].alternative = DETECT_HTTP_REQUEST_BODY;
 
     /* http.request_body sticky buffer */
     sigmatch_table[DETECT_HTTP_REQUEST_BODY].name = "http.request_body";
@@ -104,10 +106,10 @@ void DetectHttpClientBodyRegister(void)
     sigmatch_table[DETECT_HTTP_REQUEST_BODY].flags |= SIGMATCH_INFO_STICKY_BUFFER;
 
     DetectAppLayerInspectEngineRegister("http_client_body", ALPROTO_HTTP1, SIG_FLAG_TOSERVER,
-            HTP_REQUEST_BODY, DetectEngineInspectBufferHttpBody, NULL);
+            HTP_REQUEST_PROGRESS_BODY, DetectEngineInspectBufferHttpBody, NULL);
 
     DetectAppLayerMpmRegister("http_client_body", SIG_FLAG_TOSERVER, 2,
-            PrefilterMpmHttpRequestBodyRegister, NULL, ALPROTO_HTTP1, HTP_REQUEST_BODY);
+            PrefilterMpmHttpRequestBodyRegister, NULL, ALPROTO_HTTP1, HTP_REQUEST_PROGRESS_BODY);
 
     DetectAppLayerInspectEngineRegister("http_client_body", ALPROTO_HTTP2, SIG_FLAG_TOSERVER,
             HTTP2StateDataClient, DetectEngineInspectFiledata, NULL);
@@ -123,8 +125,8 @@ void DetectHttpClientBodyRegister(void)
     g_http_client_body_buffer_id = DetectBufferTypeGetByName("http_client_body");
 }
 
-static void DetectHttpClientBodySetupCallback(const DetectEngineCtx *de_ctx,
-                                              Signature *s)
+static void DetectHttpClientBodySetupCallback(
+        const DetectEngineCtx *de_ctx, Signature *s, const DetectBufferType *map)
 {
     SCLogDebug("callback invoked by %u", s->id);
     AppLayerHtpEnableRequestBodyCallback();
@@ -148,8 +150,8 @@ static void DetectHttpClientBodySetupCallback(const DetectEngineCtx *de_ctx,
  */
 int DetectHttpClientBodySetup(DetectEngineCtx *de_ctx, Signature *s, const char *arg)
 {
-    return DetectEngineContentModifierBufferSetup(de_ctx, s, arg, DETECT_AL_HTTP_CLIENT_BODY,
-            g_http_client_body_buffer_id, ALPROTO_HTTP1);
+    return DetectEngineContentModifierBufferSetup(
+            de_ctx, s, arg, DETECT_HTTP_CLIENT_BODY, g_http_client_body_buffer_id, ALPROTO_HTTP1);
 }
 
 /**
@@ -163,21 +165,24 @@ int DetectHttpClientBodySetup(DetectEngineCtx *de_ctx, Signature *s, const char 
  */
 static int DetectHttpClientBodySetupSticky(DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
-    if (DetectBufferSetActiveList(de_ctx, s, g_http_client_body_buffer_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_http_client_body_buffer_id) < 0)
         return -1;
-    if (DetectSignatureSetAppProto(s, ALPROTO_HTTP) < 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_HTTP) < 0)
         return -1;
+    // we cannot use a transactional rule with a fast pattern to client and this
+    if (s->init_data->init_flags & SIG_FLAG_INIT_TXDIR_FAST_TOCLIENT) {
+        SCLogError("fast_pattern cannot be used on to_client keyword for "
+                   "transactional rule with a streaming buffer to server %u",
+                s->id);
+        return -1;
+    }
+    s->init_data->init_flags |= SIG_FLAG_INIT_TXDIR_STREAMING_TOSERVER;
     return 0;
 }
 
 static inline HtpBody *GetRequestBody(htp_tx_t *tx)
 {
     HtpTxUserData *htud = (HtpTxUserData *)htp_tx_get_user_data(tx);
-    if (htud == NULL) {
-        SCLogDebug("no htud");
-        return NULL;
-    }
-
     return &htud->request_body;
 }
 
@@ -202,7 +207,7 @@ static inline InspectionBuffer *HttpRequestBodyXformsGetDataCallback(DetectEngin
 
     InspectionBufferSetup(det_ctx, list_id, buffer, base_buffer->inspect, base_buffer->inspect_len);
     buffer->inspect_offset = base_buffer->inspect_offset;
-    InspectionBufferApplyTransforms(buffer, transforms);
+    InspectionBufferApplyTransforms(det_ctx, buffer, transforms);
     SCLogDebug("xformed buffer %p size %u", buffer, buffer->inspect_len);
     SCReturnPtr(buffer, "InspectionBuffer");
 }
@@ -245,7 +250,7 @@ static InspectionBuffer *HttpRequestBodyGetDataCallback(DetectEngineThreadCtx *d
             htp_state->cfg->request.body_limit, body->content_len_so_far,
             htp_state->cfg->request.inspect_min_size, flags & STREAM_EOF ? "true" : "false",
             (AppLayerParserGetStateProgress(IPPROTO_TCP, ALPROTO_HTTP1, tx, flags) >
-                    HTP_REQUEST_BODY)
+                    HTP_REQUEST_PROGRESS_BODY)
                     ? "true"
                     : "false");
 
@@ -256,7 +261,7 @@ static InspectionBuffer *HttpRequestBodyGetDataCallback(DetectEngineThreadCtx *d
                     body->content_len_so_far < htp_state->cfg->request.body_limit) &&
                 body->content_len_so_far < htp_state->cfg->request.inspect_min_size &&
                 !(AppLayerParserGetStateProgress(IPPROTO_TCP, ALPROTO_HTTP1, tx, flags) >
-                        HTP_REQUEST_BODY) &&
+                        HTP_REQUEST_PROGRESS_BODY) &&
                 !(flags & STREAM_EOF)) {
             SCLogDebug("we still haven't seen the entire request body.  "
                        "Let's defer body inspection till we see the "
@@ -312,6 +317,9 @@ static uint8_t DetectEngineInspectBufferHttpBody(DetectEngineCtx *de_ctx,
     const InspectionBuffer *buffer = HttpRequestBodyGetDataCallback(
             det_ctx, engine->v2.transforms, f, flags, txv, engine->sm_list, engine->sm_list_base);
     if (buffer == NULL || buffer->inspect == NULL) {
+        if (eof && engine->match_on_null) {
+            return DETECT_ENGINE_INSPECT_SIG_MATCH;
+        }
         return eof ? DETECT_ENGINE_INSPECT_SIG_CANT_MATCH : DETECT_ENGINE_INSPECT_SIG_NO_MATCH;
     }
 
@@ -333,11 +341,11 @@ static uint8_t DetectEngineInspectBufferHttpBody(DetectEngineCtx *de_ctx,
 
     if (flags & STREAM_TOSERVER) {
         if (AppLayerParserGetStateProgress(IPPROTO_TCP, ALPROTO_HTTP1, txv, flags) >
-                HTP_REQUEST_BODY)
+                HTP_REQUEST_PROGRESS_BODY)
             return DETECT_ENGINE_INSPECT_SIG_CANT_MATCH;
     } else {
         if (AppLayerParserGetStateProgress(IPPROTO_TCP, ALPROTO_HTTP1, txv, flags) >
-                HTP_RESPONSE_BODY)
+                HTP_RESPONSE_PROGRESS_BODY)
             return DETECT_ENGINE_INSPECT_SIG_CANT_MATCH;
     }
     return DETECT_ENGINE_INSPECT_SIG_NO_MATCH;

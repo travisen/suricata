@@ -97,7 +97,7 @@ const char *SCRuleVarsGetConfVar(const DetectEngineCtx *de_ctx,
         }
     }
 
-    if (ConfGet(conf_var_full_name, &conf_var_full_name_value) != 1) {
+    if (SCConfGet(conf_var_full_name, &conf_var_full_name_value) != 1) {
         SCLogError("Variable \"%s\" is not defined in "
                    "configuration file",
                 conf_var_name);
@@ -187,59 +187,58 @@ static const char *dummy_conf_string =
  */
 static int SCRuleVarsPositiveTest01(void)
 {
-    ConfCreateContextBackup();
-    ConfInit();
-    ConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
+    SCConfCreateContextBackup();
+    SCConfInit();
+    SCConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
 
     /* check for address-groups */
-    FAIL_IF_NOT(SCRuleVarsGetConfVar(NULL, "$HOME_NET", SC_RULE_VARS_ADDRESS_GROUPS) != NULL &&
-                strcmp(SCRuleVarsGetConfVar(NULL, "$HOME_NET", SC_RULE_VARS_ADDRESS_GROUPS),
+    FAIL_IF_NULL(SCRuleVarsGetConfVar(NULL, "$HOME_NET", SC_RULE_VARS_ADDRESS_GROUPS));
+    FAIL_IF_NOT(strcmp(SCRuleVarsGetConfVar(NULL, "$HOME_NET", SC_RULE_VARS_ADDRESS_GROUPS),
                         "[192.168.0.0/16,10.8.0.0/16,127.0.0.1,2001:888:13c5:"
                         "5AFE::/64,2001:888:13c5:CAFE::/64]") == 0);
-    FAIL_IF_NOT(SCRuleVarsGetConfVar(NULL, "$EXTERNAL_NET", SC_RULE_VARS_ADDRESS_GROUPS) != NULL &&
-                strcmp(SCRuleVarsGetConfVar(NULL, "$EXTERNAL_NET", SC_RULE_VARS_ADDRESS_GROUPS),
+    FAIL_IF_NULL(SCRuleVarsGetConfVar(NULL, "$EXTERNAL_NET", SC_RULE_VARS_ADDRESS_GROUPS));
+    FAIL_IF_NOT(strcmp(SCRuleVarsGetConfVar(NULL, "$EXTERNAL_NET", SC_RULE_VARS_ADDRESS_GROUPS),
                         "[!192.168.0.0/16,2000::/3]") == 0);
-    FAIL_IF_NOT(SCRuleVarsGetConfVar(NULL, "$HTTP_SERVERS", SC_RULE_VARS_ADDRESS_GROUPS) != NULL &&
-                strcmp(SCRuleVarsGetConfVar(NULL, "$HTTP_SERVERS", SC_RULE_VARS_ADDRESS_GROUPS),
+    FAIL_IF_NULL(SCRuleVarsGetConfVar(NULL, "$HTTP_SERVERS", SC_RULE_VARS_ADDRESS_GROUPS));
+    FAIL_IF_NOT(strcmp(SCRuleVarsGetConfVar(NULL, "$HTTP_SERVERS", SC_RULE_VARS_ADDRESS_GROUPS),
                         "!192.168.0.0/16") == 0);
-    FAIL_IF_NOT(SCRuleVarsGetConfVar(NULL, "$SMTP_SERVERS", SC_RULE_VARS_ADDRESS_GROUPS) != NULL &&
-                strcmp(SCRuleVarsGetConfVar(NULL, "$SMTP_SERVERS", SC_RULE_VARS_ADDRESS_GROUPS),
+    FAIL_IF_NULL(SCRuleVarsGetConfVar(NULL, "$SMTP_SERVERS", SC_RULE_VARS_ADDRESS_GROUPS));
+    FAIL_IF_NOT(strcmp(SCRuleVarsGetConfVar(NULL, "$SMTP_SERVERS", SC_RULE_VARS_ADDRESS_GROUPS),
                         "!192.168.0.0/16") == 0);
-    FAIL_IF_NOT(SCRuleVarsGetConfVar(NULL, "$SQL_SERVERS", SC_RULE_VARS_ADDRESS_GROUPS) != NULL &&
-                strcmp(SCRuleVarsGetConfVar(NULL, "$SQL_SERVERS", SC_RULE_VARS_ADDRESS_GROUPS),
+    FAIL_IF_NULL(SCRuleVarsGetConfVar(NULL, "$SQL_SERVERS", SC_RULE_VARS_ADDRESS_GROUPS));
+    FAIL_IF_NOT(strcmp(SCRuleVarsGetConfVar(NULL, "$SQL_SERVERS", SC_RULE_VARS_ADDRESS_GROUPS),
                         "!192.168.0.0/16") == 0);
-    FAIL_IF_NOT(SCRuleVarsGetConfVar(NULL, "$DNS_SERVERS", SC_RULE_VARS_ADDRESS_GROUPS) != NULL &&
-                strcmp(SCRuleVarsGetConfVar(NULL, "$DNS_SERVERS", SC_RULE_VARS_ADDRESS_GROUPS),
+    FAIL_IF_NULL(SCRuleVarsGetConfVar(NULL, "$DNS_SERVERS", SC_RULE_VARS_ADDRESS_GROUPS));
+    FAIL_IF_NOT(strcmp(SCRuleVarsGetConfVar(NULL, "$DNS_SERVERS", SC_RULE_VARS_ADDRESS_GROUPS),
                         "any") == 0);
-    FAIL_IF_NOT(
-            SCRuleVarsGetConfVar(NULL, "$TELNET_SERVERS", SC_RULE_VARS_ADDRESS_GROUPS) != NULL &&
-            strcmp(SCRuleVarsGetConfVar(NULL, "$TELNET_SERVERS", SC_RULE_VARS_ADDRESS_GROUPS),
-                    "any") == 0);
-    FAIL_IF_NOT(SCRuleVarsGetConfVar(NULL, "$AIM_SERVERS", SC_RULE_VARS_ADDRESS_GROUPS) != NULL &&
-                strcmp(SCRuleVarsGetConfVar(NULL, "$AIM_SERVERS", SC_RULE_VARS_ADDRESS_GROUPS),
+    FAIL_IF_NULL(SCRuleVarsGetConfVar(NULL, "$TELNET_SERVERS", SC_RULE_VARS_ADDRESS_GROUPS));
+    FAIL_IF_NOT(strcmp(SCRuleVarsGetConfVar(NULL, "$TELNET_SERVERS", SC_RULE_VARS_ADDRESS_GROUPS),
+                        "any") == 0);
+    FAIL_IF_NULL(SCRuleVarsGetConfVar(NULL, "$AIM_SERVERS", SC_RULE_VARS_ADDRESS_GROUPS));
+    FAIL_IF_NOT(strcmp(SCRuleVarsGetConfVar(NULL, "$AIM_SERVERS", SC_RULE_VARS_ADDRESS_GROUPS),
                         "any") == 0);
 
     /* Test that a leading space is stripped. */
-    FAIL_IF_NOT(SCRuleVarsGetConfVar(NULL, " $AIM_SERVERS", SC_RULE_VARS_ADDRESS_GROUPS) != NULL &&
-                strcmp(SCRuleVarsGetConfVar(NULL, " $AIM_SERVERS", SC_RULE_VARS_ADDRESS_GROUPS),
+    FAIL_IF_NULL(SCRuleVarsGetConfVar(NULL, " $AIM_SERVERS", SC_RULE_VARS_ADDRESS_GROUPS));
+    FAIL_IF_NOT(strcmp(SCRuleVarsGetConfVar(NULL, " $AIM_SERVERS", SC_RULE_VARS_ADDRESS_GROUPS),
                         "any") == 0);
 
     /* check for port-groups */
-    FAIL_IF_NOT(SCRuleVarsGetConfVar(NULL, "$HTTP_PORTS", SC_RULE_VARS_PORT_GROUPS) != NULL &&
-                strcmp(SCRuleVarsGetConfVar(NULL, "$HTTP_PORTS", SC_RULE_VARS_PORT_GROUPS),
+    FAIL_IF_NULL(SCRuleVarsGetConfVar(NULL, "$HTTP_PORTS", SC_RULE_VARS_PORT_GROUPS));
+    FAIL_IF_NOT(strcmp(SCRuleVarsGetConfVar(NULL, "$HTTP_PORTS", SC_RULE_VARS_PORT_GROUPS),
                         "80:81,88") == 0);
-    FAIL_IF_NOT(SCRuleVarsGetConfVar(NULL, "$SHELLCODE_PORTS", SC_RULE_VARS_PORT_GROUPS) != NULL &&
-                strcmp(SCRuleVarsGetConfVar(NULL, "$SHELLCODE_PORTS", SC_RULE_VARS_PORT_GROUPS),
+    FAIL_IF_NULL(SCRuleVarsGetConfVar(NULL, "$SHELLCODE_PORTS", SC_RULE_VARS_PORT_GROUPS));
+    FAIL_IF_NOT(strcmp(SCRuleVarsGetConfVar(NULL, "$SHELLCODE_PORTS", SC_RULE_VARS_PORT_GROUPS),
                         "80") == 0);
-    FAIL_IF_NOT(SCRuleVarsGetConfVar(NULL, "$ORACLE_PORTS", SC_RULE_VARS_PORT_GROUPS) != NULL &&
-                strcmp(SCRuleVarsGetConfVar(NULL, "$ORACLE_PORTS", SC_RULE_VARS_PORT_GROUPS),
+    FAIL_IF_NULL(SCRuleVarsGetConfVar(NULL, "$ORACLE_PORTS", SC_RULE_VARS_PORT_GROUPS));
+    FAIL_IF_NOT(strcmp(SCRuleVarsGetConfVar(NULL, "$ORACLE_PORTS", SC_RULE_VARS_PORT_GROUPS),
                         "1521") == 0);
+    FAIL_IF_NULL(SCRuleVarsGetConfVar(NULL, "$SSH_PORTS", SC_RULE_VARS_PORT_GROUPS));
     FAIL_IF_NOT(
-            SCRuleVarsGetConfVar(NULL, "$SSH_PORTS", SC_RULE_VARS_PORT_GROUPS) != NULL &&
             strcmp(SCRuleVarsGetConfVar(NULL, "$SSH_PORTS", SC_RULE_VARS_PORT_GROUPS), "22") == 0);
 
-    ConfDeInit();
-    ConfRestoreContextBackup();
+    SCConfDeInit();
+    SCConfRestoreContextBackup();
     PASS;
 }
 
@@ -249,17 +248,17 @@ static int SCRuleVarsPositiveTest01(void)
  */
 static int SCRuleVarsNegativeTest02(void)
 {
-    ConfCreateContextBackup();
-    ConfInit();
-    ConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
+    SCConfCreateContextBackup();
+    SCConfInit();
+    SCConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
 
-    FAIL_IF_NOT(SCRuleVarsGetConfVar(NULL, "$HOME_NETW", SC_RULE_VARS_ADDRESS_GROUPS) == NULL);
-    FAIL_IF_NOT(SCRuleVarsGetConfVar(NULL, "$home_net", SC_RULE_VARS_ADDRESS_GROUPS) == NULL);
-    FAIL_IF_NOT(SCRuleVarsGetConfVar(NULL, "$TOMCAT_PORTSW", SC_RULE_VARS_PORT_GROUPS) == NULL);
-    FAIL_IF_NOT(SCRuleVarsGetConfVar(NULL, "$tomcat_ports", SC_RULE_VARS_PORT_GROUPS) == NULL);
+    FAIL_IF_NOT_NULL(SCRuleVarsGetConfVar(NULL, "$HOME_NETW", SC_RULE_VARS_ADDRESS_GROUPS));
+    FAIL_IF_NOT_NULL(SCRuleVarsGetConfVar(NULL, "$home_net", SC_RULE_VARS_ADDRESS_GROUPS));
+    FAIL_IF_NOT_NULL(SCRuleVarsGetConfVar(NULL, "$TOMCAT_PORTSW", SC_RULE_VARS_PORT_GROUPS));
+    FAIL_IF_NOT_NULL(SCRuleVarsGetConfVar(NULL, "$tomcat_ports", SC_RULE_VARS_PORT_GROUPS));
 
-    ConfDeInit();
-    ConfRestoreContextBackup();
+    SCConfDeInit();
+    SCConfRestoreContextBackup();
     PASS;
 }
 
@@ -269,9 +268,9 @@ static int SCRuleVarsNegativeTest02(void)
  */
 static int SCRuleVarsPositiveTest03(void)
 {
-    ConfCreateContextBackup();
-    ConfInit();
-    ConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
+    SCConfCreateContextBackup();
+    SCConfInit();
+    SCConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     FAIL_IF_NULL(de_ctx);
@@ -282,8 +281,8 @@ static int SCRuleVarsPositiveTest03(void)
             "[80,[!$HTTP_PORTS,$ORACLE_PORTS]] (msg:\"Rule Vars Test\"; sid:1;)");
     FAIL_IF_NULL(s);
 
-    ConfDeInit();
-    ConfRestoreContextBackup();
+    SCConfDeInit();
+    SCConfRestoreContextBackup();
     DetectEngineCtxFree(de_ctx);
     PASS;
 }
@@ -294,9 +293,9 @@ static int SCRuleVarsPositiveTest03(void)
  */
 static int SCRuleVarsNegativeTest04(void)
 {
-    ConfCreateContextBackup();
-    ConfInit();
-    ConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
+    SCConfCreateContextBackup();
+    SCConfInit();
+    SCConfYamlLoadString(dummy_conf_string, strlen(dummy_conf_string));
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     FAIL_IF_NULL(de_ctx);
     de_ctx->flags |= DE_QUIET;
@@ -315,8 +314,8 @@ static int SCRuleVarsNegativeTest04(void)
     FAIL_IF_NOT_NULL(s);
 
     DetectEngineCtxFree(de_ctx);
-    ConfDeInit();
-    ConfRestoreContextBackup();
+    SCConfDeInit();
+    SCConfRestoreContextBackup();
     PASS;
 }
 
@@ -347,52 +346,39 @@ static const char *dummy_mt_conf_string =
  */
 static int SCRuleVarsMTest01(void)
 {
-    int result = 0;
-    DetectEngineCtx *de_ctx = NULL;
+    SCConfCreateContextBackup();
+    SCConfInit();
+    SCConfYamlLoadString(dummy_mt_conf_string, strlen(dummy_mt_conf_string));
 
-    ConfCreateContextBackup();
-    ConfInit();
-    ConfYamlLoadString(dummy_mt_conf_string, strlen(dummy_mt_conf_string));
-
-    if ( (de_ctx = DetectEngineCtxInit()) == NULL)
-        return 0;
+    DetectEngineCtx *de_ctx = DetectEngineCtxInit();
+    FAIL_IF_NULL(de_ctx);
     de_ctx->flags |= DE_QUIET;
     snprintf(de_ctx->config_prefix, sizeof(de_ctx->config_prefix),
                 "multi-detect.0");
 
     /* check for address-groups */
-    result = (SCRuleVarsGetConfVar(de_ctx,"$HOME_NET", SC_RULE_VARS_ADDRESS_GROUPS) != NULL &&
-               strcmp(SCRuleVarsGetConfVar(de_ctx,"$HOME_NET", SC_RULE_VARS_ADDRESS_GROUPS),
-                      "[8.8.8.8]") == 0);
-    if (result == 0)
-        goto end;
+    FAIL_IF_NULL(SCRuleVarsGetConfVar(de_ctx, "$HOME_NET", SC_RULE_VARS_ADDRESS_GROUPS));
+    FAIL_IF_NOT(strcmp(SCRuleVarsGetConfVar(de_ctx, "$HOME_NET", SC_RULE_VARS_ADDRESS_GROUPS),
+                        "[8.8.8.8]") == 0);
 
-    result = (SCRuleVarsGetConfVar(NULL,"$HOME_NET", SC_RULE_VARS_ADDRESS_GROUPS) != NULL &&
-               strcmp(SCRuleVarsGetConfVar(NULL,"$HOME_NET", SC_RULE_VARS_ADDRESS_GROUPS),
-                      "[1.2.3.4]") == 0);
-    if (result == 0)
-        goto end;
+    FAIL_IF_NULL(SCRuleVarsGetConfVar(NULL, "$HOME_NET", SC_RULE_VARS_ADDRESS_GROUPS));
+    FAIL_IF_NOT(strcmp(SCRuleVarsGetConfVar(NULL, "$HOME_NET", SC_RULE_VARS_ADDRESS_GROUPS),
+                        "[1.2.3.4]") == 0);
 
     /* check for port-groups */
-    result = (SCRuleVarsGetConfVar(de_ctx,"$HTTP_PORTS", SC_RULE_VARS_PORT_GROUPS) != NULL &&
-               strcmp(SCRuleVarsGetConfVar(de_ctx,"$HTTP_PORTS", SC_RULE_VARS_PORT_GROUPS),
-                      "54321") == 0);
-    if (result == 0)
-        goto end;
+    FAIL_IF_NULL(SCRuleVarsGetConfVar(de_ctx, "$HTTP_PORTS", SC_RULE_VARS_PORT_GROUPS));
+    FAIL_IF_NOT(strcmp(SCRuleVarsGetConfVar(de_ctx, "$HTTP_PORTS", SC_RULE_VARS_PORT_GROUPS),
+                        "54321") == 0);
 
-    result = (SCRuleVarsGetConfVar(NULL,"$HTTP_PORTS", SC_RULE_VARS_PORT_GROUPS) != NULL &&
-               strcmp(SCRuleVarsGetConfVar(NULL,"$HTTP_PORTS", SC_RULE_VARS_PORT_GROUPS),
-                      "12345") == 0);
-    if (result == 0)
-        goto end;
+    FAIL_IF_NULL(SCRuleVarsGetConfVar(NULL, "$HTTP_PORTS", SC_RULE_VARS_PORT_GROUPS));
+    FAIL_IF_NOT(strcmp(SCRuleVarsGetConfVar(NULL, "$HTTP_PORTS", SC_RULE_VARS_PORT_GROUPS),
+                        "12345") == 0);
 
-end:
-    ConfDeInit();
-    ConfRestoreContextBackup();
+    SCConfDeInit();
+    SCConfRestoreContextBackup();
 
-    if (de_ctx != NULL)
-        DetectEngineCtxFree(de_ctx);
-    return result;
+    DetectEngineCtxFree(de_ctx);
+    PASS;
 }
 
 #endif /* UNITTESTS */
@@ -407,6 +393,4 @@ void SCRuleVarsRegisterTests(void)
 
     UtRegisterTest("SCRuleVarsMTest01", SCRuleVarsMTest01);
 #endif
-
-    return;
 }

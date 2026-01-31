@@ -1,4 +1,4 @@
-/* Copyright (C) 2022 Open Information Security Foundation
+/* Copyright (C) 2022-2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -47,6 +47,7 @@
 #include "rust.h"
 
 #define PGSQL_LOG_PASSWORDS BIT_U32(0)
+#define PGSQL_DEFAULTS      (PGSQL_LOG_PASSWORDS)
 
 typedef struct OutputPgsqlCtx_ {
     uint32_t flags;
@@ -58,31 +59,34 @@ typedef struct LogPgsqlLogThread_ {
     OutputJsonThreadCtx *ctx;
 } LogPgsqlLogThread;
 
+bool JsonPgsqlAddMetadata(void *vtx, SCJsonBuilder *jb)
+{
+    return SCPgsqlLogger(vtx, PGSQL_DEFAULTS, jb);
+}
+
 static int JsonPgsqlLogger(ThreadVars *tv, void *thread_data, const Packet *p, Flow *f, void *state,
         void *txptr, uint64_t tx_id)
 {
     LogPgsqlLogThread *thread = thread_data;
     SCLogDebug("Logging pgsql transaction %" PRIu64 ".", tx_id);
 
-    JsonBuilder *jb =
+    SCJsonBuilder *jb =
             CreateEveHeader(p, LOG_DIR_FLOW, "pgsql", NULL, thread->pgsqllog_ctx->eve_ctx);
     if (unlikely(jb == NULL)) {
         return TM_ECODE_FAILED;
     }
 
-    jb_open_object(jb, "pgsql");
-    if (!rs_pgsql_logger(txptr, thread->pgsqllog_ctx->flags, jb)) {
+    if (!SCPgsqlLogger(txptr, thread->pgsqllog_ctx->flags, jb)) {
         goto error;
     }
-    jb_close(jb);
 
-    OutputJsonBuilderBuffer(jb, thread->ctx);
-    jb_free(jb);
+    OutputJsonBuilderBuffer(tv, p, p->flow, jb, thread->ctx);
+    SCJbFree(jb);
 
     return TM_ECODE_OK;
 
 error:
-    jb_free(jb);
+    SCJbFree(jb);
     return TM_ECODE_FAILED;
 }
 
@@ -93,13 +97,13 @@ static void OutputPgsqlLogDeInitCtxSub(OutputCtx *output_ctx)
     SCFree(output_ctx);
 }
 
-static void JsonPgsqlLogParseConfig(ConfNode *conf, OutputPgsqlCtx *pgsqllog_ctx)
+static void JsonPgsqlLogParseConfig(SCConfNode *conf, OutputPgsqlCtx *pgsqllog_ctx)
 {
     pgsqllog_ctx->flags = ~0U;
 
-    const char *query = ConfNodeLookupChildValue(conf, "passwords");
+    const char *query = SCConfNodeLookupChildValue(conf, "passwords");
     if (query != NULL) {
-        if (ConfValIsTrue(query)) {
+        if (SCConfValIsTrue(query)) {
             pgsqllog_ctx->flags |= PGSQL_LOG_PASSWORDS;
         } else {
             pgsqllog_ctx->flags &= ~PGSQL_LOG_PASSWORDS;
@@ -109,7 +113,7 @@ static void JsonPgsqlLogParseConfig(ConfNode *conf, OutputPgsqlCtx *pgsqllog_ctx
     }
 }
 
-static OutputInitResult OutputPgsqlLogInitSub(ConfNode *conf, OutputCtx *parent_ctx)
+static OutputInitResult OutputPgsqlLogInitSub(SCConfNode *conf, OutputCtx *parent_ctx)
 {
     OutputInitResult result = { NULL, false };
     OutputJsonCtx *ojc = parent_ctx->data;
@@ -131,7 +135,7 @@ static OutputInitResult OutputPgsqlLogInitSub(ConfNode *conf, OutputCtx *parent_
 
     JsonPgsqlLogParseConfig(conf, pgsql_ctx);
 
-    AppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_PGSQL);
+    SCAppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_PGSQL);
 
     SCLogDebug("PostgreSQL log sub-module initialized.");
 
@@ -180,7 +184,7 @@ static TmEcode JsonPgsqlLogThreadDeinit(ThreadVars *t, void *data)
 void JsonPgsqlLogRegister(void)
 {
     /* PGSQL_START_REMOVE */
-    if (ConfGetNode("app-layer.protocols.pgsql") == NULL) {
+    if (SCConfGetNode("app-layer.protocols.pgsql") == NULL) {
         SCLogDebug("Disabling Pgsql eve-logger");
         return;
     }
@@ -188,7 +192,7 @@ void JsonPgsqlLogRegister(void)
     /* Register as an eve sub-module. */
     OutputRegisterTxSubModule(LOGGER_JSON_TX, "eve-log", "JsonPgsqlLog", "eve-log.pgsql",
             OutputPgsqlLogInitSub, ALPROTO_PGSQL, JsonPgsqlLogger, JsonPgsqlLogThreadInit,
-            JsonPgsqlLogThreadDeinit, NULL);
+            JsonPgsqlLogThreadDeinit);
 
     SCLogDebug("PostgreSQL JSON logger registered.");
 }

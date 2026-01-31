@@ -58,8 +58,7 @@ void DetectTemplate2Register(void)
     sigmatch_table[DETECT_TEMPLATE2].Free = DetectTemplate2Free;
     sigmatch_table[DETECT_TEMPLATE2].SupportsPrefilter = PrefilterTemplate2IsPrefilterable;
     sigmatch_table[DETECT_TEMPLATE2].SetupPrefilter = PrefilterSetupTemplate2;
-
-    return;
+    sigmatch_table[DETECT_TEMPLATE2].flags = SIGMATCH_INFO_UINT8;
 }
 
 /**
@@ -77,16 +76,16 @@ void DetectTemplate2Register(void)
 static int DetectTemplate2Match (DetectEngineThreadCtx *det_ctx, Packet *p,
         const Signature *s, const SigMatchCtx *ctx)
 {
-
-    if (PKT_IS_PSEUDOPKT(p))
-        return 0;
+    DEBUG_VALIDATE_BUG_ON(PKT_IS_PSEUDOPKT(p));
 
     /* TODO replace this */
     uint8_t ptemplate2;
-    if (PKT_IS_IPV4(p)) {
-        ptemplate2 = IPV4_GET_IPTTL(p);
-    } else if (PKT_IS_IPV6(p)) {
-        ptemplate2 = IPV6_GET_HLIM(p);
+    if (PacketIsIPv4(p)) {
+        const IPV4Hdr *ip4h = PacketGetIPv4(p);
+        ptemplate2 = IPV4_GET_RAW_IPTTL(ip4h);
+    } else if (PacketIsIPv6(p)) {
+        const IPV6Hdr *ip6h = PacketGetIPv6(p);
+        ptemplate2 = IPV6_GET_RAW_HLIM(ip6h);
     } else {
         SCLogDebug("Packet is of not IPv4 or IPv6");
         return 0;
@@ -112,7 +111,7 @@ static int DetectTemplate2Setup (DetectEngineCtx *de_ctx, Signature *s, const ch
     if (template2d == NULL)
         return -1;
 
-    if (SigMatchAppendSMToList(de_ctx, s, DETECT_TEMPLATE2, (SigMatchCtx *)template2d,
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_TEMPLATE2, (SigMatchCtx *)template2d,
                 DETECT_SM_LIST_MATCH) == NULL) {
         DetectTemplate2Free(de_ctx, template2d);
         return -1;
@@ -129,7 +128,7 @@ static int DetectTemplate2Setup (DetectEngineCtx *de_ctx, Signature *s, const ch
  */
 void DetectTemplate2Free(DetectEngineCtx *de_ctx, void *ptr)
 {
-    rs_detect_u8_free(ptr);
+    SCDetectU8Free(ptr);
 }
 
 /* prefilter code */
@@ -137,16 +136,16 @@ void DetectTemplate2Free(DetectEngineCtx *de_ctx, void *ptr)
 static void
 PrefilterPacketTemplate2Match(DetectEngineThreadCtx *det_ctx, Packet *p, const void *pectx)
 {
-    if (PKT_IS_PSEUDOPKT(p)) {
-        SCReturn;
-    }
+    DEBUG_VALIDATE_BUG_ON(PKT_IS_PSEUDOPKT(p));
 
     uint8_t ptemplate2;
 /* TODO update */
-    if (PKT_IS_IPV4(p)) {
-        ptemplate2 = IPV4_GET_IPTTL(p);
-    } else if (PKT_IS_IPV6(p)) {
-        ptemplate2 = IPV6_GET_HLIM(p);
+    if (PacketIsIPv4(p)) {
+        const IPV4Hdr *ip4h = PacketGetIPv4(p);
+        ptemplate2 = IPV4_GET_RAW_IPTTL(ip4h);
+    } else if (PacketIsIPv6(p)) {
+        const IPV6Hdr *ip6h = PacketGetIPv6(p);
+        ptemplate2 = IPV6_GET_RAW_HLIM(ip6h);
     } else {
         SCLogDebug("Packet is of not IPv4 or IPv6");
         return;
@@ -172,18 +171,11 @@ PrefilterPacketTemplate2Match(DetectEngineThreadCtx *det_ctx, Packet *p, const v
 
 static int PrefilterSetupTemplate2(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
 {
-    return PrefilterSetupPacketHeader(de_ctx, sgh, DETECT_TEMPLATE2, PrefilterPacketU8Set,
-            PrefilterPacketU8Compare, PrefilterPacketTemplate2Match);
+    return PrefilterSetupPacketHeader(de_ctx, sgh, DETECT_TEMPLATE2, SIG_MASK_REQUIRE_REAL_PKT,
+            PrefilterPacketU8Set, PrefilterPacketU8Compare, PrefilterPacketTemplate2Match);
 }
 
 static bool PrefilterTemplate2IsPrefilterable(const Signature *s)
 {
-    const SigMatch *sm;
-    for (sm = s->init_data->smlists[DETECT_SM_LIST_MATCH] ; sm != NULL; sm = sm->next) {
-        switch (sm->type) {
-            case DETECT_TEMPLATE2:
-                return true;
-        }
-    }
-    return false;
+    return PrefilterIsPrefilterableById(s, DETECT_TEMPLATE2);
 }

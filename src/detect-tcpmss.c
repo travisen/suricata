@@ -56,10 +56,9 @@ void DetectTcpmssRegister(void)
     sigmatch_table[DETECT_TCPMSS].Match = DetectTcpmssMatch;
     sigmatch_table[DETECT_TCPMSS].Setup = DetectTcpmssSetup;
     sigmatch_table[DETECT_TCPMSS].Free = DetectTcpmssFree;
+    sigmatch_table[DETECT_TCPMSS].flags = SIGMATCH_INFO_UINT16;
     sigmatch_table[DETECT_TCPMSS].SupportsPrefilter = PrefilterTcpmssIsPrefilterable;
     sigmatch_table[DETECT_TCPMSS].SetupPrefilter = PrefilterSetupTcpmss;
-
-    return;
 }
 
 /**
@@ -76,8 +75,9 @@ void DetectTcpmssRegister(void)
 static int DetectTcpmssMatch (DetectEngineThreadCtx *det_ctx, Packet *p,
         const Signature *s, const SigMatchCtx *ctx)
 {
+    DEBUG_VALIDATE_BUG_ON(PKT_IS_PSEUDOPKT(p));
 
-    if (!(PKT_IS_TCP(p)) || PKT_IS_PSEUDOPKT(p))
+    if (!(PacketIsTCP(p)))
         return 0;
 
     if (!(TCP_HAS_MSS(p)))
@@ -105,7 +105,7 @@ static int DetectTcpmssSetup (DetectEngineCtx *de_ctx, Signature *s, const char 
     if (tcpmssd == NULL)
         return -1;
 
-    if (SigMatchAppendSMToList(
+    if (SCSigMatchAppendSMToList(
                 de_ctx, s, DETECT_TCPMSS, (SigMatchCtx *)tcpmssd, DETECT_SM_LIST_MATCH) == NULL) {
         DetectTcpmssFree(de_ctx, tcpmssd);
         return -1;
@@ -122,7 +122,7 @@ static int DetectTcpmssSetup (DetectEngineCtx *de_ctx, Signature *s, const char 
  */
 void DetectTcpmssFree(DetectEngineCtx *de_ctx, void *ptr)
 {
-    rs_detect_u16_free(ptr);
+    SCDetectU16Free(ptr);
 }
 
 /* prefilter code */
@@ -130,7 +130,8 @@ void DetectTcpmssFree(DetectEngineCtx *de_ctx, void *ptr)
 static void
 PrefilterPacketTcpmssMatch(DetectEngineThreadCtx *det_ctx, Packet *p, const void *pectx)
 {
-    if (!(PKT_IS_TCP(p)) || PKT_IS_PSEUDOPKT(p))
+    DEBUG_VALIDATE_BUG_ON(PKT_IS_PSEUDOPKT(p));
+    if (!(PacketIsTCP(p)))
         return;
 
     if (!(TCP_HAS_MSS(p)))
@@ -158,18 +159,11 @@ PrefilterPacketTcpmssMatch(DetectEngineThreadCtx *det_ctx, Packet *p, const void
 
 static int PrefilterSetupTcpmss(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
 {
-    return PrefilterSetupPacketHeader(de_ctx, sgh, DETECT_TCPMSS, PrefilterPacketU16Set,
-            PrefilterPacketU16Compare, PrefilterPacketTcpmssMatch);
+    return PrefilterSetupPacketHeader(de_ctx, sgh, DETECT_TCPMSS, SIG_MASK_REQUIRE_REAL_PKT,
+            PrefilterPacketU16Set, PrefilterPacketU16Compare, PrefilterPacketTcpmssMatch);
 }
 
 static bool PrefilterTcpmssIsPrefilterable(const Signature *s)
 {
-    const SigMatch *sm;
-    for (sm = s->init_data->smlists[DETECT_SM_LIST_MATCH] ; sm != NULL; sm = sm->next) {
-        switch (sm->type) {
-            case DETECT_TCPMSS:
-                return true;
-        }
-    }
-    return false;
+    return PrefilterIsPrefilterableById(s, DETECT_TCPMSS);
 }

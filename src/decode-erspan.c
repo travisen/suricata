@@ -39,6 +39,7 @@
 #include "util-validate.h"
 #include "util-unittest.h"
 #include "util-debug.h"
+#include "conf.h"
 
 /**
  * \brief Functions to decode ERSPAN Type I and II packets
@@ -52,7 +53,7 @@
 void DecodeERSPANConfig(void)
 {
     int enabled = 0;
-    if (ConfGetBool("decoder.erspan.typeI.enabled", &enabled) == 1) {
+    if (SCConfGetBool("decoder.erspan.typeI.enabled", &enabled) == 1) {
         SCLogWarning("ERSPAN Type I is no longer configurable and it is always"
                      " enabled; ignoring configuration setting.");
     }
@@ -64,7 +65,7 @@ void DecodeERSPANConfig(void)
 int DecodeERSPANTypeI(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
                       const uint8_t *pkt, uint32_t len)
 {
-    StatsIncr(tv, dtv->counter_erspan);
+    StatsCounterIncr(&tv->stats, dtv->counter_erspan);
 
     return DecodeEthernet(tv, dtv, p, pkt, len);
 }
@@ -76,7 +77,7 @@ int DecodeERSPAN(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p, const uint8_t
 {
     DEBUG_VALIDATE_BUG_ON(pkt == NULL);
 
-    StatsIncr(tv, dtv->counter_erspan);
+    StatsCounterIncr(&tv->stats, dtv->counter_erspan);
 
     if (len < sizeof(ErspanHdr)) {
         ENGINE_SET_EVENT(p,ERSPAN_HEADER_TOO_SMALL);

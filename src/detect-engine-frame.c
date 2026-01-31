@@ -26,6 +26,7 @@
 #include "suricata.h"
 
 #include "app-layer-parser.h"
+#include "rust.h"
 #include "app-layer-frames.h"
 
 #include "detect-engine.h"
@@ -67,17 +68,18 @@ static bool SetupStreamCallbackData(struct FrameStreamData *dst, const TcpSessio
 
 static bool BufferSetup(struct FrameStreamData *fsd, InspectionBuffer *buffer, const uint8_t *input,
         const uint32_t input_len, const uint64_t input_offset);
-static void BufferSetupUdp(InspectionBuffer *buffer, const Frame *frame, const Packet *p,
-        const DetectEngineTransforms *transforms);
+static void BufferSetupUdp(DetectEngineThreadCtx *det_ctx, InspectionBuffer *buffer,
+        const Frame *frame, const Packet *p, const DetectEngineTransforms *transforms);
 
 void DetectRunPrefilterFrame(DetectEngineThreadCtx *det_ctx, const SigGroupHead *sgh, Packet *p,
         const Frames *frames, const Frame *frame, const AppProto alproto)
 {
-    SCLogDebug("pcap_cnt %" PRIu64, p->pcap_cnt);
+    SCLogDebug("pcap_cnt %" PRIu64, PcapPacketCntGet(p));
     PrefilterEngine *engine = sgh->frame_engines;
     do {
-        BUG_ON(engine->alproto == ALPROTO_UNKNOWN);
-        if (engine->alproto == alproto && engine->ctx.frame_type == frame->type) {
+        if ((engine->alproto == alproto || engine->alproto == ALPROTO_UNKNOWN) &&
+                (engine->ctx.frame_type == frame->type ||
+                        engine->ctx.frame_type == FRAME_ANY_TYPE)) {
             SCLogDebug("frame %p engine %p", frame, engine);
             PREFILTER_PROFILING_START(det_ctx);
             engine->cb.PrefilterFrame(det_ctx, engine->pectx, p, frames, frame);
@@ -149,7 +151,7 @@ static void PrefilterMpmFrame(DetectEngineThreadCtx *det_ctx, const void *pectx,
     const MpmCtx *mpm_ctx = ctx->mpm_ctx;
 
     SCLogDebug("packet:%" PRIu64 ", prefilter running on list %d -> frame field type %u",
-            p->pcap_cnt, ctx->list_id, frame->type);
+            PcapPacketCntGet(p), ctx->list_id, frame->type);
     if (p->proto == IPPROTO_UDP) {
         // TODO can we use single here? Could it conflict with TCP?
         InspectionBuffer *buffer = InspectionBufferMultipleForListGet(det_ctx, ctx->list_id, 0);
@@ -159,7 +161,7 @@ static void PrefilterMpmFrame(DetectEngineThreadCtx *det_ctx, const void *pectx,
         if (frame->offset >= p->payload_len)
             return;
 
-        BufferSetupUdp(buffer, frame, p, ctx->transforms);
+        BufferSetupUdp(det_ctx, buffer, frame, p, ctx->transforms);
         const uint32_t data_len = buffer->inspect_len;
         const uint8_t *data = buffer->inspect;
 
@@ -172,7 +174,7 @@ static void PrefilterMpmFrame(DetectEngineThreadCtx *det_ctx, const void *pectx,
             PREFILTER_PROFILING_ADD_BYTES(det_ctx, data_len);
         }
     } else if (p->proto == IPPROTO_TCP) {
-        BUG_ON(p->flow->protoctx == NULL);
+        DEBUG_VALIDATE_BUG_ON(p->flow->protoctx == NULL);
         TcpSession *ssn = p->flow->protoctx;
         TcpStream *stream;
         if (PKT_IS_TOSERVER(p)) {
@@ -187,7 +189,7 @@ static void PrefilterMpmFrame(DetectEngineThreadCtx *det_ctx, const void *pectx,
         fsd.mpm_ctx = mpm_ctx;
 
         if (SetupStreamCallbackData(&fsd, ssn, stream, det_ctx, ctx->transforms, frames, frame,
-                    ctx->list_id, eof) == true) {
+                    ctx->list_id, eof)) {
             StreamReassembleForFrame(ssn, stream, FrameStreamDataPrefilterFunc, &fsd,
                     fsd.requested_stream_offset, eof);
         }
@@ -196,7 +198,7 @@ static void PrefilterMpmFrame(DetectEngineThreadCtx *det_ctx, const void *pectx,
     }
     SCLogDebug("packet:%" PRIu64
                ", prefilter done running on list %d -> frame field type %u; have %u matches",
-            p->pcap_cnt, ctx->list_id, frame->type, det_ctx->pmq.rule_id_array_cnt);
+            PcapPacketCntGet(p), ctx->list_id, frame->type, det_ctx->pmq.rule_id_array_cnt);
 }
 
 static void PrefilterMpmFrameFree(void *ptr)
@@ -227,7 +229,7 @@ int PrefilterGenericMpmFrameRegister(DetectEngineCtx *de_ctx, SigGroupHead *sgh,
 bool DetectRunFrameInspectRule(ThreadVars *tv, DetectEngineThreadCtx *det_ctx, const Signature *s,
         Flow *f, Packet *p, const Frames *frames, const Frame *frame)
 {
-    BUG_ON(s->frame_inspect == NULL);
+    DEBUG_VALIDATE_BUG_ON(s->frame_inspect == NULL);
 
     SCLogDebug("inspecting rule %u against frame %p/%" PRIi64 "/%s", s->id, frame, frame->id,
             AppLayerParserGetFrameNameById(f->proto, f->alproto, frame->type));
@@ -238,7 +240,7 @@ bool DetectRunFrameInspectRule(ThreadVars *tv, DetectEngineThreadCtx *det_ctx, c
 
             // TODO there should be only one inspect engine for this frame, ever?
 
-            if (e->v1.Callback(det_ctx, e, s, p, frames, frame) == true) {
+            if (e->v1.Callback(det_ctx, e, s, p, frames, frame)) {
                 SCLogDebug("sid %u: e %p Callback returned true", s->id, e);
                 return true;
             }
@@ -251,18 +253,18 @@ bool DetectRunFrameInspectRule(ThreadVars *tv, DetectEngineThreadCtx *det_ctx, c
     return false;
 }
 
-static void BufferSetupUdp(InspectionBuffer *buffer, const Frame *frame, const Packet *p,
-        const DetectEngineTransforms *transforms)
+static void BufferSetupUdp(DetectEngineThreadCtx *det_ctx, InspectionBuffer *buffer,
+        const Frame *frame, const Packet *p, const DetectEngineTransforms *transforms)
 {
     uint8_t ci_flags = DETECT_CI_FLAGS_START;
     uint32_t frame_len;
     if (frame->len == -1) {
-        frame_len = p->payload_len - frame->offset;
+        frame_len = (uint32_t)(p->payload_len - frame->offset);
     } else {
         frame_len = (uint32_t)frame->len;
     }
     if (frame->offset + frame_len > p->payload_len) {
-        frame_len = p->payload_len - frame->offset;
+        frame_len = (uint32_t)(p->payload_len - frame->offset);
     } else {
         ci_flags |= DETECT_CI_FLAGS_END;
     }
@@ -271,11 +273,11 @@ static void BufferSetupUdp(InspectionBuffer *buffer, const Frame *frame, const P
 
     SCLogDebug("packet %" PRIu64 " -> frame %p/%" PRIi64 "/%s offset %" PRIu64
                " type %u len %" PRIi64,
-            p->pcap_cnt, frame, frame->id,
+            PcapPacketCntGet(p), frame, frame->id,
             AppLayerParserGetFrameNameById(p->flow->proto, p->flow->alproto, frame->type),
             frame->offset, frame->type, frame->len);
 
-    InspectionBufferSetupMulti(buffer, transforms, data, data_len);
+    InspectionBufferSetupMulti(det_ctx, buffer, transforms, data, data_len);
     buffer->inspect_offset = 0;
     buffer->flags = ci_flags;
 }
@@ -288,8 +290,8 @@ static int DetectFrameInspectUdp(DetectEngineThreadCtx *det_ctx,
         const DetectEngineTransforms *transforms, Packet *p, const Frames *_frames,
         const Frame *frame, const int list_id)
 {
-    SCLogDebug("packet:%" PRIu64 ", inspect: s:%p s->id:%u, transforms:%p", p->pcap_cnt, s, s->id,
-            transforms);
+    SCLogDebug("packet:%" PRIu64 ", inspect: s:%p s->id:%u, transforms:%p", PcapPacketCntGet(p), s,
+            s->id, transforms);
 
     // TODO can we use single here? Could it conflict with TCP?
     InspectionBuffer *buffer = InspectionBufferMultipleForListGet(det_ctx, list_id, 0);
@@ -301,7 +303,7 @@ static int DetectFrameInspectUdp(DetectEngineThreadCtx *det_ctx,
         return DETECT_ENGINE_INSPECT_SIG_NO_MATCH;
 
     if (!buffer->initialized)
-        BufferSetupUdp(buffer, frame, p, transforms);
+        BufferSetupUdp(det_ctx, buffer, frame, p, transforms);
     DEBUG_VALIDATE_BUG_ON(!buffer->initialized);
     if (buffer->inspect == NULL)
         return DETECT_ENGINE_INSPECT_SIG_NO_MATCH;
@@ -340,7 +342,7 @@ static bool BufferSetup(struct FrameStreamData *fsd, InspectionBuffer *buffer, c
         SCLogDebug("have frame data start");
 
         if (frame->len >= 0) {
-            data_len = MIN(input_len, frame->len);
+            data_len = MIN(input_len, (uint32_t)frame->len);
             if (data_len == frame->len) {
                 ci_flags |= DETECT_CI_FLAGS_END;
                 SCLogDebug("have frame data end");
@@ -366,28 +368,31 @@ static bool BufferSetup(struct FrameStreamData *fsd, InspectionBuffer *buffer, c
             }
 
             /* in: relative to start of input data */
-            BUG_ON(so_inspect_offset < input_offset);
-            const uint32_t in_data_offset = so_inspect_offset - input_offset;
+            DEBUG_VALIDATE_BUG_ON(so_inspect_offset < input_offset);
+            DEBUG_VALIDATE_BUG_ON(so_inspect_offset - input_offset > UINT32_MAX);
+            const uint32_t in_data_offset = (uint32_t)(so_inspect_offset - input_offset);
             data += in_data_offset;
 
             uint32_t in_data_excess = 0;
             if (so_input_re >= so_frame_re) {
                 ci_flags |= DETECT_CI_FLAGS_END;
                 SCLogDebug("have frame data end");
-                in_data_excess = so_input_re - so_frame_re;
+                DEBUG_VALIDATE_BUG_ON(so_input_re - so_frame_re > UINT32_MAX);
+                in_data_excess = (uint32_t)(so_input_re - so_frame_re);
             }
             data_len = input_len - in_data_offset - in_data_excess;
         } else {
             /* in: relative to start of input data */
-            BUG_ON(so_inspect_offset < input_offset);
-            const uint32_t in_data_offset = so_inspect_offset - input_offset;
+            DEBUG_VALIDATE_BUG_ON(so_inspect_offset < input_offset);
+            DEBUG_VALIDATE_BUG_ON(so_inspect_offset - input_offset > UINT32_MAX);
+            const uint32_t in_data_offset = (uint32_t)(so_inspect_offset - input_offset);
             data += in_data_offset;
             data_len = input_len - in_data_offset;
         }
     }
     // PrintRawDataFp(stdout, data, data_len);
     SCLogDebug("fsd->transforms %p", fsd->transforms);
-    InspectionBufferSetupMulti(buffer, fsd->transforms, data, data_len);
+    InspectionBufferSetupMulti(fsd->det_ctx, buffer, fsd->transforms, data, data_len);
     SCLogDebug("inspect_offset %" PRIu64, fo_inspect_offset);
     buffer->inspect_offset = fo_inspect_offset;
     buffer->flags = ci_flags;
@@ -471,7 +476,7 @@ static int FrameStreamDataInspectFunc(
     // PrintRawDataFp(stdout, data, data_len);
     // PrintRawDataFp(stdout, data, MIN(64, data_len));
 #endif
-    BUG_ON(fsd->frame->len > 0 && (int64_t)data_len > fsd->frame->len);
+    DEBUG_VALIDATE_BUG_ON(fsd->frame->len > 0 && (int64_t)data_len > fsd->frame->len);
 
     const bool match = DetectEngineContentInspection(det_ctx->de_ctx, det_ctx, s, engine->smd, p,
             p->flow, data, data_len, data_offset, buffer->flags,
@@ -572,9 +577,10 @@ int DetectEngineInspectFrameBufferGeneric(DetectEngineThreadCtx *det_ctx,
 
     SCLogDebug("packet:%" PRIu64 ", frame->id:%" PRIu64
                ", list:%d, transforms:%p, s:%p, s->id:%u, engine:%p",
-            p->pcap_cnt, frame->id, engine->sm_list, engine->v1.transforms, s, s->id, engine);
+            PcapPacketCntGet(p), frame->id, engine->sm_list, engine->v1.transforms, s, s->id,
+            engine);
 
-    BUG_ON(p->flow->protoctx == NULL);
+    DEBUG_VALIDATE_BUG_ON(p->flow->protoctx == NULL);
     TcpSession *ssn = p->flow->protoctx;
     TcpStream *stream;
     if (PKT_IS_TOSERVER(p)) {
@@ -591,8 +597,8 @@ int DetectEngineInspectFrameBufferGeneric(DetectEngineThreadCtx *det_ctx,
     fsd.inspect_result = DETECT_ENGINE_INSPECT_SIG_NO_MATCH;
     fsd.p = p;
 
-    if (SetupStreamCallbackData(
-                &fsd, ssn, stream, det_ctx, transforms, frames, frame, list_id, eof) == false) {
+    if (!SetupStreamCallbackData(
+                &fsd, ssn, stream, det_ctx, transforms, frames, frame, list_id, eof)) {
         return DETECT_ENGINE_INSPECT_SIG_NO_MATCH;
     }
     StreamReassembleForFrame(

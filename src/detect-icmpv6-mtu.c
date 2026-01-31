@@ -53,25 +53,26 @@ void DetectICMPv6mtuRegister(void)
     sigmatch_table[DETECT_ICMPV6MTU].Match = DetectICMPv6mtuMatch;
     sigmatch_table[DETECT_ICMPV6MTU].Setup = DetectICMPv6mtuSetup;
     sigmatch_table[DETECT_ICMPV6MTU].Free = DetectICMPv6mtuFree;
+    sigmatch_table[DETECT_ICMPV6MTU].flags = SIGMATCH_INFO_UINT32;
 #ifdef UNITTESTS
     sigmatch_table[DETECT_ICMPV6MTU].RegisterTests = DetectICMPv6mtuRegisterTests;
 #endif
     sigmatch_table[DETECT_ICMPV6MTU].SupportsPrefilter = PrefilterIcmpv6mtuIsPrefilterable;
     sigmatch_table[DETECT_ICMPV6MTU].SetupPrefilter = PrefilterSetupIcmpv6mtu;
-    return;
 }
 
 // returns 0 on no mtu, and 1 if mtu
 static inline int DetectICMPv6mtuGetValue(Packet *p, uint32_t *picmpv6mtu)
 {
-    if (!(PKT_IS_ICMPV6(p)) || PKT_IS_PSEUDOPKT(p))
+    if (!(PacketIsICMPv6(p)))
         return 0;
-    if (ICMPV6_GET_CODE(p) != 0)
+    const ICMPV6Hdr *icmpv6h = PacketGetICMPv6(p);
+    if (ICMPV6_GET_CODE(icmpv6h) != 0)
         return 0;
-    if (!(ICMPV6_HAS_MTU(p)))
+    if (!(ICMPV6_HAS_MTU(icmpv6h)))
         return 0;
 
-    *picmpv6mtu = ICMPV6_GET_MTU(p);
+    *picmpv6mtu = ICMPV6_GET_MTU(icmpv6h);
     return 1;
 }
 
@@ -89,6 +90,8 @@ static inline int DetectICMPv6mtuGetValue(Packet *p, uint32_t *picmpv6mtu)
 static int DetectICMPv6mtuMatch (DetectEngineThreadCtx *det_ctx, Packet *p,
         const Signature *s, const SigMatchCtx *ctx)
 {
+    DEBUG_VALIDATE_BUG_ON(PKT_IS_PSEUDOPKT(p));
+
     uint32_t picmpv6mtu;
     if (DetectICMPv6mtuGetValue(p, &picmpv6mtu) == 0) {
         return 0;
@@ -114,7 +117,7 @@ static int DetectICMPv6mtuSetup (DetectEngineCtx *de_ctx, Signature *s, const ch
     if (icmpv6mtud == NULL)
         return -1;
 
-    if (SigMatchAppendSMToList(de_ctx, s, DETECT_ICMPV6MTU, (SigMatchCtx *)icmpv6mtud,
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_ICMPV6MTU, (SigMatchCtx *)icmpv6mtud,
                 DETECT_SM_LIST_MATCH) == NULL) {
         DetectICMPv6mtuFree(de_ctx, icmpv6mtud);
         return -1;
@@ -132,7 +135,7 @@ static int DetectICMPv6mtuSetup (DetectEngineCtx *de_ctx, Signature *s, const ch
  */
 void DetectICMPv6mtuFree(DetectEngineCtx *de_ctx, void *ptr)
 {
-    rs_detect_u32_free(ptr);
+    SCDetectU32Free(ptr);
 }
 
 /* prefilter code */
@@ -140,6 +143,8 @@ void DetectICMPv6mtuFree(DetectEngineCtx *de_ctx, void *ptr)
 static void
 PrefilterPacketIcmpv6mtuMatch(DetectEngineThreadCtx *det_ctx, Packet *p, const void *pectx)
 {
+    DEBUG_VALIDATE_BUG_ON(PKT_IS_PSEUDOPKT(p));
+
     uint32_t picmpv6mtu;
     if (DetectICMPv6mtuGetValue(p, &picmpv6mtu) == 0) {
         return;
@@ -166,10 +171,8 @@ PrefilterPacketIcmpv6mtuMatch(DetectEngineThreadCtx *det_ctx, Packet *p, const v
 
 static int PrefilterSetupIcmpv6mtu(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
 {
-    return PrefilterSetupPacketHeader(de_ctx, sgh, DETECT_ICMPV6MTU,
-            PrefilterPacketU32Set,
-            PrefilterPacketU32Compare,
-            PrefilterPacketIcmpv6mtuMatch);
+    return PrefilterSetupPacketHeader(de_ctx, sgh, DETECT_ICMPV6MTU, SIG_MASK_REQUIRE_REAL_PKT,
+            PrefilterPacketU32Set, PrefilterPacketU32Compare, PrefilterPacketIcmpv6mtuMatch);
 }
 
 static bool PrefilterIcmpv6mtuIsPrefilterable(const Signature *s)

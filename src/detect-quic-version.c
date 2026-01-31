@@ -25,6 +25,7 @@
 #include "detect.h"
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-prefilter.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-content-inspection.h"
@@ -40,7 +41,6 @@ static void DetectQuicVersionRegisterTests(void);
 
 #define BUFFER_NAME  "quic_version"
 #define KEYWORD_NAME "quic.version"
-#define KEYWORD_ID   DETECT_AL_QUIC_VERSION
 
 static int quic_version_id = 0;
 
@@ -55,13 +55,12 @@ static InspectionBuffer *GetVersionData(DetectEngineThreadCtx *det_ctx,
         uint32_t b_len = 0;
         const uint8_t *b = NULL;
 
-        if (rs_quic_tx_get_version(txv, &b, &b_len) != 1)
+        if (SCQuicTxGetVersion(txv, &b, &b_len) != 1)
             return NULL;
         if (b == NULL || b_len == 0)
             return NULL;
 
-        InspectionBufferSetup(det_ctx, list_id, buffer, b, b_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(det_ctx, list_id, buffer, b, b_len, transforms);
     }
     return buffer;
 }
@@ -71,13 +70,13 @@ static InspectionBuffer *GetVersionData(DetectEngineThreadCtx *det_ctx,
  */
 void DetectQuicVersionRegister(void)
 {
-    sigmatch_table[DETECT_AL_QUIC_VERSION].name = KEYWORD_NAME;
-    sigmatch_table[DETECT_AL_QUIC_VERSION].desc = "match Quic version";
-    sigmatch_table[DETECT_AL_QUIC_VERSION].url = "/rules/quic-keywords.html#quic-version";
-    sigmatch_table[DETECT_AL_QUIC_VERSION].Setup = DetectQuicVersionSetup;
-    sigmatch_table[DETECT_AL_QUIC_VERSION].flags |= SIGMATCH_NOOPT | SIGMATCH_INFO_STICKY_BUFFER;
+    sigmatch_table[DETECT_QUIC_VERSION].name = KEYWORD_NAME;
+    sigmatch_table[DETECT_QUIC_VERSION].desc = "match Quic version";
+    sigmatch_table[DETECT_QUIC_VERSION].url = "/rules/quic-keywords.html#quic-version";
+    sigmatch_table[DETECT_QUIC_VERSION].Setup = DetectQuicVersionSetup;
+    sigmatch_table[DETECT_QUIC_VERSION].flags |= SIGMATCH_NOOPT | SIGMATCH_INFO_STICKY_BUFFER;
 #ifdef UNITTESTS
-    sigmatch_table[DETECT_AL_QUIC_VERSION].RegisterTests = DetectQuicVersionRegisterTests;
+    sigmatch_table[DETECT_QUIC_VERSION].RegisterTests = DetectQuicVersionRegisterTests;
 #endif
 
     DetectAppLayerMpmRegister(BUFFER_NAME, SIG_FLAG_TOSERVER, 2, PrefilterGenericMpmRegister,
@@ -95,7 +94,7 @@ void DetectQuicVersionRegister(void)
 
 /**
  * \internal
- * \brief this function is used to add the parsed sigmatch  into the current signature
+ * \brief this function is used to add the parsed sigmatch into the current signature
  *
  * \param de_ctx pointer to the Detection Engine Context
  * \param s pointer to the Current Signature
@@ -106,10 +105,10 @@ void DetectQuicVersionRegister(void)
  */
 static int DetectQuicVersionSetup(DetectEngineCtx *de_ctx, Signature *s, const char *rawstr)
 {
-    if (DetectBufferSetActiveList(de_ctx, s, quic_version_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, quic_version_id) < 0)
         return -1;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_QUIC) < 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_QUIC) < 0)
         return -1;
 
     return 0;

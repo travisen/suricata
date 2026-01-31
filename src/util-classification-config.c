@@ -58,7 +58,7 @@ static SCClassConfClasstype *SCClassConfAllocClasstype(uint16_t classtype_id,
         const char *classtype, const char *classtype_desc, int priority);
 static void SCClassConfDeAllocClasstype(SCClassConfClasstype *ct);
 
-void SCClassConfInit(DetectEngineCtx *de_ctx)
+void SCClassSCConfInit(DetectEngineCtx *de_ctx)
 {
     int en;
     PCRE2_SIZE eo;
@@ -76,7 +76,6 @@ void SCClassConfInit(DetectEngineCtx *de_ctx)
     }
     de_ctx->class_conf_regex_match =
             pcre2_match_data_create_from_pattern(de_ctx->class_conf_regex, NULL);
-    return;
 }
 
 void SCClassConfDeinit(DetectEngineCtx *de_ctx)
@@ -161,13 +160,13 @@ static const char *SCClassConfGetConfFilename(const DetectEngineCtx *de_ctx)
 
         /* try loading prefix setting, fall back to global if that
          * fails. */
-        if (ConfGet(config_value, &log_filename) != 1) {
-            if (ConfGet("classification-file", &log_filename) != 1) {
+        if (SCConfGet(config_value, &log_filename) != 1) {
+            if (SCConfGet("classification-file", &log_filename) != 1) {
                 log_filename = (char *)SC_CLASS_CONF_DEF_CONF_FILEPATH;
             }
         }
     } else {
-        if (ConfGet("classification-file", &log_filename) != 1) {
+        if (SCConfGet("classification-file", &log_filename) != 1) {
             log_filename = (char *)SC_CLASS_CONF_DEF_CONF_FILEPATH;
         }
     }
@@ -178,7 +177,7 @@ static const char *SCClassConfGetConfFilename(const DetectEngineCtx *de_ctx)
 /**
  * \brief Releases resources used by the Classification Config API.
  */
-static void SCClassConfDeInitLocalResources(DetectEngineCtx *de_ctx, FILE *fd)
+static void SCClassConfDeInitLocalResources(FILE *fd)
 {
     if (fd != NULL) {
         fclose(fd);
@@ -194,8 +193,6 @@ void SCClassConfDeInitContext(DetectEngineCtx *de_ctx)
         HashTableFree(de_ctx->class_conf_ht);
 
     de_ctx->class_conf_ht = NULL;
-
-    return;
 }
 
 /**
@@ -435,8 +432,6 @@ static void SCClassConfDeAllocClasstype(SCClassConfClasstype *ct)
 
         SCFree(ct);
     }
-
-    return;
 }
 
 /**
@@ -453,9 +448,9 @@ uint32_t SCClassConfClasstypeHashFunc(HashTable *ht, void *data, uint16_t datale
 {
     SCClassConfClasstype *ct = (SCClassConfClasstype *)data;
     uint32_t hash = 0;
-    int i = 0;
+    size_t i = 0;
 
-    int len = strlen(ct->classtype);
+    size_t len = strlen(ct->classtype);
 
     for (i = 0; i < len; i++)
         hash += u8_tolower((unsigned char)(ct->classtype)[i]);
@@ -483,8 +478,6 @@ char SCClassConfClasstypeHashCompareFunc(void *data1, uint16_t datalen1,
 {
     SCClassConfClasstype *ct1 = (SCClassConfClasstype *)data1;
     SCClassConfClasstype *ct2 = (SCClassConfClasstype *)data2;
-    int len1 = 0;
-    int len2 = 0;
 
     if (ct1 == NULL || ct2 == NULL)
         return 0;
@@ -492,10 +485,7 @@ char SCClassConfClasstypeHashCompareFunc(void *data1, uint16_t datalen1,
     if (ct1->classtype == NULL || ct2->classtype == NULL)
         return 0;
 
-    len1 = strlen(ct1->classtype);
-    len2 = strlen(ct2->classtype);
-
-    if (len1 == len2 && memcmp(ct1->classtype, ct2->classtype, len1) == 0) {
+    if (strcmp(ct1->classtype, ct2->classtype) == 0) {
         SCLogDebug("Match found inside Classification-Config hash function");
         return 1;
     }
@@ -512,8 +502,6 @@ char SCClassConfClasstypeHashCompareFunc(void *data1, uint16_t datalen1,
 void SCClassConfClasstypeHashFree(void *ch)
 {
     SCClassConfDeAllocClasstype(ch);
-
-    return;
 }
 
 /**
@@ -549,7 +537,7 @@ bool SCClassConfLoadClassificationConfigFile(DetectEngineCtx *de_ctx, FILE *fd)
         ret = false;
     }
 
-    SCClassConfDeInitLocalResources(de_ctx, fd);
+    SCClassConfDeInitLocalResources(fd);
 
     return ret;
 }
@@ -568,6 +556,10 @@ bool SCClassConfLoadClassificationConfigFile(DetectEngineCtx *de_ctx, FILE *fd)
 SCClassConfClasstype *SCClassConfGetClasstype(const char *ct_name,
                                               DetectEngineCtx *de_ctx)
 {
+    if (strlen(ct_name) > CLASSTYPE_NAME_MAX_LEN) {
+        DEBUG_VALIDATE_BUG_ON(strlen(ct_name) > CLASSTYPE_NAME_MAX_LEN);
+        return NULL;
+    }
     char name[strlen(ct_name) + 1];
     size_t s;
     for (s = 0; s < strlen(ct_name); s++)
@@ -662,6 +654,7 @@ static int SCClassConfTest01(void)
     if (de_ctx == NULL)
         return result;
 
+    SCClassConfDeInitContext(de_ctx);
     FILE *fd = SCClassConfGenerateValidDummyClassConfigFD01();
     SCClassConfLoadClassificationConfigFile(de_ctx, fd);
 
@@ -688,6 +681,7 @@ static int SCClassConfTest02(void)
     if (de_ctx == NULL)
         return result;
 
+    SCClassConfDeInitContext(de_ctx);
     FILE *fd = SCClassConfGenerateInvalidDummyClassConfigFD03();
     SCClassConfLoadClassificationConfigFile(de_ctx, fd);
 
@@ -711,6 +705,7 @@ static int SCClassConfTest03(void)
 
     FAIL_IF_NULL(de_ctx);
 
+    SCClassConfDeInitContext(de_ctx);
     FILE *fd = SCClassConfGenerateInvalidDummyClassConfigFD02();
     FAIL_IF(SCClassConfLoadClassificationConfigFile(de_ctx, fd));
 
@@ -726,29 +721,24 @@ static int SCClassConfTest03(void)
 static int SCClassConfTest04(void)
 {
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    int result = 1;
+    FAIL_IF_NULL(de_ctx);
 
-    if (de_ctx == NULL)
-        return 0;
-
+    SCClassConfDeInitContext(de_ctx);
     FILE *fd = SCClassConfGenerateValidDummyClassConfigFD01();
     SCClassConfLoadClassificationConfigFile(de_ctx, fd);
 
-    if (de_ctx->class_conf_ht == NULL)
-        return 0;
+    FAIL_IF_NULL(de_ctx->class_conf_ht);
+    FAIL_IF_NOT(de_ctx->class_conf_ht->count == 3);
 
-    result = (de_ctx->class_conf_ht->count == 3);
-
-    result &= (SCClassConfGetClasstype("unknown", de_ctx) != NULL);
-    result &= (SCClassConfGetClasstype("unKnoWn", de_ctx) != NULL);
-    result &= (SCClassConfGetClasstype("bamboo", de_ctx) == NULL);
-    result &= (SCClassConfGetClasstype("bad-unknown", de_ctx) != NULL);
-    result &= (SCClassConfGetClasstype("BAD-UNKnOWN", de_ctx) != NULL);
-    result &= (SCClassConfGetClasstype("bed-unknown", de_ctx) == NULL);
+    FAIL_IF_NOT(SCClassConfGetClasstype("unknown", de_ctx) != NULL);
+    FAIL_IF_NOT(SCClassConfGetClasstype("unKnoWn", de_ctx) != NULL);
+    FAIL_IF_NOT(SCClassConfGetClasstype("bamboo", de_ctx) == NULL);
+    FAIL_IF_NOT(SCClassConfGetClasstype("bad-unknown", de_ctx) != NULL);
+    FAIL_IF_NOT(SCClassConfGetClasstype("BAD-UNKnOWN", de_ctx) != NULL);
+    FAIL_IF_NOT(SCClassConfGetClasstype("bed-unknown", de_ctx) == NULL);
 
     DetectEngineCtxFree(de_ctx);
-
-    return result;
+    PASS;
 }
 
 /**
@@ -759,29 +749,24 @@ static int SCClassConfTest04(void)
 static int SCClassConfTest05(void)
 {
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
-    int result = 1;
+    FAIL_IF_NULL(de_ctx);
 
-    if (de_ctx == NULL)
-        return 0;
-
+    SCClassConfDeInitContext(de_ctx);
     FILE *fd = SCClassConfGenerateInvalidDummyClassConfigFD03();
     SCClassConfLoadClassificationConfigFile(de_ctx, fd);
 
-    if (de_ctx->class_conf_ht == NULL)
-        return 0;
+    FAIL_IF_NULL(de_ctx->class_conf_ht);
+    FAIL_IF_NOT(de_ctx->class_conf_ht->count == 0);
 
-    result = (de_ctx->class_conf_ht->count == 0);
-
-    result &= (SCClassConfGetClasstype("unknown", de_ctx) == NULL);
-    result &= (SCClassConfGetClasstype("unKnoWn", de_ctx) == NULL);
-    result &= (SCClassConfGetClasstype("bamboo", de_ctx) == NULL);
-    result &= (SCClassConfGetClasstype("bad-unknown", de_ctx) == NULL);
-    result &= (SCClassConfGetClasstype("BAD-UNKnOWN", de_ctx) == NULL);
-    result &= (SCClassConfGetClasstype("bed-unknown", de_ctx) == NULL);
+    FAIL_IF_NOT(SCClassConfGetClasstype("unknown", de_ctx) == NULL);
+    FAIL_IF_NOT(SCClassConfGetClasstype("unKnoWn", de_ctx) == NULL);
+    FAIL_IF_NOT(SCClassConfGetClasstype("bamboo", de_ctx) == NULL);
+    FAIL_IF_NOT(SCClassConfGetClasstype("bad-unknown", de_ctx) == NULL);
+    FAIL_IF_NOT(SCClassConfGetClasstype("BAD-UNKnOWN", de_ctx) == NULL);
+    FAIL_IF_NOT(SCClassConfGetClasstype("bed-unknown", de_ctx) == NULL);
 
     DetectEngineCtxFree(de_ctx);
-
-    return result;
+    PASS;
 }
 
 /**

@@ -44,7 +44,7 @@ int DecodeEthernet(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
 {
     DEBUG_VALIDATE_BUG_ON(pkt == NULL);
 
-    StatsIncr(tv, dtv->counter_eth);
+    StatsCounterIncr(&tv->stats, dtv->counter_eth);
 
     if (unlikely(len < ETHERNET_HEADER_LEN)) {
         ENGINE_SET_INVALID_EVENT(p, ETHERNET_PKT_TOO_SMALL);
@@ -54,12 +54,12 @@ int DecodeEthernet(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
     if (!PacketIncreaseCheckLayers(p)) {
         return TM_ECODE_FAILED;
     }
-    p->ethh = (EthernetHdr *)pkt;
+    EthernetHdr *ethh = PacketSetEthernet(p, pkt);
 
-    SCLogDebug("p %p pkt %p ether type %04x", p, pkt, SCNtohs(p->ethh->eth_type));
+    SCLogDebug("p %p pkt %p ether type %04x", p, pkt, SCNtohs(ethh->eth_type));
 
-    DecodeNetworkLayer(tv, dtv, SCNtohs(p->ethh->eth_type), p,
-            pkt + ETHERNET_HEADER_LEN, len - ETHERNET_HEADER_LEN);
+    DecodeNetworkLayer(tv, dtv, SCNtohs(ethh->eth_type), p, pkt + ETHERNET_HEADER_LEN,
+            len - ETHERNET_HEADER_LEN);
 
     return TM_ECODE_OK;
 }
@@ -101,7 +101,7 @@ static int DecodeEthernetTest01 (void)
 
     DecodeEthernet(&tv, &dtv, p, raw_eth, sizeof(raw_eth));
 
-    SCFree(p);
+    PacketFree(p);
     return 1;
 }
 
@@ -127,7 +127,7 @@ static int DecodeEthernetTestDceTooSmall(void)
 
     FAIL_IF_NOT(ENGINE_ISSET_EVENT(p, DCE_PKT_TOO_SMALL));
 
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 
@@ -162,7 +162,7 @@ static int DecodeEthernetTestDceNextTooSmall(void)
 
     FAIL_IF_NOT(ENGINE_ISSET_EVENT(p, DCE_PKT_TOO_SMALL));
 
-    SCFree(p);
+    PacketFree(p);
     PASS;
 }
 

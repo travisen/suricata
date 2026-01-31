@@ -21,8 +21,8 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __FLOW_PRIVATE_H__
-#define __FLOW_PRIVATE_H__
+#ifndef SURICATA_FLOW_PRIVATE_H
+#define SURICATA_FLOW_PRIVATE_H
 
 #include "flow-hash.h"
 #include "flow-queue.h"
@@ -62,8 +62,6 @@
 #define FLOW_IPPROTO_ICMP_EMERG_NEW_TIMEOUT 10
 #define FLOW_IPPROTO_ICMP_EMERG_EST_TIMEOUT 100
 
-#define FLOW_BYPASSED_TIMEOUT   100
-
 enum {
     FLOW_PROTO_TCP = 0,
     FLOW_PROTO_UDP,
@@ -74,7 +72,7 @@ enum {
     FLOW_PROTO_MAX,
 };
 /* max used in app-layer (counters) */
-#define FLOW_PROTO_APPLAYER_MAX FLOW_PROTO_UDP + 1
+#define FLOW_PROTO_APPLAYER_MAX (FLOW_PROTO_UDP + 1)
 
 /*
  * Variables
@@ -119,7 +117,7 @@ static inline uint32_t FlowGetFlowTimeoutDirect(
             break;
 #ifdef CAPTURE_OFFLOAD
         case FLOW_STATE_CAPTURE_BYPASSED:
-            timeout = FLOW_BYPASSED_TIMEOUT;
+            timeout = flow_timeouts[protomap].bypassed_timeout;
             break;
 #endif
         case FLOW_STATE_LOCAL_BYPASSED:
@@ -169,7 +167,7 @@ static inline uint32_t FlowGetTimeoutPolicy(const Flow *f)
             break;
 #ifdef CAPTURE_OFFLOAD
         case FLOW_STATE_CAPTURE_BYPASSED:
-            timeout = FLOW_BYPASSED_TIMEOUT;
+            timeout = flow_timeouts[f->protomap].bypassed_timeout;
             break;
 #endif
         case FLOW_STATE_LOCAL_BYPASSED:
@@ -178,4 +176,4 @@ static inline uint32_t FlowGetTimeoutPolicy(const Flow *f)
     }
     return timeout;
 }
-#endif /* __FLOW_PRIVATE_H__ */
+#endif /* SURICATA_FLOW_PRIVATE_H */

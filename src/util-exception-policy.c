@@ -1,4 +1,4 @@
-/* Copyright (C) 2022-2023 Open Information Security Foundation
+/* Copyright (C) 2022-2025 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -19,19 +19,24 @@
  * \file
  */
 
+#include "util-exception-policy.h"
 #include "suricata-common.h"
 #include "suricata.h"
 #include "packet.h"
-#include "util-exception-policy.h"
 #include "util-misc.h"
 #include "stream-tcp-reassemble.h"
 #include "action-globals.h"
+#include "conf.h"
+#include "flow.h"
+#include "stream-tcp.h"
+#include "defrag-hash.h"
+#include "app-layer-parser.h"
 
 enum ExceptionPolicy g_eps_master_switch = EXCEPTION_POLICY_NOT_SET;
 /** true if exception policy was defined in config */
 static bool g_eps_have_exception_policy = false;
 
-static const char *ExceptionPolicyEnumToString(enum ExceptionPolicy policy)
+const char *ExceptionPolicyEnumToString(enum ExceptionPolicy policy, bool is_json)
 {
     switch (policy) {
         case EXCEPTION_POLICY_NOT_SET:
@@ -42,14 +47,16 @@ static const char *ExceptionPolicyEnumToString(enum ExceptionPolicy policy)
             return "reject";
         case EXCEPTION_POLICY_BYPASS_FLOW:
             return "bypass";
+        case EXCEPTION_POLICY_REJECT_BOTH:
+            return "reject_both";
         case EXCEPTION_POLICY_DROP_FLOW:
-            return "drop-flow";
+            return is_json ? "drop_flow" : "drop-flow";
         case EXCEPTION_POLICY_DROP_PACKET:
-            return "drop-packet";
+            return is_json ? "drop_packet" : "drop-packet";
         case EXCEPTION_POLICY_PASS_PACKET:
-            return "pass-packet";
+            return is_json ? "pass_packet" : "pass-packet";
         case EXCEPTION_POLICY_PASS_FLOW:
-            return "pass-flow";
+            return is_json ? "pass_flow" : "pass-flow";
     }
     // TODO we shouldn't reach this, but if we do, better not to leave this as simply null...
     return "not set";
@@ -60,22 +67,94 @@ void SetMasterExceptionPolicy(void)
     g_eps_master_switch = ExceptionPolicyParse("exception-policy", true);
 }
 
-static enum ExceptionPolicy GetMasterExceptionPolicy(const char *option)
+static enum ExceptionPolicy GetMasterExceptionPolicy(void)
 {
     return g_eps_master_switch;
 }
 
+static uint8_t ExceptionPolicyFlag(enum PacketDropReason drop_reason)
+{
+    switch (drop_reason) {
+        case PKT_DROP_REASON_DEFRAG_MEMCAP:
+            return EXCEPTION_TARGET_FLAG_DEFRAG_MEMCAP;
+        case PKT_DROP_REASON_STREAM_MEMCAP:
+            return EXCEPTION_TARGET_FLAG_SESSION_MEMCAP;
+        case PKT_DROP_REASON_STREAM_REASSEMBLY:
+            return EXCEPTION_TARGET_FLAG_REASSEMBLY_MEMCAP;
+        case PKT_DROP_REASON_FLOW_MEMCAP:
+            return EXCEPTION_TARGET_FLAG_FLOW_MEMCAP;
+        case PKT_DROP_REASON_STREAM_MIDSTREAM:
+            return EXCEPTION_TARGET_FLAG_MIDSTREAM;
+        case PKT_DROP_REASON_APPLAYER_ERROR:
+            return EXCEPTION_TARGET_FLAG_APPLAYER_ERROR;
+        default:
+            return 0;
+    }
+
+    return 0;
+}
+
+const char *ExceptionPolicyTargetFlagToString(uint8_t target_flag)
+{
+    switch (target_flag) {
+        case EXCEPTION_TARGET_FLAG_DEFRAG_MEMCAP:
+            return "defrag_memcap";
+        case EXCEPTION_TARGET_FLAG_SESSION_MEMCAP:
+            return "stream_memcap";
+        case EXCEPTION_TARGET_FLAG_REASSEMBLY_MEMCAP:
+            return "stream_reassembly_memcap";
+        case EXCEPTION_TARGET_FLAG_FLOW_MEMCAP:
+            return "flow_memcap";
+        case EXCEPTION_TARGET_FLAG_MIDSTREAM:
+            return "stream_midstream";
+        case EXCEPTION_TARGET_FLAG_APPLAYER_ERROR:
+            return "app_layer_error";
+        default:
+            return "none";
+    }
+}
+
+enum ExceptionPolicy ExceptionPolicyTargetPolicy(uint8_t target_flag)
+{
+    switch (target_flag) {
+        case EXCEPTION_TARGET_FLAG_DEFRAG_MEMCAP:
+            return DefragGetMemcapExceptionPolicy();
+        case EXCEPTION_TARGET_FLAG_SESSION_MEMCAP:
+            return StreamTcpSsnMemcapGetExceptionPolicy();
+        case EXCEPTION_TARGET_FLAG_REASSEMBLY_MEMCAP:
+            return StreamTcpReassemblyMemcapGetExceptionPolicy();
+        case EXCEPTION_TARGET_FLAG_FLOW_MEMCAP:
+            return FlowGetMemcapExceptionPolicy();
+        case EXCEPTION_TARGET_FLAG_MIDSTREAM:
+            return StreamMidstreamGetExceptionPolicy();
+        case EXCEPTION_TARGET_FLAG_APPLAYER_ERROR:
+            return AppLayerErrorGetExceptionPolicy();
+        default:
+            return EXCEPTION_POLICY_NOT_SET;
+    }
+    return EXCEPTION_POLICY_NOT_SET;
+}
+
 void ExceptionPolicyApply(Packet *p, enum ExceptionPolicy policy, enum PacketDropReason drop_reason)
 {
-    SCLogDebug("start: pcap_cnt %" PRIu64 ", policy %u", p->pcap_cnt, policy);
+    SCLogDebug("start: pcap_cnt %" PRIu64 ", policy %u", PcapPacketCntGet(p), policy);
+    if (p->flow) {
+        p->flow->applied_exception_policy |= ExceptionPolicyFlag(drop_reason);
+    }
     switch (policy) {
         case EXCEPTION_POLICY_AUTO:
             break;
         case EXCEPTION_POLICY_NOT_SET:
             break;
         case EXCEPTION_POLICY_REJECT:
-            SCLogDebug("EXCEPTION_POLICY_REJECT");
-            PacketDrop(p, ACTION_REJECT, drop_reason);
+        case EXCEPTION_POLICY_REJECT_BOTH:
+            if (policy == EXCEPTION_POLICY_REJECT) {
+                SCLogDebug("EXCEPTION_POLICY_REJECT");
+                PacketDrop(p, ACTION_REJECT, drop_reason);
+            } else {
+                SCLogDebug("EXCEPTION_POLICY_REJECT_BOTH");
+                PacketDrop(p, ACTION_REJECT_BOTH, drop_reason);
+            }
             if (!EngineModeIsIPS()) {
                 break;
             }
@@ -85,7 +164,6 @@ void ExceptionPolicyApply(Packet *p, enum ExceptionPolicy policy, enum PacketDro
             if (p->flow) {
                 p->flow->flags |= FLOW_ACTION_DROP;
                 FlowSetNoPayloadInspectionFlag(p->flow);
-                FlowSetNoPacketInspectionFlag(p->flow);
                 StreamTcpDisableAppLayer(p->flow);
             }
             /* fall through */
@@ -102,7 +180,6 @@ void ExceptionPolicyApply(Packet *p, enum ExceptionPolicy policy, enum PacketDro
             SCLogDebug("EXCEPTION_POLICY_PASS_FLOW");
             if (p->flow) {
                 p->flow->flags |= FLOW_ACTION_PASS;
-                FlowSetNoPacketInspectionFlag(p->flow); // TODO util func
             }
             /* fall through */
         case EXCEPTION_POLICY_PASS_PACKET:
@@ -135,6 +212,7 @@ static enum ExceptionPolicy PickPacketAction(const char *option, enum ExceptionP
         case EXCEPTION_POLICY_PASS_PACKET:
             break;
         case EXCEPTION_POLICY_REJECT:
+        case EXCEPTION_POLICY_REJECT_BOTH:
             break;
         case EXCEPTION_POLICY_NOT_SET:
             break;
@@ -160,6 +238,8 @@ static enum ExceptionPolicy ExceptionPolicyConfigValueParse(
         policy = EXCEPTION_POLICY_PASS_PACKET;
     } else if (strcmp(value_str, "reject") == 0) {
         policy = EXCEPTION_POLICY_REJECT;
+    } else if (strcmp(value_str, "rejectboth") == 0) {
+        policy = EXCEPTION_POLICY_REJECT_BOTH;
     } else if (strcmp(value_str, "ignore") == 0) { // TODO name?
         policy = EXCEPTION_POLICY_NOT_SET;
     } else if (strcmp(value_str, "auto") == 0) {
@@ -197,7 +277,7 @@ static enum ExceptionPolicy ExceptionPolicyMasterParse(const char *value)
     }
     g_eps_have_exception_policy = true;
 
-    SCLogInfo("master exception-policy set to: %s", ExceptionPolicyEnumToString(policy));
+    SCLogInfo("master exception-policy set to: %s", ExceptionPolicyEnumToString(policy, false));
 
     return policy;
 }
@@ -207,7 +287,7 @@ static enum ExceptionPolicy ExceptionPolicyGetDefault(
 {
     enum ExceptionPolicy p = EXCEPTION_POLICY_NOT_SET;
     if (g_eps_have_exception_policy) {
-        p = GetMasterExceptionPolicy(option);
+        p = GetMasterExceptionPolicy();
 
         if (p == EXCEPTION_POLICY_AUTO) {
             p = ExceptionPolicyPickAuto(midstream, support_flow);
@@ -217,13 +297,13 @@ static enum ExceptionPolicy ExceptionPolicyGetDefault(
             p = PickPacketAction(option, p);
         }
         SCLogConfig("%s: %s (defined via 'exception-policy' master switch)", option,
-                ExceptionPolicyEnumToString(p));
+                ExceptionPolicyEnumToString(p, false));
         return p;
     } else if (EngineModeIsIPS() && !midstream) {
         p = EXCEPTION_POLICY_DROP_FLOW;
     }
     SCLogConfig("%s: %s (defined via 'built-in default' for %s-mode)", option,
-            ExceptionPolicyEnumToString(p), EngineModeIsIPS() ? "IPS" : "IDS");
+            ExceptionPolicyEnumToString(p, false), EngineModeIsIPS() ? "IPS" : "IDS");
 
     return p;
 }
@@ -233,7 +313,7 @@ enum ExceptionPolicy ExceptionPolicyParse(const char *option, bool support_flow)
     enum ExceptionPolicy policy = EXCEPTION_POLICY_NOT_SET;
     const char *value_str = NULL;
 
-    if ((ConfGet(option, &value_str) == 1) && value_str != NULL) {
+    if ((SCConfGet(option, &value_str) == 1) && value_str != NULL) {
         if (strcmp(option, "exception-policy") == 0) {
             policy = ExceptionPolicyMasterParse(value_str);
         } else {
@@ -244,7 +324,7 @@ enum ExceptionPolicy ExceptionPolicyParse(const char *option, bool support_flow)
             if (!support_flow) {
                 policy = PickPacketAction(option, policy);
             }
-            SCLogConfig("%s: %s", option, ExceptionPolicyEnumToString(policy));
+            SCLogConfig("%s: %s", option, ExceptionPolicyEnumToString(policy, false));
         }
     } else {
         policy = ExceptionPolicyGetDefault(option, support_flow, false);
@@ -258,7 +338,7 @@ enum ExceptionPolicy ExceptionPolicyMidstreamParse(bool midstream_enabled)
     enum ExceptionPolicy policy = EXCEPTION_POLICY_NOT_SET;
     const char *value_str = NULL;
     /* policy was set directly */
-    if ((ConfGet("stream.midstream-policy", &value_str)) == 1 && value_str != NULL) {
+    if ((SCConfGet("stream.midstream-policy", &value_str)) == 1 && value_str != NULL) {
         policy = ExceptionPolicyConfigValueParse("midstream-policy", value_str);
         if (policy == EXCEPTION_POLICY_AUTO) {
             policy = ExceptionPolicyPickAuto(midstream_enabled, true);
@@ -292,6 +372,22 @@ enum ExceptionPolicy ExceptionPolicyMidstreamParse(bool midstream_enabled)
     }
 
     return policy;
+}
+
+void ExceptionPolicySetStatsCounters(ThreadVars *tv, ExceptionPolicyCounters *counter,
+        ExceptionPolicyStatsSetts *setting, enum ExceptionPolicy conf_policy,
+        const char *default_str, bool (*isExceptionPolicyValid)(enum ExceptionPolicy))
+{
+    if (conf_policy != EXCEPTION_POLICY_NOT_SET) {
+        /* set-up policy counters */
+        for (enum ExceptionPolicy i = EXCEPTION_POLICY_NOT_SET + 1; i < EXCEPTION_POLICY_MAX; i++) {
+            if (isExceptionPolicyValid(i)) {
+                snprintf(setting->eps_name[i], sizeof(setting->eps_name[i]), "%s%s", default_str,
+                        ExceptionPolicyEnumToString(i, true));
+                counter->eps_id[i] = StatsRegisterCounter(setting->eps_name[i], &tv->stats);
+            }
+        }
+    }
 }
 
 #ifndef DEBUG

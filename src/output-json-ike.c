@@ -62,13 +62,13 @@ typedef struct LogIKELogThread_ {
     OutputJsonThreadCtx *ctx;
 } LogIKELogThread;
 
-bool EveIKEAddMetadata(const Flow *f, uint64_t tx_id, JsonBuilder *js)
+bool EveIKEAddMetadata(const Flow *f, uint64_t tx_id, SCJsonBuilder *js)
 {
     IKEState *state = FlowGetAppState(f);
     if (state) {
         IKETransaction *tx = AppLayerParserGetTx(f->proto, ALPROTO_IKE, state, tx_id);
         if (tx) {
-            return rs_ike_logger_log(state, tx, LOG_IKE_EXTENDED, js);
+            return SCIkeLoggerLog(state, tx, LOG_IKE_EXTENDED, js);
         }
     }
 
@@ -79,24 +79,24 @@ static int JsonIKELogger(ThreadVars *tv, void *thread_data, const Packet *p, Flo
         void *tx, uint64_t tx_id)
 {
     LogIKELogThread *thread = thread_data;
-    JsonBuilder *jb =
+    SCJsonBuilder *jb =
             CreateEveHeader((Packet *)p, LOG_DIR_PACKET, "ike", NULL, thread->ikelog_ctx->eve_ctx);
     if (unlikely(jb == NULL)) {
         return TM_ECODE_FAILED;
     }
 
     LogIKEFileCtx *ike_ctx = thread->ikelog_ctx;
-    if (!rs_ike_logger_log(state, tx, ike_ctx->flags, jb)) {
+    if (!SCIkeLoggerLog(state, tx, ike_ctx->flags, jb)) {
         goto error;
     }
 
-    OutputJsonBuilderBuffer(jb, thread->ctx);
+    OutputJsonBuilderBuffer(tv, p, p->flow, jb, thread->ctx);
 
-    jb_free(jb);
+    SCJbFree(jb);
     return TM_ECODE_OK;
 
 error:
-    jb_free(jb);
+    SCJbFree(jb);
     return TM_ECODE_FAILED;
 }
 
@@ -107,7 +107,7 @@ static void OutputIKELogDeInitCtxSub(OutputCtx *output_ctx)
     SCFree(output_ctx);
 }
 
-static OutputInitResult OutputIKELogInitSub(ConfNode *conf, OutputCtx *parent_ctx)
+static OutputInitResult OutputIKELogInitSub(SCConfNode *conf, OutputCtx *parent_ctx)
 {
     OutputInitResult result = { NULL, false };
     OutputJsonCtx *ajt = parent_ctx->data;
@@ -125,9 +125,9 @@ static OutputInitResult OutputIKELogInitSub(ConfNode *conf, OutputCtx *parent_ct
     }
 
     ikelog_ctx->flags = LOG_IKE_DEFAULT;
-    const char *extended = ConfNodeLookupChildValue(conf, "extended");
+    const char *extended = SCConfNodeLookupChildValue(conf, "extended");
     if (extended) {
-        if (ConfValIsTrue(extended)) {
+        if (SCConfValIsTrue(extended)) {
             ikelog_ctx->flags = LOG_IKE_EXTENDED;
         }
     }
@@ -135,7 +135,7 @@ static OutputInitResult OutputIKELogInitSub(ConfNode *conf, OutputCtx *parent_ct
     output_ctx->data = ikelog_ctx;
     output_ctx->DeInit = OutputIKELogDeInitCtxSub;
 
-    AppLayerParserRegisterLogger(IPPROTO_UDP, ALPROTO_IKE);
+    SCAppLayerParserRegisterLogger(IPPROTO_UDP, ALPROTO_IKE);
 
     result.ctx = output_ctx;
     result.ok = true;
@@ -184,5 +184,5 @@ void JsonIKELogRegister(void)
     /* Register as an eve sub-module. */
     OutputRegisterTxSubModule(LOGGER_JSON_TX, "eve-log", "JsonIKELog", "eve-log.ike",
             OutputIKELogInitSub, ALPROTO_IKE, JsonIKELogger, JsonIKELogThreadInit,
-            JsonIKELogThreadDeinit, NULL);
+            JsonIKELogThreadDeinit);
 }

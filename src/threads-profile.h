@@ -23,8 +23,8 @@
  * Lock profiling wrappers
  */
 
-#ifndef __THREADS_PROFILE_H__
-#define __THREADS_PROFILE_H__
+#ifndef SURICATA_THREADS_PROFILE_H
+#define SURICATA_THREADS_PROFILE_H
 
 // UtilCpuGetTicks
 #include "util-cpu.h"
@@ -90,6 +90,7 @@ extern thread_local uint64_t mutex_lock_cnt;
 #define SCMutexInit(mut, mutattr ) pthread_mutex_init(mut, mutattr)
 #define SCMutexLock(mut) SCMutexLock_profile(mut)
 #define SCMutexTrylock(mut) pthread_mutex_trylock(mut)
+#define SCMutexIsLocked(mut)       (SCMutexTrylock(mut) == EBUSY)
 #define SCMutexUnlock(mut) pthread_mutex_unlock(mut)
 #define SCMutexDestroy pthread_mutex_destroy
 #define SCMUTEX_INITIALIZER PTHREAD_MUTEX_INITIALIZER

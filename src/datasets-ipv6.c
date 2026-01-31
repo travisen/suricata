@@ -24,7 +24,9 @@
 #include "suricata-common.h"
 #include "conf.h"
 #include "datasets.h"
+#include "datasets-context-json.h"
 #include "datasets-ipv6.h"
+#include "util-hash-lookup3.h"
 #include "util-thash.h"
 #include "util-print.h"
 
@@ -37,6 +39,20 @@ int IPv6Set(void *dst, void *src)
     return 0;
 }
 
+int IPv6JsonSet(void *dst, void *src)
+{
+    if (IPv6Set(dst, src) < 0)
+        return -1;
+
+    IPv6Type *src_s = src;
+    IPv6Type *dst_s = dst;
+
+    if (DatajsonCopyJson(&dst_s->json, &src_s->json) < 0)
+        return -1;
+
+    return 0;
+}
+
 bool IPv6Compare(void *a, void *b)
 {
     const IPv6Type *as = a;
@@ -45,18 +61,27 @@ bool IPv6Compare(void *a, void *b)
     return (memcmp(as->ipv6, bs->ipv6, sizeof(as->ipv6)) == 0);
 }
 
-uint32_t IPv6Hash(void *s)
+uint32_t IPv6Hash(uint32_t hash_seed, void *s)
 {
     const IPv6Type *str = s;
-    uint32_t hash = 5381;
-
-    for (int i = 0; i < (int)sizeof(str->ipv6); i++) {
-        hash = ((hash << 5) + hash) + str->ipv6[i]; /* hash * 33 + c */
-    }
-    return hash;
+    return hashword((uint32_t *)str->ipv6, 4, hash_seed);
 }
 
 // data stays in hash
 void IPv6Free(void *s)
 {
+}
+
+void IPv6JsonFree(void *s)
+{
+    const IPv6Type *as = s;
+    if (as->json.value) {
+        SCFree(as->json.value);
+    }
+}
+
+uint32_t IPv6JsonGetLength(void *s)
+{
+    const IPv6Type *as = s;
+    return as->json.len;
 }

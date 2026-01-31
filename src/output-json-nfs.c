@@ -47,25 +47,25 @@
 
 #include "rust.h"
 
-bool EveNFSAddMetadataRPC(const Flow *f, uint64_t tx_id, JsonBuilder *jb)
+bool EveNFSAddMetadataRPC(const Flow *f, uint64_t tx_id, SCJsonBuilder *jb)
 {
     NFSState *state = FlowGetAppState(f);
     if (state) {
         NFSTransaction *tx = AppLayerParserGetTx(f->proto, ALPROTO_NFS, state, tx_id);
         if (tx) {
-            return rs_rpc_log_json_response(tx, jb);
+            return SCNfsRpcLogJsonResponse(tx, jb);
         }
     }
     return false;
 }
 
-bool EveNFSAddMetadata(const Flow *f, uint64_t tx_id, JsonBuilder *jb)
+bool EveNFSAddMetadata(const Flow *f, uint64_t tx_id, SCJsonBuilder *jb)
 {
     NFSState *state = FlowGetAppState(f);
     if (state) {
         NFSTransaction *tx = AppLayerParserGetTx(f->proto, ALPROTO_NFS, state, tx_id);
         if (tx) {
-            return rs_nfs_log_json_response(state, tx, jb);
+            return SCNfsLogJsonResponse(state, tx, jb);
         }
     }
     return false;
@@ -77,33 +77,32 @@ static int JsonNFSLogger(ThreadVars *tv, void *thread_data,
     NFSTransaction *nfstx = tx;
     OutputJsonThreadCtx *thread = thread_data;
 
-    if (rs_nfs_tx_logging_is_filtered(state, nfstx))
+    if (SCNfsTxLoggingIsFiltered(state, nfstx))
         return TM_ECODE_OK;
 
-    JsonBuilder *jb = CreateEveHeader(p, LOG_DIR_PACKET, "nfs", NULL, thread->ctx);
+    SCJsonBuilder *jb = CreateEveHeader(p, LOG_DIR_PACKET, "nfs", NULL, thread->ctx);
     if (unlikely(jb == NULL)) {
         return TM_ECODE_OK;
     }
 
-    jb_open_object(jb, "rpc");
-    rs_rpc_log_json_response(tx, jb);
-    jb_close(jb);
+    SCJbOpenObject(jb, "rpc");
+    SCNfsRpcLogJsonResponse(tx, jb);
+    SCJbClose(jb);
 
-    jb_open_object(jb, "nfs");
-    rs_nfs_log_json_response(state, tx, jb);
-    jb_close(jb);
+    SCJbOpenObject(jb, "nfs");
+    SCNfsLogJsonResponse(state, tx, jb);
+    SCJbClose(jb);
 
     MemBufferReset(thread->buffer);
-    OutputJsonBuilderBuffer(jb, thread);
-    jb_free(jb);
+    OutputJsonBuilderBuffer(tv, p, p->flow, jb, thread);
+    SCJbFree(jb);
     return TM_ECODE_OK;
 }
 
-static OutputInitResult NFSLogInitSub(ConfNode *conf,
-    OutputCtx *parent_ctx)
+static OutputInitResult NFSLogInitSub(SCConfNode *conf, OutputCtx *parent_ctx)
 {
-    AppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_NFS);
-    AppLayerParserRegisterLogger(IPPROTO_UDP, ALPROTO_NFS);
+    SCAppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_NFS);
+    SCAppLayerParserRegisterLogger(IPPROTO_UDP, ALPROTO_NFS);
     return OutputJsonLogInitSub(conf, parent_ctx);
 }
 
@@ -111,7 +110,7 @@ void JsonNFSLogRegister(void)
 {
     /* Register as an eve sub-module. */
     OutputRegisterTxSubModule(LOGGER_JSON_TX, "eve-log", "JsonNFSLog", "eve-log.nfs", NFSLogInitSub,
-            ALPROTO_NFS, JsonNFSLogger, JsonLogThreadInit, JsonLogThreadDeinit, NULL);
+            ALPROTO_NFS, JsonNFSLogger, JsonLogThreadInit, JsonLogThreadDeinit);
 
     SCLogDebug("NFS JSON logger registered.");
 }

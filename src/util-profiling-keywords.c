@@ -32,6 +32,7 @@
 #include "detect-engine.h"
 #include "tm-threads.h"
 #include "util-conf.h"
+#include "util-path.h"
 #include "util-time.h"
 
 /**
@@ -59,22 +60,24 @@ static const char *profiling_file_mode = "a";
 
 void SCProfilingKeywordsGlobalInit(void)
 {
-    ConfNode *conf;
+    SCConfNode *conf;
 
-    conf = ConfGetNode("profiling.keywords");
+    conf = SCConfGetNode("profiling.keywords");
     if (conf != NULL) {
-        if (ConfNodeChildValueIsTrue(conf, "enabled")) {
+        if (SCConfNodeChildValueIsTrue(conf, "enabled")) {
             profiling_keyword_enabled = 1;
-            const char *filename = ConfNodeLookupChildValue(conf, "filename");
+            const char *filename = SCConfNodeLookupChildValue(conf, "filename");
             if (filename != NULL) {
-                const char *log_dir;
-                log_dir = ConfigGetLogDirectory();
+                if (PathIsAbsolute(filename)) {
+                    strlcpy(profiling_file_name, filename, sizeof(profiling_file_name));
+                } else {
+                    const char *log_dir = SCConfigGetLogDirectory();
+                    snprintf(profiling_file_name, sizeof(profiling_file_name), "%s/%s", log_dir,
+                            filename);
+                }
 
-                snprintf(profiling_file_name, sizeof(profiling_file_name), "%s/%s",
-                        log_dir, filename);
-
-                const char *v = ConfNodeLookupChildValue(conf, "append");
-                if (v == NULL || ConfValIsTrue(v)) {
+                const char *v = SCConfNodeLookupChildValue(conf, "append");
+                if (v == NULL || SCConfValIsTrue(v)) {
                     profiling_file_mode = "a";
                 } else {
                     profiling_file_mode = "w";

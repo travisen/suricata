@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2022 Open Information Security Foundation
+/* Copyright (C) 2007-2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -26,34 +26,75 @@
 
 #include "suricata-common.h"
 #include "decode.h"
-#include "threads.h"
-
-#include "stream-tcp-private.h"
-#include "stream-tcp-reassemble.h"
-#include "stream-tcp.h"
-#include "stream.h"
 
 #include "app-layer.h"
 #include "app-layer-detect-proto.h"
 #include "app-layer-protos.h"
 #include "app-layer-parser.h"
 #include "app-layer-frames.h"
+#include "app-layer-events.h"
 #include "app-layer-ssl.h"
 
-#include "decode-events.h"
 #include "conf.h"
 
-#include "util-spm.h"
-#include "util-unittest.h"
+#include "feature.h"
+
 #include "util-debug.h"
-#include "util-print.h"
-#include "util-pool.h"
-#include "util-byte.h"
 #include "util-ja3.h"
 #include "util-enum.h"
-#include "flow-util.h"
-#include "flow-private.h"
 #include "util-validate.h"
+
+static SCEnumCharMap tls_state_client_table[] = {
+    {
+            "client_in_progress",
+            TLS_STATE_CLIENT_IN_PROGRESS,
+    },
+    {
+            "client_hello_done",
+            TLS_STATE_CLIENT_HELLO_DONE,
+    },
+    {
+            "client_cert_done",
+            TLS_STATE_CLIENT_CERT_DONE,
+    },
+    {
+            "client_handshake_done",
+            TLS_STATE_CLIENT_HANDSHAKE_DONE,
+    },
+    {
+            "client_finished",
+            TLS_STATE_CLIENT_FINISHED,
+    },
+    { NULL, -1 },
+};
+
+static SCEnumCharMap tls_state_server_table[] = {
+    {
+            "server_in_progress",
+            TLS_STATE_SERVER_IN_PROGRESS,
+    },
+    {
+            "server_hello",
+            TLS_STATE_SERVER_HELLO,
+    },
+    {
+            "server_cert_done",
+            TLS_STATE_SERVER_CERT_DONE,
+    },
+    {
+            "server_hello_done",
+            TLS_STATE_SERVER_HELLO_DONE,
+    },
+    {
+            "server_handshake_done",
+            TLS_STATE_SERVER_HANDSHAKE_DONE,
+    },
+    {
+            "server_finished",
+            TLS_STATE_SERVER_FINISHED,
+    },
+    { NULL, -1 },
+};
 
 SCEnumCharMap tls_frame_table[] = {
     {
@@ -104,6 +145,7 @@ SCEnumCharMap tls_decoder_event_table[] = {
     { "INVALID_SNI_TYPE", TLS_DECODER_EVENT_INVALID_SNI_TYPE },
     { "INVALID_SNI_LENGTH", TLS_DECODER_EVENT_INVALID_SNI_LENGTH },
     { "TOO_MANY_RECORDS_IN_PACKET", TLS_DECODER_EVENT_TOO_MANY_RECORDS_IN_PACKET },
+    { "INVALID_ALERT_MESSAGE", TLS_DECODER_EVENT_INVALID_ALERT },
     /* certificate decoding messages */
     { "INVALID_CERTIFICATE", TLS_DECODER_EVENT_INVALID_CERTIFICATE },
     { "CERTIFICATE_INVALID_LENGTH", TLS_DECODER_EVENT_CERTIFICATE_INVALID_LENGTH },
@@ -143,21 +185,26 @@ enum {
     ERR_EXTRACT_VALIDITY,
 };
 
-/* JA3 fingerprints are disabled by default */
+/* JA3 and JA4 fingerprints are disabled by default */
 #define SSL_CONFIG_DEFAULT_JA3 0
+#ifdef HAVE_JA4
+#define SSL_CONFIG_DEFAULT_JA4 0
+#endif
 
 enum SslConfigEncryptHandling {
-    SSL_CNF_ENC_HANDLE_DEFAULT = 0, /**< disable raw content, continue tracking */
-    SSL_CNF_ENC_HANDLE_BYPASS = 1,  /**< skip processing of flow, bypass if possible */
-    SSL_CNF_ENC_HANDLE_FULL = 2,    /**< handle fully like any other proto */
+    SSL_CNF_ENC_HANDLE_TRACK_ONLY = 0, /**< disable raw content, continue tracking */
+    SSL_CNF_ENC_HANDLE_BYPASS = 1,     /**< skip processing of flow, bypass if possible */
+    SSL_CNF_ENC_HANDLE_FULL = 2,       /**< handle fully like any other proto */
 };
 
 typedef struct SslConfig_ {
     enum SslConfigEncryptHandling encrypt_mode;
-    /** dynamic setting for ja3: can be enabled on demand if not explicitly
-     *  disabled. */
+    /** dynamic setting for ja3 and ja4: can be enabled on demand if not
+     *  explicitly disabled. */
     SC_ATOMIC_DECLARE(int, enable_ja3);
     bool disable_ja3; /**< ja3 explicitly disabled. Don't enable on demand. */
+    SC_ATOMIC_DECLARE(int, enable_ja4);
+    bool disable_ja4; /**< ja4 explicitly disabled. Don't enable on demand. */
 } SslConfig;
 
 SslConfig ssl_config;
@@ -195,8 +242,7 @@ SslConfig ssl_config;
 #define SSLV2_MT_REQUEST_CERTIFICATE    7
 #define SSLV2_MT_CLIENT_CERTIFICATE     8
 
-#define SSLV3_RECORD_HDR_LEN            5
-#define SSLV3_MESSAGE_HDR_LEN           4
+#define SSLV3_RECORD_HDR_LEN 5
 /** max length according to RFC 5246 6.2.2 is 2^14 + 1024 */
 #define SSLV3_RECORD_MAX_LEN ((1 << 14) + 1024)
 
@@ -225,12 +271,12 @@ struct SSLDecoderResult {
 #define SSL_DECODER_OK(c)                                                                          \
     (struct SSLDecoderResult)                                                                      \
     {                                                                                              \
-        (c), 0                                                                                     \
+        (uint32_t)(c), 0                                                                           \
     }
 #define SSL_DECODER_INCOMPLETE(c, n)                                                               \
     (struct SSLDecoderResult)                                                                      \
     {                                                                                              \
-        (c), (n)                                                                                   \
+        (uint32_t)(c), (n)                                                                         \
     }
 
 static inline int SafeMemcpy(void *dst, size_t dst_offset, size_t dst_size,
@@ -282,7 +328,7 @@ static inline int SafeMemcpy(void *dst, size_t dst_offset, size_t dst_size,
         if ((ssl_state) == NULL) {                                                                 \
             SCLogDebug("could not set decoder event %u", event);                                   \
         } else {                                                                                   \
-            AppLayerDecoderEventsSetEventRaw(&(ssl_state)->tx_data.events, (event));               \
+            SCAppLayerDecoderEventsSetEventRaw(&(ssl_state)->tx_data.events, (event));             \
             (ssl_state)->events++;                                                                 \
         }                                                                                          \
     } while (0)
@@ -299,30 +345,36 @@ static uint64_t SSLGetTxCnt(void *state)
     return 1;
 }
 
+static void UpdateClientState(SSLState *ssl_state, enum TlsStateClient s)
+{
+#ifdef DEBUG
+    enum TlsStateClient old = ssl_state->client_state;
+#endif
+    ssl_state->client_state = s;
+#ifdef DEBUG
+    SCLogDebug("toserver: state updated to %u from %u", s, old);
+#endif
+}
+
+static void UpdateServerState(SSLState *ssl_state, enum TlsStateServer s)
+{
+#ifdef DEBUG
+    enum TlsStateServer old = ssl_state->server_state;
+#endif
+    ssl_state->server_state = s;
+#ifdef DEBUG
+    SCLogDebug("toclient: state updated to %u from %u", s, old);
+#endif
+}
+
 static int SSLGetAlstateProgress(void *tx, uint8_t direction)
 {
     SSLState *ssl_state = (SSLState *)tx;
-
-    /* we don't care about direction, only that app-layer parser is done
-       and have sent an EOF */
-    if (ssl_state->flags & SSL_AL_FLAG_STATE_FINISHED) {
-        return TLS_STATE_FINISHED;
+    if (direction & STREAM_TOCLIENT) {
+        return ssl_state->server_state;
+    } else {
+        return ssl_state->client_state;
     }
-
-    /* we want the logger to log when the handshake is done, even if the
-       state is not finished */
-    if (ssl_state->flags & SSL_AL_FLAG_HANDSHAKE_DONE) {
-        return TLS_HANDSHAKE_DONE;
-    }
-
-    if (direction == STREAM_TOSERVER &&
-        (ssl_state->server_connp.cert0_subject != NULL ||
-         ssl_state->server_connp.cert0_issuerdn != NULL))
-    {
-        return TLS_STATE_CERT_READY;
-    }
-
-    return TLS_STATE_IN_PROGRESS;
 }
 
 static AppLayerTxData *SSLGetTxData(void *vtx)
@@ -335,95 +387,6 @@ static AppLayerStateData *SSLGetStateData(void *vstate)
 {
     SSLState *ssl_state = (SSLState *)vstate;
     return &ssl_state->state_data;
-}
-
-void SSLVersionToString(uint16_t version, char *buffer)
-{
-    buffer[0] = '\0';
-
-    switch (version) {
-        case TLS_VERSION_UNKNOWN:
-            strlcat(buffer, "UNDETERMINED", 13);
-            break;
-        case SSL_VERSION_2:
-            strlcat(buffer, "SSLv2", 6);
-            break;
-        case SSL_VERSION_3:
-            strlcat(buffer, "SSLv3", 6);
-            break;
-        case TLS_VERSION_10:
-            strlcat(buffer, "TLSv1", 6);
-            break;
-        case TLS_VERSION_11:
-            strlcat(buffer, "TLS 1.1", 8);
-            break;
-        case TLS_VERSION_12:
-            strlcat(buffer, "TLS 1.2", 8);
-            break;
-        case TLS_VERSION_13:
-            strlcat(buffer, "TLS 1.3", 8);
-            break;
-        case TLS_VERSION_13_DRAFT28:
-            strlcat(buffer, "TLS 1.3 draft-28", 17);
-            break;
-        case TLS_VERSION_13_DRAFT27:
-            strlcat(buffer, "TLS 1.3 draft-27", 17);
-            break;
-        case TLS_VERSION_13_DRAFT26:
-            strlcat(buffer, "TLS 1.3 draft-26", 17);
-            break;
-        case TLS_VERSION_13_DRAFT25:
-            strlcat(buffer, "TLS 1.3 draft-25", 17);
-            break;
-        case TLS_VERSION_13_DRAFT24:
-            strlcat(buffer, "TLS 1.3 draft-24", 17);
-            break;
-        case TLS_VERSION_13_DRAFT23:
-            strlcat(buffer, "TLS 1.3 draft-23", 17);
-            break;
-        case TLS_VERSION_13_DRAFT22:
-            strlcat(buffer, "TLS 1.3 draft-22", 17);
-            break;
-        case TLS_VERSION_13_DRAFT21:
-            strlcat(buffer, "TLS 1.3 draft-21", 17);
-            break;
-        case TLS_VERSION_13_DRAFT20:
-            strlcat(buffer, "TLS 1.3 draft-20", 17);
-            break;
-        case TLS_VERSION_13_DRAFT19:
-            strlcat(buffer, "TLS 1.3 draft-19", 17);
-            break;
-        case TLS_VERSION_13_DRAFT18:
-            strlcat(buffer, "TLS 1.3 draft-18", 17);
-            break;
-        case TLS_VERSION_13_DRAFT17:
-            strlcat(buffer, "TLS 1.3 draft-17", 17);
-            break;
-        case TLS_VERSION_13_DRAFT16:
-            strlcat(buffer, "TLS 1.3 draft-16", 17);
-            break;
-        case TLS_VERSION_13_PRE_DRAFT16:
-            strlcat(buffer, "TLS 1.3 draft-<16", 18);
-            break;
-        case TLS_VERSION_13_DRAFT20_FB:
-            strlcat(buffer, "TLS 1.3 draft-20-fb", 20);
-            break;
-        case TLS_VERSION_13_DRAFT21_FB:
-            strlcat(buffer, "TLS 1.3 draft-21-fb", 20);
-            break;
-        case TLS_VERSION_13_DRAFT22_FB:
-            strlcat(buffer, "TLS 1.3 draft-22-fb", 20);
-            break;
-        case TLS_VERSION_13_DRAFT23_FB:
-            strlcat(buffer, "TLS 1.3 draft-23-fb", 20);
-            break;
-        case TLS_VERSION_13_DRAFT26_FB:
-            strlcat(buffer, "TLS 1.3 draft-26-fb", 20);
-            break;
-        default:
-            snprintf(buffer, 7, "0x%04x", version);
-            break;
-    }
 }
 
 static void TlsDecodeHSCertificateErrSetEvent(SSLState *ssl_state, uint32_t err)
@@ -481,7 +444,7 @@ static inline int TlsDecodeHSCertificateFingerprint(
 
     uint8_t hash[SC_SHA1_LEN];
     if (SCSha1HashBuffer(input, cert_len, hash, sizeof(hash)) == 1) {
-        rs_to_hex_sep(
+        SCToHex_sep(
                 (uint8_t *)connp->cert0_fingerprint, SHA1_STRING_LENGTH, ':', hash, SC_SHA1_LEN);
     }
     return 0;
@@ -521,40 +484,47 @@ static int TlsDecodeHSCertificate(SSLState *ssl_state, SSLStateConnp *connp,
     /* only store fields from the first certificate in the chain */
     if (certn == 0 && connp->cert0_subject == NULL && connp->cert0_issuerdn == NULL &&
             connp->cert0_serial == NULL) {
-        x509 = rs_x509_decode(input, cert_len, &err_code);
+        x509 = SCX509Decode(input, cert_len, &err_code);
         if (x509 == NULL) {
             TlsDecodeHSCertificateErrSetEvent(ssl_state, err_code);
             goto next;
         }
 
-        char *str = rs_x509_get_subject(x509);
-        if (str == NULL) {
+        SCX509GetSubject(x509, &connp->cert0_subject, &connp->cert0_subject_len);
+        if (connp->cert0_subject == NULL) {
             err_code = ERR_EXTRACT_SUBJECT;
             goto error;
         }
-        connp->cert0_subject = str;
 
-        str = rs_x509_get_issuer(x509);
-        if (str == NULL) {
+        SCX509GetIssuer(x509, &connp->cert0_issuerdn, &connp->cert0_issuerdn_len);
+        if (connp->cert0_issuerdn == NULL) {
             err_code = ERR_EXTRACT_ISSUER;
             goto error;
         }
-        connp->cert0_issuerdn = str;
 
-        str = rs_x509_get_serial(x509);
-        if (str == NULL) {
+        connp->cert0_sans_num = SCX509GetSubjectAltNameLen(x509);
+        connp->cert0_sans = SCCalloc(connp->cert0_sans_num, sizeof(SSLSubjectAltName));
+        if (connp->cert0_sans == NULL) {
+            goto error;
+        }
+        for (uint16_t i = 0; i < connp->cert0_sans_num; i++) {
+            SCX509GetSubjectAltNameAt(
+                    x509, i, &connp->cert0_sans[i].san, &connp->cert0_sans[i].san_len);
+        }
+
+        SCX509GetSerial(x509, &connp->cert0_serial, &connp->cert0_serial_len);
+        if (connp->cert0_serial == NULL) {
             err_code = ERR_INVALID_SERIAL;
             goto error;
         }
-        connp->cert0_serial = str;
 
-        rc = rs_x509_get_validity(x509, &connp->cert0_not_before, &connp->cert0_not_after);
+        rc = SCX509GetValidity(x509, &connp->cert0_not_before, &connp->cert0_not_after);
         if (rc != 0) {
             err_code = ERR_EXTRACT_VALIDITY;
             goto error;
         }
 
-        rs_x509_free(x509);
+        SCX509Free(x509);
         x509 = NULL;
 
         rc = TlsDecodeHSCertificateFingerprint(connp, input, cert_len);
@@ -572,13 +542,14 @@ static int TlsDecodeHSCertificate(SSLState *ssl_state, SSLStateConnp *connp,
 
 next:
     input += cert_len;
-    return (input - initial_input);
+    return (int)(input - initial_input);
 
 error:
     if (err_code != 0)
         TlsDecodeHSCertificateErrSetEvent(ssl_state, err_code);
     if (x509 != NULL)
-        rs_x509_free(x509);
+        SCX509Free(x509);
+
     return -1;
 
 invalid_cert:
@@ -691,6 +662,11 @@ static inline int TLSDecodeHSHelloVersion(SSLState *ssl_state,
     uint16_t version = (uint16_t)(*input << 8) | *(input + 1);
     ssl_state->curr_connp->version = version;
 
+    if (ssl_state->current_flags &
+            (SSL_AL_FLAG_STATE_CLIENT_HELLO | SSL_AL_FLAG_STATE_SERVER_HELLO)) {
+        SCTLSHandshakeSetTLSVersion(ssl_state->curr_connp->hs, version);
+    }
+
     /* TLSv1.3 draft1 to draft21 use the version field as earlier TLS
        versions, instead of using the supported versions extension. */
     if ((ssl_state->current_flags & SSL_AL_FLAG_STATE_SERVER_HELLO) &&
@@ -725,7 +701,7 @@ static inline int TLSDecodeHSHelloVersion(SSLState *ssl_state,
 
     input += SSLV3_CLIENT_HELLO_VERSION_LEN;
 
-    return (input - initial_input);
+    return (int)(input - initial_input);
 }
 
 static inline int TLSDecodeHSHelloRandom(SSLState *ssl_state,
@@ -752,7 +728,7 @@ static inline int TLSDecodeHSHelloRandom(SSLState *ssl_state,
     /* Skip random */
     input += SSLV3_CLIENT_HELLO_RANDOM_LEN;
 
-    return (input - initial_input);
+    return (int)(input - initial_input);
 }
 
 static inline int TLSDecodeHSHelloSessionID(SSLState *ssl_state,
@@ -797,7 +773,7 @@ static inline int TLSDecodeHSHelloSessionID(SSLState *ssl_state,
 
     input += session_id_length;
 
-    return (input - initial_input);
+    return (int)(input - initial_input);
 
 invalid_length:
     SCLogDebug("TLS handshake invalid length");
@@ -834,45 +810,53 @@ static inline int TLSDecodeHSHelloCipherSuites(SSLState *ssl_state,
         goto invalid_length;
     }
 
-    if (SC_ATOMIC_GET(ssl_config.enable_ja3)) {
-        JA3Buffer *ja3_cipher_suites = Ja3BufferInit();
+    const bool enable_ja3 =
+            SC_ATOMIC_GET(ssl_config.enable_ja3) && ssl_state->curr_connp->ja3_hash == NULL;
+
+    JA3Buffer *ja3_cipher_suites = NULL;
+
+    if (enable_ja3) {
+        ja3_cipher_suites = Ja3BufferInit();
         if (ja3_cipher_suites == NULL)
             return -1;
+    }
 
-        uint16_t processed_len = 0;
-        /* coverity[tainted_data] */
-        while (processed_len < cipher_suites_length)
-        {
-            if (!(HAS_SPACE(2))) {
+    uint16_t processed_len = 0;
+    /* coverity[tainted_data] */
+    while (processed_len < cipher_suites_length) {
+        if (!(HAS_SPACE(2))) {
+            if (enable_ja3) {
                 Ja3BufferFree(&ja3_cipher_suites);
-                goto invalid_length;
             }
+            goto invalid_length;
+        }
 
-            uint16_t cipher_suite = (uint16_t)(*input << 8) | *(input + 1);
-            input += 2;
+        uint16_t cipher_suite = (uint16_t)(*input << 8) | *(input + 1);
+        input += 2;
 
-            if (TLSDecodeValueIsGREASE(cipher_suite) != 1) {
+        if (TLSDecodeValueIsGREASE(cipher_suite) != 1) {
+            if (ssl_state->current_flags &
+                    (SSL_AL_FLAG_STATE_CLIENT_HELLO | SSL_AL_FLAG_STATE_SERVER_HELLO)) {
+                SCTLSHandshakeAddCipher(ssl_state->curr_connp->hs, cipher_suite);
+            }
+            if (enable_ja3) {
                 int rc = Ja3BufferAddValue(&ja3_cipher_suites, cipher_suite);
                 if (rc != 0) {
                     return -1;
                 }
             }
-
-            processed_len += 2;
         }
+        processed_len += 2;
+    }
 
-        int rc = Ja3BufferAppendBuffer(&ssl_state->curr_connp->ja3_str,
-                                   &ja3_cipher_suites);
+    if (enable_ja3) {
+        int rc = Ja3BufferAppendBuffer(&ssl_state->curr_connp->ja3_str, &ja3_cipher_suites);
         if (rc == -1) {
             return -1;
         }
-
-    } else {
-        /* Skip cipher suites */
-        input += cipher_suites_length;
     }
 
-    return (input - initial_input);
+    return (int)(input - initial_input);
 
 invalid_length:
     SCLogDebug("TLS handshake invalid length");
@@ -903,7 +887,7 @@ static inline int TLSDecodeHSHelloCompressionMethods(SSLState *ssl_state,
         input += compression_methods_length;
     }
 
-    return (input - initial_input);
+    return (int)(input - initial_input);
 
 invalid_length:
     SCLogDebug("TLS handshake invalid_length");
@@ -965,26 +949,24 @@ static inline int TLSDecodeHSHelloExtensionSni(SSLState *ssl_state,
         SSLSetEvent(ssl_state,
                 TLS_DECODER_EVENT_MULTIPLE_SNI_EXTENSIONS);
         input += sni_len;
-        return (input - initial_input);
+        return (int)(input - initial_input);
     }
 
-    const size_t sni_strlen = sni_len + 1;
-    ssl_state->curr_connp->sni = SCMalloc(sni_strlen);
+    ssl_state->curr_connp->sni_len = sni_len;
+    ssl_state->curr_connp->sni = SCMalloc(sni_len);
     if (unlikely(ssl_state->curr_connp->sni == NULL))
         return -1;
 
     const size_t consumed = input - initial_input;
-    if (SafeMemcpy(ssl_state->curr_connp->sni, 0, sni_strlen,
-                initial_input, consumed, input_len, sni_len) != 0) {
+    if (SafeMemcpy(ssl_state->curr_connp->sni, 0, sni_len, initial_input, consumed, input_len,
+                sni_len) != 0) {
         SCFree(ssl_state->curr_connp->sni);
         ssl_state->curr_connp->sni = NULL;
         return -1;
     }
-    ssl_state->curr_connp->sni[sni_strlen-1] = 0;
-
     input += sni_len;
 
-    return (input - initial_input);
+    return (int)(input - initial_input);
 
 invalid_length:
     SCLogDebug("TLS handshake invalid length");
@@ -1018,13 +1000,14 @@ static inline int TLSDecodeHSHelloExtensionSupportedVersions(SSLState *ssl_state
         if (!(HAS_SPACE(supported_ver_len)))
             goto invalid_length;
 
-        /* Use the first (and prefered) valid version as client version,
+        /* Use the first (and preferred) valid version as client version,
          * skip over GREASE and other possible noise. */
         uint16_t i = 0;
         while (i + 1 < (uint16_t)supported_ver_len) {
             uint16_t ver = (uint16_t)(input[i] << 8) | input[i + 1];
             if (TLSVersionValid(ver)) {
                 ssl_state->curr_connp->version = ver;
+                SCTLSHandshakeSetTLSVersion(ssl_state->curr_connp->hs, ver);
                 break;
             }
             i += 2;
@@ -1050,7 +1033,7 @@ static inline int TLSDecodeHSHelloExtensionSupportedVersions(SSLState *ssl_state
         input += 2;
     }
 
-    return (input - initial_input);
+    return (int)(input - initial_input);
 
 invalid_length:
     SCLogDebug("TLS handshake invalid length");
@@ -1080,8 +1063,7 @@ static inline int TLSDecodeHSHelloExtensionEllipticCurves(SSLState *ssl_state,
     if (!(HAS_SPACE(elliptic_curves_len)))
         goto invalid_length;
 
-    if ((ssl_state->current_flags & SSL_AL_FLAG_STATE_CLIENT_HELLO) &&
-            SC_ATOMIC_GET(ssl_config.enable_ja3)) {
+    if ((ssl_state->current_flags & SSL_AL_FLAG_STATE_CLIENT_HELLO) && ja3_elliptic_curves) {
         uint16_t ec_processed_len = 0;
         /* coverity[tainted_data] */
         while (ec_processed_len < elliptic_curves_len)
@@ -1107,7 +1089,7 @@ static inline int TLSDecodeHSHelloExtensionEllipticCurves(SSLState *ssl_state,
         input += elliptic_curves_len;
     }
 
-    return (input - initial_input);
+    return (int)(input - initial_input);
 
 invalid_length:
     SCLogDebug("TLS handshake invalid length");
@@ -1137,8 +1119,7 @@ static inline int TLSDecodeHSHelloExtensionEllipticCurvePF(SSLState *ssl_state,
     if (!(HAS_SPACE(ec_pf_len)))
         goto invalid_length;
 
-    if ((ssl_state->current_flags & SSL_AL_FLAG_STATE_CLIENT_HELLO) &&
-            SC_ATOMIC_GET(ssl_config.enable_ja3)) {
+    if ((ssl_state->current_flags & SSL_AL_FLAG_STATE_CLIENT_HELLO) && ja3_elliptic_curves_pf) {
         uint8_t ec_pf_processed_len = 0;
         /* coverity[tainted_data] */
         while (ec_pf_processed_len < ec_pf_len)
@@ -1161,12 +1142,108 @@ static inline int TLSDecodeHSHelloExtensionEllipticCurvePF(SSLState *ssl_state,
         input += ec_pf_len;
     }
 
-    return (input - initial_input);
+    return (int)(input - initial_input);
 
 invalid_length:
     SCLogDebug("TLS handshake invalid length");
     SSLSetEvent(ssl_state,
                 TLS_DECODER_EVENT_HANDSHAKE_INVALID_LENGTH);
+
+    return -1;
+}
+
+static inline int TLSDecodeHSHelloExtensionSigAlgorithms(
+        SSLState *ssl_state, const uint8_t *const initial_input, const uint32_t input_len)
+{
+    const uint8_t *input = initial_input;
+
+    /* Empty extension */
+    if (input_len == 0)
+        return 0;
+
+    if (!(HAS_SPACE(2)))
+        goto invalid_length;
+
+    uint16_t sigalgo_len = (uint16_t)(*input << 8) | *(input + 1);
+    input += 2;
+
+    /* Signature algorithms length should always be divisible by 2 */
+    if ((sigalgo_len % 2) != 0) {
+        goto invalid_length;
+    }
+
+    if (!(HAS_SPACE(sigalgo_len)))
+        goto invalid_length;
+
+    if (ssl_state->current_flags & SSL_AL_FLAG_STATE_CLIENT_HELLO) {
+        uint16_t sigalgo_processed_len = 0;
+        while (sigalgo_processed_len < sigalgo_len) {
+            uint16_t sigalgo = (uint16_t)(*input << 8) | *(input + 1);
+            input += 2;
+            sigalgo_processed_len += 2;
+
+            SCTLSHandshakeAddSigAlgo(ssl_state->curr_connp->hs, sigalgo);
+        }
+    } else {
+        /* Skip signature algorithms */
+        input += sigalgo_len;
+    }
+
+    return (int)(input - initial_input);
+
+invalid_length:
+    SCLogDebug("Signature algorithm list invalid length");
+    SSLSetEvent(ssl_state, TLS_DECODER_EVENT_HANDSHAKE_INVALID_LENGTH);
+
+    return -1;
+}
+
+static inline int TLSDecodeHSHelloExtensionALPN(
+        SSLState *ssl_state, const uint8_t *const initial_input, const uint32_t input_len)
+{
+    const uint8_t *input = initial_input;
+
+    /* Empty extension */
+    if (input_len == 0)
+        return 0;
+
+    if (!(HAS_SPACE(2)))
+        goto invalid_length;
+
+    uint16_t alpn_len = (uint16_t)(*input << 8) | *(input + 1);
+    input += 2;
+
+    if (!(HAS_SPACE(alpn_len)))
+        goto invalid_length;
+
+    /* We use 32 bits here to avoid potentially overflowing a value that
+       needs to be compared to an unsigned 16-bit value. */
+    uint32_t alpn_processed_len = 0;
+    while (alpn_processed_len < alpn_len) {
+        uint8_t protolen = *input;
+        input += 1;
+        alpn_processed_len += 1;
+
+        if (!(HAS_SPACE(protolen)))
+            goto invalid_length;
+
+        /* Check if reading another protolen bytes would exceed the
+           overall ALPN length; if so, skip and continue */
+        if (alpn_processed_len + protolen > ((uint32_t)alpn_len)) {
+            input += alpn_len - alpn_processed_len;
+            break;
+        }
+        SCTLSHandshakeAddALPN(ssl_state->curr_connp->hs, (const char *)input, protolen);
+
+        alpn_processed_len += protolen;
+        input += protolen;
+    }
+
+    return (int)(input - initial_input);
+
+invalid_length:
+    SCLogDebug("ALPN list invalid length");
+    SSLSetEvent(ssl_state, TLS_DECODER_EVENT_HANDSHAKE_INVALID_LENGTH);
 
     return -1;
 }
@@ -1179,7 +1256,9 @@ static inline int TLSDecodeHSHelloExtensions(SSLState *ssl_state,
 
     int ret;
     int rc;
-    const bool ja3 = (SC_ATOMIC_GET(ssl_config.enable_ja3) == 1);
+    // if ja3_hash is already computed, do not use new hello to augment ja3_str
+    const bool ja3 =
+            (SC_ATOMIC_GET(ssl_config.enable_ja3) == 1) && ssl_state->curr_connp->ja3_hash == NULL;
 
     JA3Buffer *ja3_extensions = NULL;
     JA3Buffer *ja3_elliptic_curves = NULL;
@@ -1272,6 +1351,28 @@ static inline int TLSDecodeHSHelloExtensions(SSLState *ssl_state,
                 break;
             }
 
+            case SSL_EXTENSION_SIGNATURE_ALGORITHMS: {
+                /* coverity[tainted_data] */
+                ret = TLSDecodeHSHelloExtensionSigAlgorithms(ssl_state, input, ext_len);
+                if (ret < 0)
+                    goto end;
+
+                input += ret;
+
+                break;
+            }
+
+            case SSL_EXTENSION_ALPN: {
+                /* coverity[tainted_data] */
+                ret = TLSDecodeHSHelloExtensionALPN(ssl_state, input, ext_len);
+                if (ret < 0)
+                    goto end;
+
+                input += ext_len;
+
+                break;
+            }
+
             case SSL_EXTENSION_EARLY_DATA:
             {
                 if (ssl_state->current_flags & SSL_AL_FLAG_STATE_CLIENT_HELLO) {
@@ -1325,6 +1426,13 @@ static inline int TLSDecodeHSHelloExtensions(SSLState *ssl_state,
             }
         }
 
+        if (ssl_state->current_flags &
+                (SSL_AL_FLAG_STATE_CLIENT_HELLO | SSL_AL_FLAG_STATE_SERVER_HELLO)) {
+            if (TLSDecodeValueIsGREASE(ext_type) != 1) {
+                SCTLSHandshakeAddExtension(ssl_state->curr_connp->hs, ext_type);
+            }
+        }
+
         processed_len += ext_len + 4;
     }
 
@@ -1348,7 +1456,7 @@ end:
         }
     }
 
-    return (input - initial_input);
+    return (int)(input - initial_input);
 
 invalid_length:
     SCLogDebug("TLS handshake invalid length");
@@ -1427,6 +1535,11 @@ static int TLSDecodeHandshakeHello(SSLState *ssl_state,
         ssl_state->curr_connp->ja3_hash = Ja3GenerateHash(ssl_state->curr_connp->ja3_str);
     }
 
+    if (ssl_state->curr_connp == &ssl_state->client_connp) {
+        UpdateClientState(ssl_state, TLS_STATE_CLIENT_HELLO_DONE);
+    } else {
+        UpdateServerState(ssl_state, TLS_STATE_SERVER_HELLO);
+    }
 end:
     return 0;
 }
@@ -1452,6 +1565,11 @@ static inline int SSLv3ParseHandshakeTypeCertificate(SSLState *ssl_state, SSLSta
         SCLogDebug("error parsing cert, reset state");
         SSLParserHSReset(connp);
         /* fall through to still consume the cert bytes */
+    }
+    if (connp == &ssl_state->client_connp) {
+        UpdateClientState(ssl_state, TLS_STATE_CLIENT_CERT_DONE);
+    } else {
+        UpdateServerState(ssl_state, TLS_STATE_SERVER_CERT_DONE);
     }
     return input_len;
 }
@@ -1482,6 +1600,7 @@ static int SupportedHandshakeType(const uint8_t type)
 }
 
 /**
+ *  \param input_len length of bytes after record header. Can be 0 (e.g. for server hello done).
  *  \retval parsed number of consumed bytes
  *  \retval < 0 error
  */
@@ -1491,14 +1610,14 @@ static int SSLv3ParseHandshakeType(SSLState *ssl_state, const uint8_t *input,
     const uint8_t *initial_input = input;
     int rc;
 
-    if (input_len == 0) {
-        return 0;
-    }
     DEBUG_VALIDATE_BUG_ON(RecordAlreadyProcessed(ssl_state->curr_connp));
 
     switch (ssl_state->curr_connp->handshake_type) {
         case SSLV3_HS_CLIENT_HELLO:
             ssl_state->current_flags = SSL_AL_FLAG_STATE_CLIENT_HELLO;
+
+            if (ssl_state->curr_connp->hs == NULL)
+                ssl_state->curr_connp->hs = SCTLSHandshakeNew();
 
             rc = TLSDecodeHandshakeHello(ssl_state, input, input_len);
             if (rc < 0)
@@ -1509,6 +1628,9 @@ static int SSLv3ParseHandshakeType(SSLState *ssl_state, const uint8_t *input,
             ssl_state->current_flags = SSL_AL_FLAG_STATE_SERVER_HELLO;
 
             DEBUG_VALIDATE_BUG_ON(ssl_state->curr_connp->message_length != input_len);
+            if (ssl_state->curr_connp->hs == NULL)
+                ssl_state->curr_connp->hs = SCTLSHandshakeNew();
+
             rc = TLSDecodeHandshakeHello(ssl_state, input, input_len);
             if (rc < 0)
                 return rc;
@@ -1523,7 +1645,6 @@ static int SSLv3ParseHandshakeType(SSLState *ssl_state, const uint8_t *input,
             break;
 
         case SSLV3_HS_CERTIFICATE:
-
             rc = SSLv3ParseHandshakeTypeCertificate(ssl_state,
                     direction ? &ssl_state->server_connp : &ssl_state->client_connp, initial_input,
                     input_len);
@@ -1547,6 +1668,9 @@ static int SSLv3ParseHandshakeType(SSLState *ssl_state, const uint8_t *input,
             SCLogDebug("new session ticket");
             break;
         case SSLV3_HS_SERVER_HELLO_DONE:
+            if (direction) {
+                UpdateServerState(ssl_state, TLS_STATE_SERVER_HELLO_DONE);
+            }
             break;
         default:
             SSLSetEvent(ssl_state, TLS_DECODER_EVENT_INVALID_SSL_RECORD);
@@ -1712,7 +1836,7 @@ static int SSLv3ParseHandshakeProtocol(SSLState *ssl_state, const uint8_t *input
                     ssl_state->curr_connp->hs_buffer_message_size);
             input += input_len;
             SSLParserHSReset(ssl_state->curr_connp);
-            return (input - initial_input);
+            return (int)(input - initial_input);
 
         } else {
             /* full record, parse it now */
@@ -1730,7 +1854,40 @@ static int SSLv3ParseHandshakeProtocol(SSLState *ssl_state, const uint8_t *input
         }
         SCLogDebug("input_len left %u", input_len);
     }
-    return (input - initial_input);
+    return (int)(input - initial_input);
+}
+
+/**
+ * \internal
+ * \brief TLS Alert parser
+ *
+ * \param sslstate  Pointer to the SSL state.
+ * \param input     Pointer to the received input data.
+ * \param input_len Length in bytes of the received data.
+ * \param direction 1 toclient, 0 toserver
+ *
+ * \retval The number of bytes parsed on success, 0 if nothing parsed, -1 on failure.
+ */
+static int SSLv3ParseAlertProtocol(
+        SSLState *ssl_state, const uint8_t *input, uint32_t input_len, uint8_t direction)
+{
+    if (input_len < 2) {
+        SSLSetEvent(ssl_state, TLS_DECODER_EVENT_INVALID_ALERT);
+        return -1;
+    }
+
+    /* assume a record > 2 to be an encrypted alert record */
+    if (input_len == 2) {
+        uint8_t level = input[0];
+        // uint8_t desc = input[1];
+
+        /* if level Fatal, we consider the tx finished */
+        if (level == 2) {
+            UpdateClientState(ssl_state, TLS_STATE_CLIENT_FINISHED);
+            UpdateServerState(ssl_state, TLS_STATE_SERVER_FINISHED);
+        }
+    }
+    return 0;
 }
 
 /**
@@ -1935,7 +2092,7 @@ static int SSLv3ParseRecord(uint8_t direction, SSLState *ssl_state,
 
     ssl_state->curr_connp->bytes_processed += (input - initial_input);
 
-    return (input - initial_input);
+    return (int)(input - initial_input);
 }
 
 static int SSLv2ParseRecord(uint8_t direction, SSLState *ssl_state,
@@ -2019,7 +2176,7 @@ static int SSLv2ParseRecord(uint8_t direction, SSLState *ssl_state,
 
     ssl_state->curr_connp->bytes_processed += (input - initial_input);
 
-    return (input - initial_input);
+    return (int)(input - initial_input);
 }
 
 static struct SSLDecoderResult SSLv2Decode(uint8_t direction, SSLState *ssl_state,
@@ -2110,6 +2267,7 @@ static struct SSLDecoderResult SSLv2Decode(uint8_t direction, SSLState *ssl_stat
 
             ssl_state->current_flags = SSL_AL_FLAG_STATE_CLIENT_HELLO;
             ssl_state->current_flags |= SSL_AL_FLAG_SSL_CLIENT_HS;
+            UpdateClientState(ssl_state, TLS_STATE_CLIENT_HELLO_DONE);
 
             const uint16_t version = (uint16_t)(input[0] << 8) | input[1];
             SCLogDebug("SSLv2: version %04x", version);
@@ -2139,6 +2297,7 @@ static struct SSLDecoderResult SSLv2Decode(uint8_t direction, SSLState *ssl_stat
             } else {
                 ssl_state->current_flags = SSL_AL_FLAG_STATE_CLIENT_KEYX;
             }
+            UpdateServerState(ssl_state, TLS_STATE_SERVER_CERT_DONE);
 
             /* fall through */
         case SSLV2_MT_SERVER_VERIFY:
@@ -2174,13 +2333,12 @@ static struct SSLDecoderResult SSLv2Decode(uint8_t direction, SSLState *ssl_stat
                     (ssl_state->flags & SSL_AL_FLAG_SSL_SERVER_SSN_ENCRYPTED))
                 {
                     if (ssl_config.encrypt_mode != SSL_CNF_ENC_HANDLE_FULL) {
-                        AppLayerParserStateSetFlag(pstate,
-                                APP_LAYER_PARSER_NO_INSPECTION);
+                        SCAppLayerParserStateSetFlag(pstate, APP_LAYER_PARSER_NO_INSPECTION);
                     }
 
                     if (ssl_config.encrypt_mode == SSL_CNF_ENC_HANDLE_BYPASS) {
-                        AppLayerParserStateSetFlag(pstate, APP_LAYER_PARSER_NO_REASSEMBLY);
-                        AppLayerParserStateSetFlag(pstate, APP_LAYER_PARSER_BYPASS_READY);
+                        SCAppLayerParserStateSetFlag(pstate, APP_LAYER_PARSER_NO_REASSEMBLY);
+                        SCAppLayerParserStateSetFlag(pstate, APP_LAYER_PARSER_BYPASS_READY);
                     }
                     SCLogDebug("SSLv2 No reassembly & inspection has been set");
                 }
@@ -2191,6 +2349,7 @@ static struct SSLDecoderResult SSLv2Decode(uint8_t direction, SSLState *ssl_stat
         case SSLV2_MT_SERVER_HELLO:
             ssl_state->current_flags = SSL_AL_FLAG_STATE_SERVER_HELLO;
             ssl_state->current_flags |= SSL_AL_FLAG_SSL_SERVER_HS;
+            UpdateServerState(ssl_state, TLS_STATE_SERVER_HELLO);
 
             break;
     }
@@ -2357,14 +2516,23 @@ static struct SSLDecoderResult SSLv3Decode(uint8_t direction, SSLState *ssl_stat
                 ssl_state->flags |= SSL_AL_FLAG_SERVER_CHANGE_CIPHER_SPEC;
             } else {
                 ssl_state->flags |= SSL_AL_FLAG_CLIENT_CHANGE_CIPHER_SPEC;
+
+                // TODO TLS 1.3
+                UpdateClientState(ssl_state, TLS_STATE_CLIENT_HANDSHAKE_DONE);
             }
             break;
 
-        case SSLV3_ALERT_PROTOCOL:
+        case SSLV3_ALERT_PROTOCOL: {
             AppLayerFrameNewByPointer(ssl_state->f, &stream_slice, input + parsed,
                     ssl_state->curr_connp->record_length, direction, TLS_FRAME_ALERT_DATA);
-            break;
 
+            int retval = SSLv3ParseAlertProtocol(ssl_state, input + parsed, record_len, direction);
+            if (retval < 0) {
+                SCLogDebug("SSLv3ParseAlertProtocol returned %d", retval);
+                return SSL_DECODER_ERROR(-1);
+            }
+            break;
+        }
         case SSLV3_APPLICATION_PROTOCOL:
             /* In TLSv1.3 early data (0-RTT) could be sent before the
                handshake is complete (rfc8446, section 2.3). We should
@@ -2376,24 +2544,24 @@ static struct SSLDecoderResult SSLv3Decode(uint8_t direction, SSLState *ssl_stat
 
             /* if we see (encrypted) application data, then this means the
                handshake must be done */
-            ssl_state->flags |= SSL_AL_FLAG_HANDSHAKE_DONE;
+            if (ssl_state->curr_connp == &ssl_state->client_connp) {
+                UpdateClientState(ssl_state, TLS_STATE_CLIENT_HANDSHAKE_DONE);
+            } else {
+                UpdateServerState(ssl_state, TLS_STATE_SERVER_HANDSHAKE_DONE);
+            }
 
             if (ssl_config.encrypt_mode != SSL_CNF_ENC_HANDLE_FULL) {
                 SCLogDebug("setting APP_LAYER_PARSER_NO_INSPECTION_PAYLOAD");
-                AppLayerParserStateSetFlag(pstate,
-                        APP_LAYER_PARSER_NO_INSPECTION_PAYLOAD);
+                SCAppLayerParserStateSetFlag(pstate, APP_LAYER_PARSER_NO_INSPECTION_PAYLOAD);
             }
 
             /* Encrypted data, reassembly not asked, bypass asked, let's sacrifice
              * heartbeat lke inspection to be able to be able to bypass the flow */
             if (ssl_config.encrypt_mode == SSL_CNF_ENC_HANDLE_BYPASS) {
                 SCLogDebug("setting APP_LAYER_PARSER_NO_REASSEMBLY");
-                AppLayerParserStateSetFlag(pstate,
-                        APP_LAYER_PARSER_NO_REASSEMBLY);
-                AppLayerParserStateSetFlag(pstate,
-                        APP_LAYER_PARSER_NO_INSPECTION);
-                AppLayerParserStateSetFlag(pstate,
-                        APP_LAYER_PARSER_BYPASS_READY);
+                SCAppLayerParserStateSetFlag(pstate, APP_LAYER_PARSER_NO_REASSEMBLY);
+                SCAppLayerParserStateSetFlag(pstate, APP_LAYER_PARSER_NO_INSPECTION);
+                SCAppLayerParserStateSetFlag(pstate, APP_LAYER_PARSER_BYPASS_READY);
             }
             break;
 
@@ -2455,7 +2623,7 @@ static struct SSLDecoderResult SSLv3Decode(uint8_t direction, SSLState *ssl_stat
     if (ssl_state->curr_connp->bytes_processed >=
             ssl_state->curr_connp->record_length + SSLV3_RECORD_HDR_LEN) {
         SCLogDebug("record complete, trigger RAW");
-        AppLayerParserTriggerRawStreamReassembly(
+        SCAppLayerParserTriggerRawStreamInspection(
                 ssl_state->f, direction == 0 ? STREAM_TOSERVER : STREAM_TOCLIENT);
         SSLParserReset(ssl_state);
         ValidateRecordState(ssl_state->curr_connp);
@@ -2491,18 +2659,23 @@ static AppLayerResult SSLDecode(Flow *f, uint8_t direction, void *alstate,
         AppLayerParserState *pstate, StreamSlice stream_slice)
 {
     SSLState *ssl_state = (SSLState *)alstate;
+    ssl_state->tx_data.updated_tc = true;
+    ssl_state->tx_data.updated_ts = true;
     uint32_t counter = 0;
     ssl_state->f = f;
     const uint8_t *input = StreamSliceGetData(&stream_slice);
     const uint8_t *init_input = input;
     int32_t input_len = (int32_t)StreamSliceGetDataLen(&stream_slice);
 
-    if (input == NULL &&
-            ((direction == 0 && AppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TS)) ||
+    if ((input == NULL || input_len == 0) &&
+            ((direction == 0 && SCAppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TS)) ||
                     (direction == 1 &&
-                            AppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TC)))) {
+                            SCAppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TC)))) {
         /* flag session as finished if APP_LAYER_PARSER_EOF is set */
-        ssl_state->flags |= SSL_AL_FLAG_STATE_FINISHED;
+        if (direction == 0)
+            UpdateClientState(ssl_state, TLS_STATE_CLIENT_FINISHED);
+        else
+            UpdateServerState(ssl_state, TLS_STATE_SERVER_FINISHED);
         SCReturnStruct(APP_LAYER_OK);
     } else if (input == NULL || input_len == 0) {
         SCReturnStruct(APP_LAYER_ERROR);
@@ -2566,7 +2739,7 @@ static AppLayerResult SSLDecode(Flow *f, uint8_t direction, void *alstate,
                 input += r.retval;
                 SCLogDebug("returning consumed %" PRIuMAX " needed %u",
                         (uintmax_t)(input - init_input), r.needed);
-                SCReturnStruct(APP_LAYER_INCOMPLETE(input - init_input, r.needed));
+                SCReturnStruct(APP_LAYER_INCOMPLETE((uint32_t)(input - init_input), r.needed));
             }
             input_len -= r.retval;
             input += r.retval;
@@ -2591,7 +2764,7 @@ static AppLayerResult SSLDecode(Flow *f, uint8_t direction, void *alstate,
                 input += r.retval;
                 SCLogDebug("returning consumed %" PRIuMAX " needed %u",
                         (uintmax_t)(input - init_input), r.needed);
-                SCReturnStruct(APP_LAYER_INCOMPLETE(input - init_input, r.needed));
+                SCReturnStruct(APP_LAYER_INCOMPLETE((uint32_t)(input - init_input), r.needed));
             }
             input_len -= r.retval;
             input += r.retval;
@@ -2610,19 +2783,22 @@ static AppLayerResult SSLDecode(Flow *f, uint8_t direction, void *alstate,
     /* mark handshake as done if we have subject and issuer */
     if ((ssl_state->flags & SSL_AL_FLAG_NEED_CLIENT_CERT) &&
             ssl_state->client_connp.cert0_subject && ssl_state->client_connp.cert0_issuerdn) {
-        SCLogDebug("SSL_AL_FLAG_HANDSHAKE_DONE");
-        ssl_state->flags |= SSL_AL_FLAG_HANDSHAKE_DONE;
+        /* update both sides to keep existing behavior */
+        UpdateClientState(ssl_state, TLS_STATE_CLIENT_HANDSHAKE_DONE);
+        UpdateServerState(ssl_state, TLS_STATE_SERVER_HANDSHAKE_DONE);
     } else if ((ssl_state->flags & SSL_AL_FLAG_NEED_CLIENT_CERT) == 0 &&
                ssl_state->server_connp.cert0_subject && ssl_state->server_connp.cert0_issuerdn) {
-        SCLogDebug("SSL_AL_FLAG_HANDSHAKE_DONE");
-        ssl_state->flags |= SSL_AL_FLAG_HANDSHAKE_DONE;
+        /* update both sides to keep existing behavior */
+        UpdateClientState(ssl_state, TLS_STATE_CLIENT_HANDSHAKE_DONE);
+        UpdateServerState(ssl_state, TLS_STATE_SERVER_HANDSHAKE_DONE);
     }
 
     /* flag session as finished if APP_LAYER_PARSER_EOF is set */
-    if (AppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TS) &&
-        AppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TC)) {
-        SCLogDebug("SSL_AL_FLAG_STATE_FINISHED");
-        ssl_state->flags |= SSL_AL_FLAG_STATE_FINISHED;
+    if (SCAppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TS) &&
+            SCAppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TC)) {
+        /* update both sides to keep existing behavior */
+        UpdateClientState(ssl_state, TLS_STATE_CLIENT_FINISHED);
+        UpdateServerState(ssl_state, TLS_STATE_SERVER_FINISHED);
     }
 
     return APP_LAYER_OK;
@@ -2649,14 +2825,20 @@ static void *SSLStateAlloc(void *orig_state, AppProto proto_orig)
     SSLState *ssl_state = SCCalloc(1, sizeof(SSLState));
     if (unlikely(ssl_state == NULL))
         return NULL;
-    ssl_state->client_connp.cert_log_flag = 0;
-    ssl_state->server_connp.cert_log_flag = 0;
-    memset(ssl_state->client_connp.random, 0, TLS_RANDOM_LEN);
-    memset(ssl_state->server_connp.random, 0, TLS_RANDOM_LEN);
     TAILQ_INIT(&ssl_state->server_connp.certs);
     TAILQ_INIT(&ssl_state->client_connp.certs);
 
     return (void *)ssl_state;
+}
+
+static void SSLStateCertSANFree(SSLStateConnp *connp)
+{
+    if (connp->cert0_sans) {
+        for (uint16_t i = 0; i < connp->cert0_sans_num; i++) {
+            SCX509ArrayFree(connp->cert0_sans[i].san, connp->cert0_sans[i].san_len);
+        }
+        SCFree(connp->cert0_sans);
+    }
 }
 
 /**
@@ -2669,11 +2851,14 @@ static void SSLStateFree(void *p)
     SSLCertsChain *item;
 
     if (ssl_state->client_connp.cert0_subject)
-        rs_cstring_free(ssl_state->client_connp.cert0_subject);
+        SCX509ArrayFree(
+                ssl_state->client_connp.cert0_subject, ssl_state->client_connp.cert0_subject_len);
     if (ssl_state->client_connp.cert0_issuerdn)
-        rs_cstring_free(ssl_state->client_connp.cert0_issuerdn);
+        SCX509ArrayFree(
+                ssl_state->client_connp.cert0_issuerdn, ssl_state->client_connp.cert0_issuerdn_len);
     if (ssl_state->client_connp.cert0_serial)
-        rs_cstring_free(ssl_state->client_connp.cert0_serial);
+        SCX509ArrayFree(
+                ssl_state->client_connp.cert0_serial, ssl_state->client_connp.cert0_serial_len);
     if (ssl_state->client_connp.cert0_fingerprint)
         SCFree(ssl_state->client_connp.cert0_fingerprint);
     if (ssl_state->client_connp.sni)
@@ -2684,11 +2869,14 @@ static void SSLStateFree(void *p)
         SCFree(ssl_state->client_connp.hs_buffer);
 
     if (ssl_state->server_connp.cert0_subject)
-        rs_cstring_free(ssl_state->server_connp.cert0_subject);
+        SCX509ArrayFree(
+                ssl_state->server_connp.cert0_subject, ssl_state->server_connp.cert0_subject_len);
     if (ssl_state->server_connp.cert0_issuerdn)
-        rs_cstring_free(ssl_state->server_connp.cert0_issuerdn);
+        SCX509ArrayFree(
+                ssl_state->server_connp.cert0_issuerdn, ssl_state->server_connp.cert0_issuerdn_len);
     if (ssl_state->server_connp.cert0_serial)
-        rs_cstring_free(ssl_state->server_connp.cert0_serial);
+        SCX509ArrayFree(
+                ssl_state->server_connp.cert0_serial, ssl_state->server_connp.cert0_serial_len);
     if (ssl_state->server_connp.cert0_fingerprint)
         SCFree(ssl_state->server_connp.cert0_fingerprint);
     if (ssl_state->server_connp.sni)
@@ -2696,10 +2884,14 @@ static void SSLStateFree(void *p)
     if (ssl_state->server_connp.session_id)
         SCFree(ssl_state->server_connp.session_id);
 
+    if (ssl_state->client_connp.hs)
+        SCTLSHandshakeFree(ssl_state->client_connp.hs);
     if (ssl_state->client_connp.ja3_str)
         Ja3BufferFree(&ssl_state->client_connp.ja3_str);
     if (ssl_state->client_connp.ja3_hash)
         SCFree(ssl_state->client_connp.ja3_hash);
+    if (ssl_state->server_connp.hs)
+        SCTLSHandshakeFree(ssl_state->server_connp.hs);
     if (ssl_state->server_connp.ja3_str)
         Ja3BufferFree(&ssl_state->server_connp.ja3_str);
     if (ssl_state->server_connp.ja3_hash)
@@ -2707,11 +2899,10 @@ static void SSLStateFree(void *p)
     if (ssl_state->server_connp.hs_buffer)
         SCFree(ssl_state->server_connp.hs_buffer);
 
-    AppLayerDecoderEventsFreeEvents(&ssl_state->tx_data.events);
+    SSLStateCertSANFree(&ssl_state->server_connp);
+    SSLStateCertSANFree(&ssl_state->client_connp);
 
-    if (ssl_state->tx_data.de_state != NULL) {
-        DetectEngineStateFree(ssl_state->tx_data.de_state);
-    }
+    SCAppLayerTxDataCleanup(&ssl_state->tx_data);
 
     /* Free certificate chain */
     if (ssl_state->server_connp.certs_buffer)
@@ -2731,8 +2922,6 @@ static void SSLStateFree(void *p)
     TAILQ_INIT(&ssl_state->client_connp.certs);
 
     SCFree(ssl_state);
-
-    return;
 }
 
 static void SSLStateTransactionFree(void *state, uint64_t tx_id)
@@ -2740,8 +2929,8 @@ static void SSLStateTransactionFree(void *state, uint64_t tx_id)
     /* do nothing */
 }
 
-static AppProto SSLProbingParser(Flow *f, uint8_t direction,
-        const uint8_t *input, uint32_t ilen, uint8_t *rdir)
+static AppProto SSLProbingParser(
+        const Flow *f, uint8_t direction, const uint8_t *input, uint32_t ilen, uint8_t *rdir)
 {
     /* probably a rst/fin sending an eof */
     if (ilen < 3)
@@ -2754,6 +2943,26 @@ static AppProto SSLProbingParser(Flow *f, uint8_t direction,
     }
 
     return ALPROTO_FAILED;
+}
+
+static int SSLStateGetStateIdByName(const char *name, const uint8_t direction)
+{
+    SCEnumCharMap *map =
+            direction == STREAM_TOSERVER ? tls_state_client_table : tls_state_server_table;
+
+    int id = SCMapEnumNameToValue(name, map);
+    if (id < 0) {
+        return -1;
+    }
+    return id;
+}
+
+static const char *SSLStateGetStateNameById(const int id, const uint8_t direction)
+{
+    SCEnumCharMap *map =
+            direction == STREAM_TOSERVER ? tls_state_client_table : tls_state_server_table;
+    const char *name = SCMapEnumValueToName(id, map);
+    return name;
 }
 
 static int SSLStateGetFrameIdByName(const char *frame_name)
@@ -2771,25 +2980,18 @@ static const char *SSLStateGetFrameNameById(const uint8_t frame_id)
     return name;
 }
 
-static int SSLStateGetEventInfo(const char *event_name,
-                         int *event_id, AppLayerEventType *event_type)
+static int SSLStateGetEventInfo(
+        const char *event_name, uint8_t *event_id, AppLayerEventType *event_type)
 {
-    *event_id = SCMapEnumNameToValue(event_name, tls_decoder_event_table);
-    if (*event_id == -1) {
-        SCLogError("event \"%s\" not present in "
-                   "ssl's enum map table.",
-                event_name);
-        /* yes this is fatal */
-        return -1;
+    if (SCAppLayerGetEventIdByName(event_name, tls_decoder_event_table, event_id) == 0) {
+        *event_type = APP_LAYER_EVENT_TYPE_TRANSACTION;
+        return 0;
     }
-
-    *event_type = APP_LAYER_EVENT_TYPE_TRANSACTION;
-
-    return 0;
+    return -1;
 }
 
-static int SSLStateGetEventInfoById(int event_id, const char **event_name,
-                                    AppLayerEventType *event_type)
+static int SSLStateGetEventInfoById(
+        uint8_t event_id, const char **event_name, AppLayerEventType *event_type)
 {
     *event_name = SCMapEnumValueToName(event_id, tls_decoder_event_table);
     if (*event_name == NULL) {
@@ -2807,125 +3009,105 @@ static int SSLStateGetEventInfoById(int event_id, const char **event_name,
 
 static int SSLRegisterPatternsForProtocolDetection(void)
 {
-    if (AppLayerProtoDetectPMRegisterPatternCSwPP(IPPROTO_TCP, ALPROTO_TLS, "|01 00 02|", 5, 2,
+    if (SCAppLayerProtoDetectPMRegisterPatternCSwPP(IPPROTO_TCP, ALPROTO_TLS, "|01 00 02|", 5, 2,
                 STREAM_TOSERVER, SSLProbingParser, 0, 3) < 0) {
         return -1;
     }
 
     /** SSLv3 */
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|01 03 00|", 3, 0, STREAM_TOSERVER) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|01 03 00|", 3, 0, STREAM_TOSERVER) < 0) {
         return -1;
     }
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|16 03 00|", 3, 0, STREAM_TOSERVER) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|16 03 00|", 3, 0, STREAM_TOSERVER) < 0) {
         return -1;
     }
 
     /** TLSv1 */
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|01 03 01|", 3, 0, STREAM_TOSERVER) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|01 03 01|", 3, 0, STREAM_TOSERVER) < 0) {
         return -1;
     }
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|16 03 01|", 3, 0, STREAM_TOSERVER) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|16 03 01|", 3, 0, STREAM_TOSERVER) < 0) {
         return -1;
     }
 
     /** TLSv1.1 */
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|01 03 02|", 3, 0, STREAM_TOSERVER) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|01 03 02|", 3, 0, STREAM_TOSERVER) < 0) {
         return -1;
     }
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|16 03 02|", 3, 0, STREAM_TOSERVER) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|16 03 02|", 3, 0, STREAM_TOSERVER) < 0) {
         return -1;
     }
 
     /** TLSv1.2 */
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|01 03 03|", 3, 0, STREAM_TOSERVER) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|01 03 03|", 3, 0, STREAM_TOSERVER) < 0) {
         return -1;
     }
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|16 03 03|", 3, 0, STREAM_TOSERVER) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|16 03 03|", 3, 0, STREAM_TOSERVER) < 0) {
         return -1;
     }
 
     /***** toclient direction *****/
 
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|15 03 00|", 3, 0, STREAM_TOCLIENT) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|15 03 00|", 3, 0, STREAM_TOCLIENT) < 0) {
         return -1;
     }
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|16 03 00|", 3, 0, STREAM_TOCLIENT) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|16 03 00|", 3, 0, STREAM_TOCLIENT) < 0) {
         return -1;
     }
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|17 03 00|", 3, 0, STREAM_TOCLIENT) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|17 03 00|", 3, 0, STREAM_TOCLIENT) < 0) {
         return -1;
     }
 
     /** TLSv1 */
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|15 03 01|", 3, 0, STREAM_TOCLIENT) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|15 03 01|", 3, 0, STREAM_TOCLIENT) < 0) {
         return -1;
     }
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|16 03 01|", 3, 0, STREAM_TOCLIENT) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|16 03 01|", 3, 0, STREAM_TOCLIENT) < 0) {
         return -1;
     }
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|17 03 01|", 3, 0, STREAM_TOCLIENT) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|17 03 01|", 3, 0, STREAM_TOCLIENT) < 0) {
         return -1;
     }
 
     /** TLSv1.1 */
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|15 03 02|", 3, 0, STREAM_TOCLIENT) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|15 03 02|", 3, 0, STREAM_TOCLIENT) < 0) {
         return -1;
     }
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|16 03 02|", 3, 0, STREAM_TOCLIENT) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|16 03 02|", 3, 0, STREAM_TOCLIENT) < 0) {
         return -1;
     }
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|17 03 02|", 3, 0, STREAM_TOCLIENT) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|17 03 02|", 3, 0, STREAM_TOCLIENT) < 0) {
         return -1;
     }
 
     /** TLSv1.2 */
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|15 03 03|", 3, 0, STREAM_TOCLIENT) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|15 03 03|", 3, 0, STREAM_TOCLIENT) < 0) {
         return -1;
     }
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|16 03 03|", 3, 0, STREAM_TOCLIENT) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|16 03 03|", 3, 0, STREAM_TOCLIENT) < 0) {
         return -1;
     }
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
-                                               "|17 03 03|", 3, 0, STREAM_TOCLIENT) < 0)
-    {
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(
+                IPPROTO_TCP, ALPROTO_TLS, "|17 03 03|", 3, 0, STREAM_TOCLIENT) < 0) {
         return -1;
     }
 
@@ -2934,12 +3116,12 @@ static int SSLRegisterPatternsForProtocolDetection(void)
      * Updated by Anoop Saldanha.  Disabled it for now.  We'll get back to
      * it after some tests */
 #if 0
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
                                                "|01 03 00|", 5, 2, STREAM_TOSERVER) < 0)
     {
         return -1;
     }
-    if (AppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
+    if (SCAppLayerProtoDetectPMRegisterPatternCS(IPPROTO_TCP, ALPROTO_TLS,
                                                "|00 02|", 7, 5, STREAM_TOCLIENT) < 0)
     {
         return -1;
@@ -2948,6 +3130,56 @@ static int SSLRegisterPatternsForProtocolDetection(void)
 
     return 0;
 }
+
+#ifdef HAVE_JA3
+static void CheckJA3Enabled(void)
+{
+    const char *strval = NULL;
+    /* Check if we should generate JA3 fingerprints */
+    int enable_ja3 = SSL_CONFIG_DEFAULT_JA3;
+    if (SCConfGet("app-layer.protocols.tls.ja3-fingerprints", &strval) != 1) {
+        enable_ja3 = SSL_CONFIG_DEFAULT_JA3;
+    } else if (strcmp(strval, "auto") == 0) {
+        enable_ja3 = SSL_CONFIG_DEFAULT_JA3;
+    } else if (SCConfValIsFalse(strval)) {
+        enable_ja3 = 0;
+        ssl_config.disable_ja3 = true;
+    } else if (SCConfValIsTrue(strval)) {
+        enable_ja3 = true;
+    }
+    SC_ATOMIC_SET(ssl_config.enable_ja3, enable_ja3);
+    if (!ssl_config.disable_ja3 && !g_disable_hashing) {
+        /* The feature is available, i.e. _could_ be activated by a rule or
+            even is enabled in the configuration. */
+        ProvidesFeature(FEATURE_JA3);
+    }
+}
+#endif /* HAVE_JA3 */
+
+#ifdef HAVE_JA4
+static void CheckJA4Enabled(void)
+{
+    const char *strval = NULL;
+    /* Check if we should generate JA4 fingerprints */
+    int enable_ja4 = SSL_CONFIG_DEFAULT_JA4;
+    if (SCConfGet("app-layer.protocols.tls.ja4-fingerprints", &strval) != 1) {
+        enable_ja4 = SSL_CONFIG_DEFAULT_JA4;
+    } else if (strcmp(strval, "auto") == 0) {
+        enable_ja4 = SSL_CONFIG_DEFAULT_JA4;
+    } else if (SCConfValIsFalse(strval)) {
+        enable_ja4 = 0;
+        ssl_config.disable_ja4 = true;
+    } else if (SCConfValIsTrue(strval)) {
+        enable_ja4 = true;
+    }
+    SC_ATOMIC_SET(ssl_config.enable_ja4, enable_ja4);
+    if (!ssl_config.disable_ja4 && !g_disable_hashing) {
+        /* The feature is available, i.e. _could_ be activated by a rule or
+            even is enabled in the configuration. */
+        ProvidesFeature(FEATURE_JA4);
+    }
+}
+#endif /* HAVE_JA4 */
 
 /**
  * \brief Function to register the SSL protocol parser and other functions
@@ -2959,32 +3191,22 @@ void RegisterSSLParsers(void)
     SC_ATOMIC_INIT(ssl_config.enable_ja3);
 
     /** SSLv2  and SSLv23*/
-    if (AppLayerProtoDetectConfProtoDetectionEnabled("tcp", proto_name)) {
+    if (SCAppLayerProtoDetectConfProtoDetectionEnabled("tcp", proto_name)) {
         AppLayerProtoDetectRegisterProtocol(ALPROTO_TLS, proto_name);
 
         if (SSLRegisterPatternsForProtocolDetection() < 0)
             return;
 
         if (RunmodeIsUnittests()) {
-            AppLayerProtoDetectPPRegister(IPPROTO_TCP,
-                                          "443",
-                                          ALPROTO_TLS,
-                                          0, 3,
-                                          STREAM_TOSERVER,
-                                          SSLProbingParser, NULL);
+            SCAppLayerProtoDetectPPRegister(
+                    IPPROTO_TCP, "443", ALPROTO_TLS, 0, 3, STREAM_TOSERVER, SSLProbingParser, NULL);
         } else {
-            if (AppLayerProtoDetectPPParseConfPorts("tcp", IPPROTO_TCP,
-                                                    proto_name, ALPROTO_TLS,
-                                                    0, 3,
-                                                    SSLProbingParser, NULL) == 0) {
+            if (SCAppLayerProtoDetectPPParseConfPorts("tcp", IPPROTO_TCP, proto_name, ALPROTO_TLS,
+                        0, 3, SSLProbingParser, NULL) == 0) {
                 SCLogConfig("no TLS config found, "
                             "enabling TLS detection on port 443.");
-                AppLayerProtoDetectPPRegister(IPPROTO_TCP,
-                                              "443",
-                                              ALPROTO_TLS,
-                                              0, 3,
-                                              STREAM_TOSERVER,
-                                              SSLProbingParser, NULL);
+                SCAppLayerProtoDetectPPRegister(IPPROTO_TCP, "443", ALPROTO_TLS, 0, 3,
+                        STREAM_TOSERVER, SSLProbingParser, NULL);
             }
         }
     } else {
@@ -2993,13 +3215,14 @@ void RegisterSSLParsers(void)
         return;
     }
 
-    if (AppLayerParserConfParserEnabled("tcp", proto_name)) {
+    if (SCAppLayerParserConfParserEnabled("tcp", proto_name)) {
         AppLayerParserRegisterParser(IPPROTO_TCP, ALPROTO_TLS, STREAM_TOSERVER,
                                      SSLParseClientRecord);
 
         AppLayerParserRegisterParser(IPPROTO_TCP, ALPROTO_TLS, STREAM_TOCLIENT,
                                      SSLParseServerRecord);
-
+        AppLayerParserRegisterGetStateFuncs(
+                IPPROTO_TCP, ALPROTO_TLS, SSLStateGetStateIdByName, SSLStateGetStateNameById);
         AppLayerParserRegisterGetFrameFuncs(
                 IPPROTO_TCP, ALPROTO_TLS, SSLStateGetFrameIdByName, SSLStateGetFrameNameById);
         AppLayerParserRegisterGetEventInfo(IPPROTO_TCP, ALPROTO_TLS, SSLStateGetEventInfo);
@@ -3007,7 +3230,8 @@ void RegisterSSLParsers(void)
 
         AppLayerParserRegisterStateFuncs(IPPROTO_TCP, ALPROTO_TLS, SSLStateAlloc, SSLStateFree);
 
-        AppLayerParserRegisterParserAcceptableDataDirection(IPPROTO_TCP, ALPROTO_TLS, STREAM_TOSERVER);
+        SCAppLayerParserRegisterParserAcceptableDataDirection(
+                IPPROTO_TCP, ALPROTO_TLS, STREAM_TOSERVER);
 
         AppLayerParserRegisterTxFreeFunc(IPPROTO_TCP, ALPROTO_TLS, SSLStateTransactionFree);
 
@@ -3020,65 +3244,69 @@ void RegisterSSLParsers(void)
         AppLayerParserRegisterGetStateProgressFunc(IPPROTO_TCP, ALPROTO_TLS, SSLGetAlstateProgress);
 
         AppLayerParserRegisterStateProgressCompletionStatus(
-                ALPROTO_TLS, TLS_STATE_FINISHED, TLS_STATE_FINISHED);
+                ALPROTO_TLS, TLS_STATE_CLIENT_FINISHED, TLS_STATE_SERVER_FINISHED);
 
-        ConfNode *enc_handle = ConfGetNode("app-layer.protocols.tls.encryption-handling");
+        SCConfNode *enc_handle = SCConfGetNode("app-layer.protocols.tls.encryption-handling");
         if (enc_handle != NULL && enc_handle->val != NULL) {
             SCLogDebug("have app-layer.protocols.tls.encryption-handling = %s", enc_handle->val);
             if (strcmp(enc_handle->val, "full") == 0) {
                 ssl_config.encrypt_mode = SSL_CNF_ENC_HANDLE_FULL;
             } else if (strcmp(enc_handle->val, "bypass") == 0) {
                 ssl_config.encrypt_mode = SSL_CNF_ENC_HANDLE_BYPASS;
+            } else if (strcmp(enc_handle->val, "track-only") == 0) {
+                ssl_config.encrypt_mode = SSL_CNF_ENC_HANDLE_TRACK_ONLY;
             } else if (strcmp(enc_handle->val, "default") == 0) {
-                ssl_config.encrypt_mode = SSL_CNF_ENC_HANDLE_DEFAULT;
+                SCLogWarning("app-layer.protocols.tls.encryption-handling = default is deprecated "
+                             "and will be removed in Suricata 9, use \"track-only\" instead, "
+                             "(see ticket #7642)");
+                ssl_config.encrypt_mode = SSL_CNF_ENC_HANDLE_TRACK_ONLY;
             } else {
-                ssl_config.encrypt_mode = SSL_CNF_ENC_HANDLE_DEFAULT;
+                ssl_config.encrypt_mode = SSL_CNF_ENC_HANDLE_TRACK_ONLY;
             }
         } else {
             /* Get the value of no reassembly option from the config file */
-            if (ConfGetNode("app-layer.protocols.tls.no-reassemble") == NULL) {
+            if (SCConfGetNode("app-layer.protocols.tls.no-reassemble") == NULL) {
                 int value = 0;
-                if (ConfGetBool("tls.no-reassemble", &value) == 1 && value == 1)
+                if (SCConfGetBool("tls.no-reassemble", &value) == 1 && value == 1)
                     ssl_config.encrypt_mode = SSL_CNF_ENC_HANDLE_BYPASS;
             } else {
                 int value = 0;
-                if (ConfGetBool("app-layer.protocols.tls.no-reassemble", &value) == 1 && value == 1)
+                if (SCConfGetBool("app-layer.protocols.tls.no-reassemble", &value) == 1 &&
+                        value == 1)
                     ssl_config.encrypt_mode = SSL_CNF_ENC_HANDLE_BYPASS;
             }
         }
         SCLogDebug("ssl_config.encrypt_mode %u", ssl_config.encrypt_mode);
 
-        /* Check if we should generate JA3 fingerprints */
-        int enable_ja3 = SSL_CONFIG_DEFAULT_JA3;
-        const char *strval = NULL;
-        if (ConfGet("app-layer.protocols.tls.ja3-fingerprints", &strval) != 1) {
-            enable_ja3 = SSL_CONFIG_DEFAULT_JA3;
-        } else if (strcmp(strval, "auto") == 0) {
-            enable_ja3 = SSL_CONFIG_DEFAULT_JA3;
-        } else if (ConfValIsFalse(strval)) {
-            enable_ja3 = 0;
-            ssl_config.disable_ja3 = true;
-        } else if (ConfValIsTrue(strval)) {
-            enable_ja3 = true;
-        }
-        SC_ATOMIC_SET(ssl_config.enable_ja3, enable_ja3);
+#ifdef HAVE_JA3
+        CheckJA3Enabled();
+#endif /* HAVE_JA3 */
+#ifdef HAVE_JA4
+        CheckJA4Enabled();
+#endif /* HAVE_JA4 */
 
         if (g_disable_hashing) {
             if (SC_ATOMIC_GET(ssl_config.enable_ja3)) {
                 SCLogWarning("MD5 calculation has been disabled, disabling JA3");
                 SC_ATOMIC_SET(ssl_config.enable_ja3, 0);
             }
+            if (SC_ATOMIC_GET(ssl_config.enable_ja4)) {
+                SCLogWarning("Hashing has been disabled, disabling JA4");
+                SC_ATOMIC_SET(ssl_config.enable_ja4, 0);
+            }
         } else {
             if (RunmodeIsUnittests()) {
+#ifdef HAVE_JA3
                 SC_ATOMIC_SET(ssl_config.enable_ja3, 1);
+#endif /* HAVE_JA3 */
+#ifdef HAVE_JA4
+                SC_ATOMIC_SET(ssl_config.enable_ja4, 1);
+#endif /* HAVE_JA4 */
             }
         }
     } else {
-        SCLogConfig("Parsed disabled for %s protocol. Protocol detection"
-                  "still on.", proto_name);
+        SCLogConfig("Parser disabled for %s protocol. Protocol detection still on.", proto_name);
     }
-
-    return;
 }
 
 /**
@@ -3098,10 +3326,46 @@ void SSLEnableJA3(void)
     SC_ATOMIC_SET(ssl_config.enable_ja3, 1);
 }
 
+/**
+ * \brief if not explicitly disabled in config, enable ja4 support
+ *
+ * Implemented using atomic to allow rule reloads to do this at
+ * runtime.
+ */
+void SSLEnableJA4(void)
+{
+    // only caller has #ifdef HAVE_JA4
+    if (g_disable_hashing || ssl_config.disable_ja4) {
+        return;
+    }
+    if (SC_ATOMIC_GET(ssl_config.enable_ja4)) {
+        return;
+    }
+    SC_ATOMIC_SET(ssl_config.enable_ja4, 1);
+}
+
+/**
+ * \brief return whether ja3 is effectively enabled
+ *
+ * This means that it either has been enabled explicitly or has been
+ * enabled by having loaded a rule while not being explicitly disabled.
+ *
+ * \retval true if enabled, false otherwise
+ */
 bool SSLJA3IsEnabled(void)
 {
-    if (SC_ATOMIC_GET(ssl_config.enable_ja3)) {
-        return true;
-    }
-    return false;
+    return SC_ATOMIC_GET(ssl_config.enable_ja3);
+}
+
+/**
+ * \brief return whether ja4 is effectively enabled
+ *
+ * This means that it either has been enabled explicitly or has been
+ * enabled by having loaded a rule while not being explicitly disabled.
+ *
+ * \retval true if enabled, false otherwise
+ */
+bool SSLJA4IsEnabled(void)
+{
+    return SC_ATOMIC_GET(ssl_config.enable_ja4);
 }

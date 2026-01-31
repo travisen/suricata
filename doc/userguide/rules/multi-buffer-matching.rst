@@ -1,3 +1,5 @@
+.. _rules-multi-buffer-matching:
+
 Multiple Buffer Matching
 ========================
 
@@ -47,7 +49,7 @@ Example rule:
 
 The above rule will alert on a single dns query containing
 "example.net" or "example.domain.net" since the rule content
-matches are within a single ``dns.query`` buffer and all 
+matches are within a single ``dns.query`` buffer and all
 content match requirements of the rule are met.
 
 
@@ -65,7 +67,7 @@ Using our example from above, the first query is for example.net
 which matches content:"example"; but does not match content:".com";
 
 The second query is for something.com which would match on the
-content:".com"; but not the content:"example"; 
+content:".com"; but not the content:"example";
 
 So with the Suricata behavior prior to Suricata 7, the signature
 would not fire in this case since both content conditions will
@@ -74,19 +76,56 @@ not be met.
 Multiple buffer matching is currently enabled for use with the
 following keywords:
 
+* ``dns.additionals.rrname``
+* ``dns.answer.name``
+* ``dns.answers.rrname``
+* ``dns.authorities.rrname``
+* ``dns.queries.rrname``
 * ``dns.query``
+* ``dns.query.name``
+* ``email.received``
+* ``email.url``
 * ``file.data``
 * ``file.magic``
 * ``file.name``
+* ``ftp.completion_code``
+* ``ftp.reply``
 * ``http.request_header``
 * ``http.response_header``
 * ``http2.header_name``
 * ``ike.vendor``
-* ``krb5_cname``
-* ``krb5_sname``
+* ``krb5.cname``
+* ``krb5.sname``
+* ``ldap.request.attribute_type``
+* ``ldap.responses.attribute_type``
+* ``ldap.responses.dn``
+* ``ldap.responses.message``
+* ``mdns.additionals.rrname``
+* ``mdns.answers.rrname``
+* ``mdns.authorities.rrname``
+* ``mdns.queries.rrname``
 * ``mqtt.subscribe.topic``
 * ``mqtt.unsubscribe.topic``
 * ``quic.cyu.hash``
 * ``quic.cyu.string``
+* ``sdp.attribute``
+* ``sdp.bandwidth``
+* ``sdp.media.connection_data``
+* ``sdp.media.encryption_key``
+* ``sdp.media.media``
+* ``sdp.media.media_info``
+* ``sdp.repeat_time``
+* ``sdp.time``
+* ``sip.content_length``
+* ``sip.content_type``
+* ``sip.from``
+* ``sip.to``
+* ``sip.user_agent``
+* ``sip.via``
+* ``smtp.rcpt_to``
+* ``tls.alpn``
 * ``tls.certs``
-* ``tls.cert_subject``
+* ``tls.subjectaltname``
+
+These can be found by command
+``suricata --list-keywords=csv | grep "multi buffer" | cut -d';' -f1``

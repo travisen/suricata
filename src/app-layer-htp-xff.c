@@ -107,20 +107,54 @@ static int ParseXFFString(char *input, char *output, int output_size)
     return 0;
 }
 
+static int HttpXFFGetIPFromTxAux(
+        const Flow *f, htp_tx_t *tx, HttpXFFCfg *xff_cfg, char *dstbuf, int dstbuflen)
+{
+    uint8_t xff_chain[XFF_CHAIN_MAXLEN];
+    uint8_t *p_xff = NULL;
+
+    const htp_header_t *h_xff = htp_tx_request_header(tx, xff_cfg->header);
+
+    if (h_xff != NULL && htp_header_value_len(h_xff) >= XFF_CHAIN_MINLEN &&
+            htp_header_value_len(h_xff) < XFF_CHAIN_MAXLEN) {
+
+        memcpy(xff_chain, htp_header_value_ptr(h_xff), htp_header_value_len(h_xff));
+        xff_chain[htp_header_value_len(h_xff)] = 0;
+
+        if (xff_cfg->flags & XFF_REVERSE) {
+            /** Get the last IP address from the chain */
+            p_xff = memrchr(xff_chain, ' ', htp_header_value_len(h_xff));
+            if (p_xff == NULL) {
+                p_xff = xff_chain;
+            } else {
+                p_xff++;
+            }
+        }
+        else {
+            /** Get the first IP address from the chain */
+            p_xff = memchr(xff_chain, ',', htp_header_value_len(h_xff));
+            if (p_xff != NULL) {
+                *p_xff = 0;
+            }
+            p_xff = xff_chain;
+        }
+        return ParseXFFString((char *)p_xff, dstbuf, dstbuflen);
+    }
+    return 0;
+}
+
 /**
  * \brief Function to return XFF IP if any in the selected transaction. The
  * caller needs to lock the flow.
  * \retval 1 if the IP has been found and returned in dstbuf
  * \retval 0 if the IP has not being found or error
  */
-int HttpXFFGetIPFromTx(const Flow *f, uint64_t tx_id, HttpXFFCfg *xff_cfg,
-        char *dstbuf, int dstbuflen)
+int HttpXFFGetIPFromTx(
+        const Flow *f, uint64_t tx_id, HttpXFFCfg *xff_cfg, char *dstbuf, int dstbuflen)
 {
-    uint8_t xff_chain[XFF_CHAIN_MAXLEN];
     HtpState *htp_state = NULL;
-    htp_tx_t *tx = NULL;
     uint64_t total_txs = 0;
-    uint8_t *p_xff = NULL;
+    htp_tx_t *tx = NULL;
 
     htp_state = (HtpState *)FlowGetAppState(f);
 
@@ -138,38 +172,7 @@ int HttpXFFGetIPFromTx(const Flow *f, uint64_t tx_id, HttpXFFCfg *xff_cfg,
         SCLogDebug("tx is NULL, XFF cannot be retrieved");
         return 0;
     }
-
-    htp_header_t *h_xff = NULL;
-    if (tx->request_headers != NULL) {
-        h_xff = htp_table_get_c(tx->request_headers, xff_cfg->header);
-    }
-
-    if (h_xff != NULL && bstr_len(h_xff->value) >= XFF_CHAIN_MINLEN &&
-            bstr_len(h_xff->value) < XFF_CHAIN_MAXLEN) {
-
-        memcpy(xff_chain, bstr_ptr(h_xff->value), bstr_len(h_xff->value));
-        xff_chain[bstr_len(h_xff->value)]=0;
-
-        if (xff_cfg->flags & XFF_REVERSE) {
-            /** Get the last IP address from the chain */
-            p_xff = memrchr(xff_chain, ' ', bstr_len(h_xff->value));
-            if (p_xff == NULL) {
-                p_xff = xff_chain;
-            } else {
-                p_xff++;
-            }
-        }
-        else {
-            /** Get the first IP address from the chain */
-            p_xff = memchr(xff_chain, ',', bstr_len(h_xff->value));
-            if (p_xff != NULL) {
-                *p_xff = 0;
-            }
-            p_xff = xff_chain;
-        }
-        return ParseXFFString((char *)p_xff, dstbuf, dstbuflen);
-    }
-    return 0;
+    return HttpXFFGetIPFromTxAux(f, tx, xff_cfg, dstbuf, dstbuflen);
 }
 
 /**
@@ -180,7 +183,7 @@ int HttpXFFGetIPFromTx(const Flow *f, uint64_t tx_id, HttpXFFCfg *xff_cfg,
 int HttpXFFGetIP(const Flow *f, HttpXFFCfg *xff_cfg, char *dstbuf, int dstbuflen)
 {
     HtpState *htp_state = NULL;
-    uint64_t tx_id = 0;
+    uint64_t tx_id = AppLayerParserGetMinId(f->alparser);
     uint64_t total_txs = 0;
 
     htp_state = (HtpState *)FlowGetAppState(f);
@@ -190,9 +193,20 @@ int HttpXFFGetIP(const Flow *f, HttpXFFCfg *xff_cfg, char *dstbuf, int dstbuflen
     }
 
     total_txs = AppLayerParserGetTxCnt(f, htp_state);
-    for (; tx_id < total_txs; tx_id++) {
-        if (HttpXFFGetIPFromTx(f, tx_id, xff_cfg, dstbuf, dstbuflen) == 1)
+    AppLayerGetTxIteratorFunc IterFunc = AppLayerGetTxIterator(f->proto, f->alproto);
+    AppLayerGetTxIterState state;
+    memset(&state, 0, sizeof(state));
+
+    while (1) {
+        AppLayerGetTxIterTuple ires =
+                IterFunc(f->proto, f->alproto, f->alstate, tx_id, total_txs, &state);
+        if (ires.tx_ptr == NULL)
+            break;
+
+        if (HttpXFFGetIPFromTxAux(f, ires.tx_ptr, xff_cfg, dstbuf, dstbuflen) == 1)
             return 1;
+
+        tx_id = ires.tx_id + 1;
     }
 
 end:
@@ -202,17 +216,17 @@ end:
 /**
  * \brief Function to return XFF configuration from a configuration node.
  */
-void HttpXFFGetCfg(ConfNode *conf, HttpXFFCfg *result)
+void HttpXFFGetCfg(SCConfNode *conf, HttpXFFCfg *result)
 {
     BUG_ON(result == NULL);
 
-    ConfNode *xff_node = NULL;
+    SCConfNode *xff_node = NULL;
 
     if (conf != NULL)
-        xff_node = ConfNodeLookupChild(conf, "xff");
+        xff_node = SCConfNodeLookupChild(conf, "xff");
 
-    if (xff_node != NULL && ConfNodeChildValueIsTrue(xff_node, "enabled")) {
-        const char *xff_mode = ConfNodeLookupChildValue(xff_node, "mode");
+    if (xff_node != NULL && SCConfNodeChildValueIsTrue(xff_node, "enabled")) {
+        const char *xff_mode = SCConfNodeLookupChildValue(xff_node, "mode");
 
         if (xff_mode != NULL && strcasecmp(xff_mode, "overwrite") == 0) {
             result->flags |= XFF_OVERWRITE;
@@ -227,7 +241,7 @@ void HttpXFFGetCfg(ConfNode *conf, HttpXFFCfg *result)
             result->flags |= XFF_EXTRADATA;
         }
 
-        const char *xff_deployment = ConfNodeLookupChildValue(xff_node, "deployment");
+        const char *xff_deployment = SCConfNodeLookupChildValue(xff_node, "deployment");
 
         if (xff_deployment != NULL && strcasecmp(xff_deployment, "forward") == 0) {
             result->flags |= XFF_FORWARD;
@@ -243,7 +257,7 @@ void HttpXFFGetCfg(ConfNode *conf, HttpXFFCfg *result)
             result->flags |= XFF_REVERSE;
         }
 
-        const char *xff_header = ConfNodeLookupChildValue(xff_node, "header");
+        const char *xff_header = SCConfNodeLookupChildValue(xff_node, "header");
 
         if (xff_header != NULL) {
             result->header = (char *) xff_header;
@@ -251,8 +265,7 @@ void HttpXFFGetCfg(ConfNode *conf, HttpXFFCfg *result)
             SCLogWarning("The XFF header hasn't been defined, using the default %s", XFF_DEFAULT);
             result->header = XFF_DEFAULT;
         }
-    }
-    else {
+    } else {
         result->flags = XFF_DISABLED;
     }
 }

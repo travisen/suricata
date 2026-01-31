@@ -48,7 +48,7 @@ Packet *TmqhInputSimple(ThreadVars *t)
 {
     PacketQueue *q = t->inq->pq;
 
-    StatsSyncCountersIfSignalled(t);
+    StatsSyncCountersIfSignalled(&t->stats);
 
     SCMutexLock(&q->mutex_q);
 
@@ -76,8 +76,11 @@ void TmqhInputSimpleShutdownHandler(ThreadVars *tv)
         return;
     }
 
-    for (i = 0; i < (tv->inq->reader_cnt + tv->inq->writer_cnt); i++)
+    for (i = 0; i < (tv->inq->reader_cnt + tv->inq->writer_cnt); i++) {
+        SCMutexLock(&tv->inq->pq->mutex_q);
         SCCondSignal(&tv->inq->pq->cond_q);
+        SCMutexUnlock(&tv->inq->pq->mutex_q);
+    }
 }
 
 void TmqhOutputSimple(ThreadVars *t, Packet *p)

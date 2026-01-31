@@ -202,18 +202,18 @@ In the cpu affinity section of suricata.yaml config:
  # Suricata is multi-threaded. Here the threading can be influenced.
  threading:
   cpu-affinity:
-    - management-cpu-set:
-        cpu: [ "1-10" ]  # include only these CPUs in affinity settings
-    - receive-cpu-set:
-        cpu: [ "0-10" ]  # include only these CPUs in affinity settings
-    - worker-cpu-set:
-        cpu: [ "18-35", "54-71" ]
-        mode: "exclusive"
-        prio:
-          low: [ 0 ]
-          medium: [ "1" ]
-          high: [ "18-35","54-71" ]
-          default: "high"
+    management-cpu-set:
+      cpu: [ "1-10" ]  # include only these CPUs in affinity settings
+    receive-cpu-set:
+      cpu: [ "0-10" ]  # include only these CPUs in affinity settings
+    worker-cpu-set:
+      cpu: [ "18-35", "54-71" ]
+      mode: "exclusive"
+      prio:
+        low: [ 0 ]
+        medium: [ "1" ]
+        high: [ "18-35","54-71" ]
+        default: "high"
 
 In the af-packet section of suricata.yaml config :
 
@@ -225,7 +225,6 @@ In the af-packet section of suricata.yaml config :
     cluster-id: 99
     cluster-type: cluster_qm
     defrag: no
-    use-mmap: yes
     mmap-locked: yes
     tpacket-v3: yes
     ring-size: 100000
@@ -236,16 +235,15 @@ In the af-packet section of suricata.yaml config :
     cluster-id: 99
     cluster-type: cluster_qm
     defrag: no
-    use-mmap: yes
     mmap-locked: yes
     tpacket-v3: yes
     ring-size: 100000
     block-size: 1048576
 
 That way 36 worker threads can be mapped (18 per each af-packet interface slot) 
-in total per CPUs NUMA 1 range - 18-35,54-71. That part is done via the  
+in total per CPUs NUMA 1 range - 18-35,54-71. That part is done via the 
 ``worker-cpu-set`` affinity settings. ``ring-size`` and ``block-size`` in the 
-config section  above are decent default values to start with. Those can be 
+config section above are decent default values to start with. Those can be 
 better adjusted if needed as explained in :doc:`tuning-considerations`.
     
 AMD based systems
@@ -326,16 +324,16 @@ In the cpu affinity section of suricata.yaml config :
  threading:
   set-cpu-affinity: yes
   cpu-affinity:
-    - management-cpu-set:
-        cpu: [ "120-127" ]  # include only these cpus in affinity settings
-    - receive-cpu-set:
-        cpu: [ 0 ]  # include only these cpus in affinity settings
-    - worker-cpu-set:
-        cpu: [ "8-55" ]
-        mode: "exclusive"
-        prio:
-          high: [ "8-55" ]
-          default: "high"
+    management-cpu-set:
+      cpu: [ "120-127" ]  # include only these cpus in affinity settings
+    receive-cpu-set:
+      cpu: [ 0 ]  # include only these cpus in affinity settings
+    worker-cpu-set:
+      cpu: [ "8-55" ]
+      mode: "exclusive"
+      prio:
+        high: [ "8-55" ]
+        default: "high"
 
 In the af-packet section of suricata.yaml config:
 
@@ -347,7 +345,6 @@ In the af-packet section of suricata.yaml config:
     cluster-id: 99
     cluster-type: cluster_flow
     defrag: no
-    use-mmap: yes
     mmap-locked: yes
     tpacket-v3: yes
     ring-size: 100000
@@ -362,7 +359,7 @@ this config is positioned on NUMA 0 so starting with 15 RSS queues on that
 NUMA node and keeping those off for other tools in the system could offer the 
 best advantage. 
 
-.. note:: Performance and optimization of the whole system can be affected upon regular NIC driver and pkg/kernel upgrades so it should be monitored regularly and tested out in QA/test environments first. As a general suggestion it is always recommended to run the latest stable firmware and drivers as  instructed and provided by the particular NIC vendor. 
+.. note:: Performance and optimization of the whole system can be affected upon regular NIC driver and pkg/kernel upgrades so it should be monitored regularly and tested out in QA/test environments first. As a general suggestion it is always recommended to run the latest stable firmware and drivers as instructed and provided by the particular NIC vendor. 
 
 Other considerations
 ~~~~~~~~~~~~~~~~~~~~

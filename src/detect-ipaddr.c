@@ -30,6 +30,7 @@
 #include "detect.h"
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-prefilter.h"
 #include "detect-ipaddr.h"
@@ -96,7 +97,8 @@ static int DetectSrcIPAddrBufferSetup(DetectEngineCtx *de_ctx, Signature *s, con
 {
     /* store list id. Content, pcre, etc will be added to the list at this
      * id. */
-    s->init_data->list = g_src_ipaddr_buffer_id;
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_src_ipaddr_buffer_id) < 0)
+        return -1;
 
     return 0;
 }
@@ -105,7 +107,8 @@ static int DetectDestIPAddrBufferSetup(DetectEngineCtx *de_ctx, Signature *s, co
 {
     /* store list id. Content, pcre, etc will be added to the list at this
      * id. */
-    s->init_data->list = g_dest_ipaddr_buffer_id;
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_dest_ipaddr_buffer_id) < 0)
+        return -1;
 
     return 0;
 }
@@ -120,15 +123,15 @@ static InspectionBuffer *GetDataSrc(DetectEngineThreadCtx *det_ctx,
 {
     InspectionBuffer *buffer = InspectionBufferGet(det_ctx, list_id);
     if (buffer->inspect == NULL) {
-        if (PKT_IS_IPV4(p)) {
+        if (PacketIsIPv4(p)) {
             /* Suricata stores the IPv4 at the beginning of the field */
             InspectionBufferSetup(det_ctx, list_id, buffer, p->src.address.address_un_data8, 4);
-        } else if (PKT_IS_IPV6(p)) {
+        } else if (PacketIsIPv6(p)) {
             InspectionBufferSetup(det_ctx, list_id, buffer, p->src.address.address_un_data8, 16);
         } else {
             return NULL;
         }
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferApplyTransforms(det_ctx, buffer, transforms);
     }
 
     return buffer;
@@ -144,15 +147,15 @@ static InspectionBuffer *GetDataDst(DetectEngineThreadCtx *det_ctx,
 {
     InspectionBuffer *buffer = InspectionBufferGet(det_ctx, list_id);
     if (buffer->inspect == NULL) {
-        if (PKT_IS_IPV4(p)) {
+        if (PacketIsIPv4(p)) {
             /* Suricata stores the IPv4 at the beginning of the field */
             InspectionBufferSetup(det_ctx, list_id, buffer, p->dst.address.address_un_data8, 4);
-        } else if (PKT_IS_IPV6(p)) {
+        } else if (PacketIsIPv6(p)) {
             InspectionBufferSetup(det_ctx, list_id, buffer, p->dst.address.address_un_data8, 16);
         } else {
             return NULL;
         }
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferApplyTransforms(det_ctx, buffer, transforms);
     }
 
     return buffer;

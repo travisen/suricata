@@ -159,9 +159,6 @@ Example::
 
     content:".php"; isdataat:!1,relative;
 
-``endswith`` cannot be mixed with ``offset``, ``within`` or
-``distance`` for the same pattern.
-
 offset
 ------
 
@@ -256,7 +253,7 @@ isdataat
 The purpose of the isdataat keyword is to look if there is still data
 at a specific part of the payload.  The keyword starts with a number
 (the position) and then optional followed by 'relative' separated by a
-comma and the option rawbytes.  You use the word 'relative' to know if
+comma and the option rawbytes. You use the word 'relative' to know if
 there is still data at a specific part of the payload relative to the
 last match.
 
@@ -273,6 +270,27 @@ for byte 50 after the last match.
 You can also use the negation (!) before isdataat.
 
 .. image:: payload-keywords/isdataat1.png
+
+absent
+------
+
+The keyword ``absent`` checks that a sticky buffer does not exist.
+It can be used without any argument to match only on absent buffer :
+
+Example of ``absent`` in a rule:
+
+.. container:: example-rule
+
+   alert http any any -> any any (msg:"HTTP request without referer";  :example-rule-emphasis:`http.referer; absent;` sid:1; rev:1;)
+
+
+It can take an argument "or_else" to match on absent buffer or on what comes next such as negated content, for instance :
+
+.. container:: example-rule
+
+   alert http any any -> any any (msg:"HTTP request without referer";  :example-rule-emphasis:`http.referer; absent: or_else;` content: !"abc"; sid:1; rev:1;)
+
+For files (i.e ``file.data``), absent means there are no files in the transaction.
 
 bsize
 -----
@@ -364,6 +382,8 @@ Examples of dsize values:
    alert tcp any any -> any any (msg:"dsize range value"; dsize:8<>20; sid:6; rev:1;)
 
    alert tcp any any -> any any (msg:"dsize not equal value"; dsize:!9; sid:7; rev:1;)
+
+.. _byte_test:
 
 byte_test
 ---------
@@ -646,6 +666,97 @@ Example::
 	 flow:established,to_server; content:"|00 FF|"; \
 	 byte_extract:2,0,cmp_ver,relative; content:"FooBar"; distance:0; byte_test:2,=,cmp_ver,0; sid:3;)
 
+.. _keyword_entropy:
+
+entropy
+-------
+
+The ``entropy`` keyword calculates the Shannon entropy value for content and compares it with
+an entropy value. When there is a match, rule processing will continue. Entropy values
+are between 0.0 and 8.0, inclusive. Internally, entropy is represented as a 64-bit
+floating point value.
+
+The ``entropy`` keyword syntax is the keyword entropy followed by options
+and the entropy value and operator used to determine if the values agree.
+
+The minimum entropy keyword specification is::
+
+    entropy: value <entropy-spec>
+
+This results in the calculated entropy value being compared with
+`entropy-spec` using the (default) equality operator.
+
+Example::
+
+  entropy: 7.01
+
+A match occurs when the calculated entropy and specified entropy values agree.
+This is determined by calculating the entropy value and comparing it with the
+value from the rule using the specified operator.
+
+Example::
+
+  entropy: <7.01
+
+Options have default values:
+- bytes is equal to the current content length
+- offset is 0
+- equality comparison
+
+When entropy keyword options are specified, all options and "value" must
+be comma-separated. Options and value may be specified in any order.
+
+The complete format for the ``entropy`` keyword is::
+
+	entropy: [bytes <byteval>] [offset <offsetval>] value <operator><entropy-value>
+
+This example shows all possible options with default values and an entropy value of `4.037`::
+
+	entropy: bytes 0, offset 0,  value = 4.037
+
+The following operators are available::
+
+ * = (default): Match when calculated value equals entropy value
+ * < Match when calculated value is strictly less than entropy value
+ * <=  Match when calculated value is less than or equal to entropy value
+ * > Match when calculated value is strictly greater than entropy value
+ * >= Match when calculated value is greater than or equal to entropy value
+ * !=  Match when calculated value is not equal to entropy value
+ * x-y Match when calculated value is within the exclusive range
+ * !x-y Match when calculated value is not within the exclusive range
+
+This example matches if the `file.data` content for an HTTP transaction has
+a Shannon entropy value of 4 or higher::
+
+	alert http any any -> any any (msg:"entropy simple test"; file.data; entropy: value >= 4; sid:1;)
+
+Logging
+~~~~~~~
+
+When the ``entropy`` rule keyword is provided and the rule is evaluated, the
+`calculated entropy` value is associated with the flow even if the calculated
+entropy value didn't result in a match or alert. Subsequent logging of event
+types that include the flow, including alerts, will contain the ``entropy`` value in
+the ``metadata`` section of an output log. The follow is an example that shows
+the calculated entropy value with the buffer on which the value was computed::
+
+     "metadata": {
+        "entropy": {
+          "file_data": 4.265743301617466
+        }
+      }
+
+The events where entropy is logged will depend largely on how it's used within a
+rule and the rule's protocol.
+
+For example -- this rule -- when evaluated by Suricata -- will result in the
+`calculated entropy` being included in the ``alert, flow`` and ``http`` events.
+Depending on the traffic and Suricata configuration, other event types may
+include the entropy value::
+
+    alert http any any -> any any (flow:established; file.data; entropy: value > 4.4; sid: 1;)
+
+
 rpc
 ---
 
@@ -673,7 +784,7 @@ Example of the rpc keyword in a rule:
 replace
 -------
 
-The replace content modifier can only be used in ips. It adjusts
+The replace content modifier can only be used in IPS. It adjusts
 network traffic.  It changes the content it follows ('abc') into
 another ('def'), see example:
 
@@ -689,6 +800,7 @@ the reassembled stream.
 The checksums will be recalculated by Suricata and changed after the
 replace keyword is being used.
 
+.. _pcre:
 
 pcre (Perl Compatible Regular Expressions)
 ------------------------------------------
@@ -740,7 +852,7 @@ you should add them to pcre, behind regex. Like this::
 *Pcre compatible modifiers*
 
 There are a few pcre compatible modifiers which can change the
-qualities of pcre as well.  These are:
+qualities of pcre as well. These are:
 
 * ``A``: A pattern has to match at the beginning of a buffer. (In pcre
   ^ is similar to A.)
@@ -749,6 +861,67 @@ qualities of pcre as well.  These are:
 
 .. note:: The following characters must be escaped inside the content:
              ``;`` ``\`` ``"``
+
+PCRE extraction
+~~~~~~~~~~~~~~~
+
+It is possible to capture groups from the regular expression and log them into the
+alert events.
+
+There are 3 capabilities:
+
+* pkt: the extracted group is logged as pkt variable in ``metadata.pktvars``
+* alert: the extracted group is logged to the ``alert.context`` subobject
+* flow: the extracted group is stored in a flow variable and end up in the ``metadata.flowvars``
+
+To use the feature, parameters of pcre keyword need to be updated.
+After the regular pcre regex and options, a comma-separated list of variable names.
+The prefix here is ``flow:``, ``pkt:`` or ``alert:`` and the names can contain special
+characters now. The names map to the capturing substring expressions in order ::
+
+  pcre:"/([a-z]+)\/[a-z]+\/(.+)\/(.+)\/changelog$/GUR, \
+      flow:ua/ubuntu/repo,flow:ua/ubuntu/pkg/base,     \
+      flow:ua/ubuntu/pkg/version";
+
+This would result in the alert event having something like ::
+
+  "metadata": {
+    "flowvars": [
+       {"ua/ubuntu/repo": "fr"},
+       {"ua/ubuntu/pkg/base": "curl"},
+       {"ua/ubuntu/pkg/version": "2.2.1"}
+    ]
+  }
+
+The other events on the same flow such as the ``flow`` one will
+also have the flow vars.
+
+If this is not wanted, you can use the ``alert:`` construct to only
+get the event in the alert ::
+
+  pcre:"/([a-z]+)\/[a-z]+\/(.+)\/(.+)\/changelog$/GUR, \
+      alert:ua/ubuntu/repo,alert:ua/ubuntu/pkg/base,     \
+      alert:ua/ubuntu/pkg/version";
+
+With that syntax, the result of the extraction will appear like ::
+
+  "alert": {
+    "context": {
+       "ua/ubuntu/repo": "fr",
+       "ua/ubuntu/pkg/base": "curl",
+       "ua/ubuntu/pkg/version": "2.2.1"
+    ]
+  }
+
+A combination of the extraction scopes can be combined.
+
+It is also possible to extract key/value pair in the ``pkt`` scope.
+One capture would be the key, the second the value. The notation is similar to the last ::
+
+  pcre:"^/([A-Z]+) (.*)\r\n/, pkt:key,pkt:value";
+
+``key`` and ``value`` are simply hardcoded names to trigger the key/value extraction.
+As a consequence, they can't be used as name for the variables.
 
 Suricata's modifiers
 ~~~~~~~~~~~~~~~~~~~~
@@ -771,7 +944,7 @@ Suricata has its own specific pcre modifiers. These are:
 .. image:: pcre/pcre6.png
 
 * ``I``: Makes pcre match on the HTTP-raw-uri. It matches on the same
-  buffer as http_raw_uri.  I can be combined with /R. Note that R is
+  buffer as http_raw_uri. I can be combined with /R. Note that R is
   relative to the previous match so both matches have to be in the
   HTTP-raw-uri buffer. Read more about :ref:`HTTP URI Normalization <rules-http-uri-normalization>`.
 
@@ -785,12 +958,12 @@ Suricata has its own specific pcre modifiers. These are:
   /R. Note that R is relative to the previous match so both matches
   have to be in the HTTP-response body.
 
-* ``H``: Makes pcre match on the HTTP-header.  H can be combined with
+* ``H``: Makes pcre match on the HTTP-header. H can be combined with
   /R. Note that R is relative to the previous match so both matches have
   to be in the HTTP-header body.
 
 * ``D``: Makes pcre match on the unnormalized header. So, it matches
-  on the same buffer as http_raw_header.  D can be combined with
+  on the same buffer as http_raw_header. D can be combined with
   /R. Note that R is relative to the previous match so both matches
   have to be in the HTTP-raw-header.
 
@@ -833,7 +1006,7 @@ Suricata has its own specific pcre modifiers. These are:
 .. _pcre-update-v1-to-v2:
 
 Changes from PCRE1 to PCRE2
-===========================
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The upgrade from PCRE1 to PCRE2 changes the behavior for some
 PCRE expressions.

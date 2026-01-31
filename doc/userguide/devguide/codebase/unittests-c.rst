@@ -19,7 +19,7 @@ If you would like to compile Suricata with unit tests, enter the following durin
 
    ./configure --enable-unittests
 
-The unit tests specific command line options can be found at `Command Line Options <https://docs.suricata.io/en/suricata-6.0.3/command-line-options.html#unit-tests>`_.
+The unit tests specific command line options can be found at `Command Line Options <https://docs.suricata.io/en/latest/command-line-options.html#unit-tests>`_.
 
 Example:
 You can run tests specifically on flowbits. This is how you should do that::
@@ -99,20 +99,20 @@ From ``conf-yaml-loader.c``:
             ;
         const char *value;
 
-        ConfCreateContextBackup();
-        ConfInit();
+        SCConfCreateContextBackup();
+        SCConfInit();
 
-        FAIL_IF(ConfYamlLoadString(config, strlen(config)) != 0);
-        FAIL_IF_NOT(ConfGet("some-log-dir", &value));
+        FAIL_IF(SCConfYamlLoadString(config, strlen(config)) != 0);
+        FAIL_IF_NOT(SCConfGet("some-log-dir", &value));
         FAIL_IF(strcmp(value, "/tmp") != 0);
 
         /* Test that parent.child0 does not exist, but child1 does. */
-        FAIL_IF_NOT_NULL(ConfGetNode("parent.child0"));
-        FAIL_IF_NOT(ConfGet("parent.child1.key", &value));
+        FAIL_IF_NOT_NULL(SCConfGetNode("parent.child0"));
+        FAIL_IF_NOT(SCConfGet("parent.child1.key", &value));
         FAIL_IF(strcmp(value, "value") != 0);
 
-        ConfDeInit();
-        ConfRestoreContextBackup();
+        SCConfDeInit();
+        SCConfRestoreContextBackup();
 
         PASS;
     }

@@ -108,7 +108,6 @@ int32_t MpmFactoryRegisterMpmCtxProfile(
     else
         pitem->next = nitem;
 
-    de_ctx->mpm_ctx_factory_container->no_of_items++;
     return nitem->id;
 }
 
@@ -256,9 +255,8 @@ int MpmAddPatternCS(struct MpmCtx_ *mpm_ctx, uint8_t *pat, uint16_t patlen,
                                                    pid, sid, flags);
 }
 
-int MpmAddPatternCI(struct MpmCtx_ *mpm_ctx, uint8_t *pat, uint16_t patlen,
-                    uint16_t offset, uint16_t depth,
-                    uint32_t pid, SigIntId sid, uint8_t flags)
+int SCMpmAddPatternCI(MpmCtx *mpm_ctx, const uint8_t *pat, uint16_t patlen, uint16_t offset,
+        uint16_t depth, uint32_t pid, SigIntId sid, uint8_t flags)
 {
     return mpm_table[mpm_ctx->mpm_type].AddPatternNocase(mpm_ctx, pat, patlen,
                                                          offset, depth,
@@ -276,7 +274,7 @@ int MpmAddPatternCI(struct MpmCtx_ *mpm_ctx, uint8_t *pat, uint16_t patlen,
  *
  * \retval hash A 32 bit unsigned hash.
  */
-static inline uint32_t MpmInitHashRaw(uint8_t *pat, uint16_t patlen)
+static inline uint32_t MpmInitHashRaw(const uint8_t *pat, uint16_t patlen)
 {
     uint32_t hash = patlen * pat[0];
     if (patlen > 1)
@@ -297,10 +295,8 @@ static inline uint32_t MpmInitHashRaw(uint8_t *pat, uint16_t patlen)
  *
  * \retval hash A 32 bit unsigned hash.
  */
-static inline MpmPattern *MpmInitHashLookup(MpmCtx *ctx,
-        uint8_t *pat, uint16_t patlen,
-        uint16_t offset, uint16_t depth,
-        uint8_t flags, uint32_t pid)
+static inline MpmPattern *MpmInitHashLookup(MpmCtx *ctx, const uint8_t *pat, uint16_t patlen,
+        uint16_t offset, uint16_t depth, uint8_t flags, uint32_t pid)
 {
     uint32_t hash = MpmInitHashRaw(pat, patlen);
 
@@ -436,9 +432,8 @@ static inline int MpmInitHashAdd(MpmCtx *ctx, MpmPattern *p)
  * \retval  0 On success.
  * \retval -1 On failure.
  */
-int MpmAddPattern(MpmCtx *mpm_ctx, uint8_t *pat, uint16_t patlen,
-                            uint16_t offset, uint16_t depth, uint32_t pid,
-                            SigIntId sid, uint8_t flags)
+int MpmAddPattern(MpmCtx *mpm_ctx, const uint8_t *pat, uint16_t patlen, uint16_t offset,
+        uint16_t depth, uint32_t pid, SigIntId sid, uint8_t flags)
 {
     SCLogDebug("Adding pattern for ctx %p, patlen %"PRIu16" and pid %" PRIu32,
                mpm_ctx, patlen, pid);
@@ -481,7 +476,7 @@ int MpmAddPattern(MpmCtx *mpm_ctx, uint8_t *pat, uint16_t patlen,
             goto error;
         mpm_ctx->memory_cnt++;
         mpm_ctx->memory_size += patlen;
-        memcpy_tolower(p->ci, pat, patlen);
+        MemcpyToLower(p->ci, pat, patlen);
 
         /* setup the case sensitive part of the pattern */
         if (p->flags & MPM_PATTERN_FLAG_NOCASE) {

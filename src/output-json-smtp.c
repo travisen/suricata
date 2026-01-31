@@ -51,22 +51,22 @@
 #include "output-json-smtp.h"
 #include "output-json-email-common.h"
 
-static void EveSmtpDataLogger(void *state, void *vtx, JsonBuilder *js)
+static void EveSmtpDataLogger(void *state, void *vtx, SCJsonBuilder *js)
 {
     SMTPTransaction *tx = vtx;
     SMTPString *rcptto_str;
     if (((SMTPState *)state)->helo) {
-        jb_set_string(js, "helo", (const char *)((SMTPState *)state)->helo);
+        SCJbSetString(js, "helo", (const char *)((SMTPState *)state)->helo);
     }
     if (tx->mail_from) {
-        jb_set_string(js, "mail_from", (const char *)tx->mail_from);
+        SCJbSetString(js, "mail_from", (const char *)tx->mail_from);
     }
     if (!TAILQ_EMPTY(&tx->rcpt_to_list)) {
-        jb_open_array(js, "rcpt_to");
+        SCJbOpenArray(js, "rcpt_to");
         TAILQ_FOREACH(rcptto_str, &tx->rcpt_to_list, next) {
-            jb_append_string(js, (char *)rcptto_str->str);
+            SCJbAppendString(js, (char *)rcptto_str->str);
         }
-        jb_close(js);
+        SCJbClose(js);
     }
 }
 
@@ -75,25 +75,25 @@ static int JsonSmtpLogger(ThreadVars *tv, void *thread_data, const Packet *p, Fl
     SCEnter();
     JsonEmailLogThread *jhl = (JsonEmailLogThread *)thread_data;
 
-    JsonBuilder *jb = CreateEveHeaderWithTxId(
+    SCJsonBuilder *jb = CreateEveHeaderWithTxId(
             p, LOG_DIR_FLOW, "smtp", NULL, tx_id, jhl->emaillog_ctx->eve_ctx);
     if (unlikely(jb == NULL))
         return TM_ECODE_OK;
 
-    jb_open_object(jb, "smtp");
+    SCJbOpenObject(jb, "smtp");
     EveSmtpDataLogger(state, tx, jb);
-    jb_close(jb);
+    SCJbClose(jb);
 
     EveEmailLogJson(jhl, jb, p, f, state, tx, tx_id);
-    OutputJsonBuilderBuffer(jb, jhl->ctx);
+    OutputJsonBuilderBuffer(tv, p, p->flow, jb, jhl->ctx);
 
-    jb_free(jb);
+    SCJbFree(jb);
 
     SCReturnInt(TM_ECODE_OK);
 
 }
 
-bool EveSMTPAddMetadata(const Flow *f, uint64_t tx_id, JsonBuilder *js)
+bool EveSMTPAddMetadata(const Flow *f, uint64_t tx_id, SCJsonBuilder *js)
 {
     SMTPState *smtp_state = (SMTPState *)FlowGetAppState(f);
     if (smtp_state) {
@@ -117,7 +117,7 @@ static void OutputSmtpLogDeInitCtxSub(OutputCtx *output_ctx)
     SCFree(output_ctx);
 }
 
-static OutputInitResult OutputSmtpLogInitSub(ConfNode *conf, OutputCtx *parent_ctx)
+static OutputInitResult OutputSmtpLogInitSub(SCConfNode *conf, OutputCtx *parent_ctx)
 {
     OutputInitResult result = { NULL, false };
     OutputJsonCtx *ojc = parent_ctx->data;
@@ -140,7 +140,7 @@ static OutputInitResult OutputSmtpLogInitSub(ConfNode *conf, OutputCtx *parent_c
     output_ctx->DeInit = OutputSmtpLogDeInitCtxSub;
 
     /* enable the logger for the app layer */
-    AppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_SMTP);
+    SCAppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_SMTP);
 
     result.ctx = output_ctx;
     result.ok = true;
@@ -193,5 +193,5 @@ void JsonSmtpLogRegister (void) {
     /* register as child of eve-log */
     OutputRegisterTxSubModule(LOGGER_JSON_TX, "eve-log", "JsonSmtpLog", "eve-log.smtp",
             OutputSmtpLogInitSub, ALPROTO_SMTP, JsonSmtpLogger, JsonSmtpLogThreadInit,
-            JsonSmtpLogThreadDeinit, NULL);
+            JsonSmtpLogThreadDeinit);
 }

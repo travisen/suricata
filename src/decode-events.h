@@ -22,13 +22,16 @@
  * \author Anoop Saldanha <anoopsaldanha@gmail.com>
  */
 
-#ifndef __DECODE_EVENTS_H__
-#define __DECODE_EVENTS_H__
+#ifndef SURICATA_DECODE_EVENTS_H
+#define SURICATA_DECODE_EVENTS_H
 
 /* packet decoder events */
 enum {
+    /* AF_PACKET EVENTS */
+    AFP_TRUNC_PKT = 0, /**< packet truncated by af-packet */
+
     /* IPV4 EVENTS */
-    IPV4_PKT_TOO_SMALL = 0,       /**< ipv4 pkt smaller than minimum header size */
+    IPV4_PKT_TOO_SMALL,           /**< ipv4 pkt smaller than minimum header size */
     IPV4_HLEN_TOO_SMALL,          /**< ipv4 header smaller than minimum size */
     IPV4_IPLEN_SMALLER_THAN_HLEN, /**< ipv4 pkt len smaller than ip header size */
     IPV4_TRUNC_PKT,               /**< truncated ipv4 packet */
@@ -43,6 +46,7 @@ enum {
     IPV4_OPT_UNKNOWN,      /**< unknown ip option */
     IPV4_WRONG_IP_VER,     /**< wrong ip version in ip options */
     IPV4_WITH_ICMPV6,      /**< IPv4 packet with ICMPv6 header */
+    IPV4_PROTO_UNKNOWN,    /**< IPv4 packet with unknown protocol*/
 
     /* ICMP EVENTS */
     ICMPV4_PKT_TOO_SMALL,    /**< icmpv4 packet smaller than minimum size */
@@ -108,8 +112,12 @@ enum {
     /* SLL EVENTS */
     SLL_PKT_TOO_SMALL, /**< sll packet smaller than minimum size */
 
+    /* SLL2 EVENTS */
+    SLL2_PKT_TOO_SMALL, /**< sll2 packet smaller than minimum size */
+
     /* ETHERNET EVENTS */
-    ETHERNET_PKT_TOO_SMALL, /**< ethernet packet smaller than minimum size */
+    ETHERNET_PKT_TOO_SMALL,     /**< ethernet packet smaller than minimum size */
+    ETHERNET_UNKNOWN_ETHERTYPE, /**< ethertype unknown/unhandled*/
 
     /* PPP EVENTS */
     PPP_PKT_TOO_SMALL,     /**< ppp packet smaller than minimum size */
@@ -151,6 +159,10 @@ enum {
     /* VNTAG EVENTS */
     VNTAG_HEADER_TOO_SMALL, /**< vntag header smaller than minimum size */
     VNTAG_UNKNOWN_TYPE,     /**< vntag unknown type */
+
+    /* ETAG EVENTS */
+    ETAG_HEADER_TOO_SMALL, /**< etag header smaller than minimum size */
+    ETAG_UNKNOWN_TYPE,     /**< etag unknown type */
 
     /* RAW EVENTS */
     IPRAW_INVALID_IPV, /**< invalid ip version in ip raw */
@@ -296,6 +308,16 @@ enum {
     STREAM_REASSEMBLY_INSERT_MEMCAP,
     STREAM_REASSEMBLY_INSERT_LIMIT,
     STREAM_REASSEMBLY_INSERT_INVALID,
+    STREAM_REASSEMBLY_URGENT_OOB_LIMIT_REACHED,
+
+    /* ARP EVENTS */
+    ARP_PKT_TOO_SMALL,         /**< arp packet smaller than minimum size */
+    ARP_UNSUPPORTED_HARDWARE,  /**< arp hw_type is not ethernet */
+    ARP_UNSUPPORTED_PROTOCOL,  /**< arp proto_type is not ipv4 */
+    ARP_INVALID_PKT,           /**< arp pkt len is not 28 */
+    ARP_INVALID_HARDWARE_SIZE, /**< arp hw size is 6 */
+    ARP_INVALID_PROTOCOL_SIZE, /**< arp proto size is not 4 */
+    ARP_UNSUPPORTED_OPCODE,    /**< arp opcode is not listed */
 
     /* should always be last! */
     DECODE_EVENT_MAX,
@@ -313,4 +335,4 @@ struct DecodeEvents_ {
 /* +1 for the end of table marker */
 extern const struct DecodeEvents_ DEvents[DECODE_EVENT_MAX + 1];
 
-#endif /* __DECODE_EVENTS_H__ */
+#endif /* SURICATA_DECODE_EVENTS_H */

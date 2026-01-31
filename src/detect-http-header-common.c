@@ -78,8 +78,7 @@ void HttpHeaderThreadDataFree(void *data)
     SCFree(hdrnames);
 }
 
-int HttpHeaderExpandBuffer(HttpHeaderThreadData *td,
-        HttpHeaderBuffer *buf, uint32_t size)
+int HttpHeaderExpandBuffer(HttpHeaderThreadData *td, HttpHeaderBuffer *buf, size_t size)
 {
     size_t extra = td->size_step;
     while ((buf->size + extra) < (size + buf->len)) {
@@ -97,7 +96,7 @@ int HttpHeaderExpandBuffer(HttpHeaderThreadData *td,
     return 0;
 }
 
-HttpHeaderBuffer *HttpHeaderGetBufferSpace(DetectEngineThreadCtx *det_ctx, Flow *f, uint8_t flags,
+HttpHeaderBuffer *HttpHeaderGetBufferSpace(DetectEngineThreadCtx *det_ctx, uint8_t flags,
         const int keyword_id, HttpHeaderThreadData **ret_hdr_td)
 {
     *ret_hdr_td = NULL;

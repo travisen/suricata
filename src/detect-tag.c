@@ -72,6 +72,8 @@ void DetectTagRegister(void)
     sigmatch_table[DETECT_TAG].Match = DetectTagMatch;
     sigmatch_table[DETECT_TAG].Setup = DetectTagSetup;
     sigmatch_table[DETECT_TAG].Free  = DetectTagDataFree;
+    sigmatch_table[DETECT_TAG].desc = "tag of current and future packets for a flow or host";
+    sigmatch_table[DETECT_TAG].url = "/rules/tag.html#tag";
 #ifdef UNITTESTS
     sigmatch_table[DETECT_TAG].RegisterTests = DetectTagRegisterTests;
 #endif
@@ -106,7 +108,7 @@ static int DetectTagMatch(DetectEngineThreadCtx *det_ctx, Packet *p,
 
             tde.sid = s->id;
             tde.gid = s->gid;
-            tde.last_ts = tde.first_ts = SCTIME_SECS(p->ts);
+            tde.last_ts = tde.first_ts = p->ts;
             tde.metric = td->metric;
             tde.count = td->count;
             if (td->direction == DETECT_TAG_DIR_SRC)
@@ -123,12 +125,12 @@ static int DetectTagMatch(DetectEngineThreadCtx *det_ctx, Packet *p,
                 /* If it already exists it will be updated */
                 tde.sid = s->id;
                 tde.gid = s->gid;
-                tde.last_ts = tde.first_ts = SCTIME_SECS(p->ts);
+                tde.last_ts = tde.first_ts = p->ts;
                 tde.metric = td->metric;
                 tde.count = td->count;
 
-                SCLogDebug("Adding to or updating flow; first_ts %u count %u",
-                    tde.first_ts, tde.count);
+                SCLogDebug("Adding to or updating flow; first_ts %" PRIu64 " count %u",
+                        (uint64_t)SCTIME_SECS(tde.first_ts), tde.count);
                 TagFlowAdd(p, &tde);
             } else {
                 SCLogDebug("No flow to append the session tag");
@@ -304,7 +306,7 @@ int DetectTagSetup(DetectEngineCtx *de_ctx, Signature *s, const char *tagstr)
         return -1;
 
     /* Append it to the list of tags */
-    if (SigMatchAppendSMToList(de_ctx, s, DETECT_TAG, (SigMatchCtx *)td, DETECT_SM_LIST_TMATCH) ==
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_TAG, (SigMatchCtx *)td, DETECT_SM_LIST_TMATCH) ==
             NULL) {
         DetectTagDataFree(de_ctx, td);
         return -1;

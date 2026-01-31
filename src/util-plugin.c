@@ -19,11 +19,17 @@
 #include "suricata-plugin.h"
 #include "suricata.h"
 #include "runmodes.h"
-#include "output-eve-syslog.h"
 #include "util-plugin.h"
 #include "util-debug.h"
+#include "conf.h"
 
 #ifdef HAVE_PLUGINS
+
+#include "app-layer-protos.h"
+#include "app-layer-parser.h"
+#include "detect-engine-register.h"
+#include "output.h"
+#include "output-eve-bindgen.h"
 
 #include <dlfcn.h>
 
@@ -41,12 +47,16 @@ typedef struct PluginListNode_ {
  */
 static TAILQ_HEAD(, PluginListNode_) plugins = TAILQ_HEAD_INITIALIZER(plugins);
 
-static TAILQ_HEAD(, SCEveFileType_) output_types = TAILQ_HEAD_INITIALIZER(output_types);
-
 static TAILQ_HEAD(, SCCapturePlugin_) capture_plugins = TAILQ_HEAD_INITIALIZER(capture_plugins);
 
 bool RegisterPlugin(SCPlugin *plugin, void *lib)
 {
+    if (plugin->version != SC_API_VERSION) {
+        SCLogError("Suricata and plugin versions differ: plugin has %" PRIx64
+                   " (%s) vs Suricata %" PRIx64 " (plugin was built with %s)",
+                plugin->version, plugin->plugin_version, SC_API_VERSION, plugin->suricata_version);
+        return false;
+    }
     BUG_ON(plugin->name == NULL);
     BUG_ON(plugin->author == NULL);
     BUG_ON(plugin->license == NULL);
@@ -60,8 +70,9 @@ bool RegisterPlugin(SCPlugin *plugin, void *lib)
     node->plugin = plugin;
     node->lib = lib;
     TAILQ_INSERT_TAIL(&plugins, node, entries);
-    SCLogNotice("Initializing plugin %s; author=%s; license=%s", plugin->name, plugin->author,
-            plugin->license);
+    SCLogNotice("Initializing plugin %s; version= %s; author=%s; license=%s; built from %s",
+            plugin->name, plugin->plugin_version, plugin->author, plugin->license,
+            plugin->suricata_version);
     (*plugin->Init)();
     return true;
 }
@@ -91,11 +102,11 @@ static void InitPlugin(char *path)
 
 void SCPluginsLoad(const char *capture_plugin_name, const char *capture_plugin_args)
 {
-    ConfNode *conf = ConfGetNode("plugins");
+    SCConfNode *conf = SCConfGetNode("plugins");
     if (conf == NULL) {
         return;
     }
-    ConfNode *plugin = NULL;
+    SCConfNode *plugin = NULL;
     TAILQ_FOREACH(plugin, &conf->head, next) {
         struct stat statbuf;
         if (stat(plugin->val, &statbuf) == -1) {
@@ -123,7 +134,7 @@ void SCPluginsLoad(const char *capture_plugin_name, const char *capture_plugin_a
         }
     }
 
-    if (run_mode == RUNMODE_PLUGIN) {
+    if (SCRunmodeGet() == RUNMODE_PLUGIN) {
         SCCapturePlugin *capture = SCPluginFindCaptureByName(capture_plugin_name);
         if (capture == NULL) {
             FatalError("No capture plugin found with name %s", capture_plugin_name);
@@ -131,67 +142,6 @@ void SCPluginsLoad(const char *capture_plugin_name, const char *capture_plugin_a
         capture->Init(capture_plugin_args, RUNMODE_PLUGIN, TMM_RECEIVEPLUGIN,
                 TMM_DECODEPLUGIN);
     }
-}
-
-static bool IsBuiltinTypeName(const char *name)
-{
-    const char *builtin[] = {
-        "regular",
-        "unix_dgram",
-        "unix_stream",
-        "redis",
-        NULL,
-    };
-    for (int i = 0;; i++) {
-        if (builtin[i] == NULL) {
-            break;
-        }
-        if (strcmp(builtin[i], name) == 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
-/**
- * \brief Register an Eve file type.
- *
- * \retval true if registered successfully, false if the file type name
- *      conflicts with a built-in or previously registered
- *      file type.
- */
-bool SCRegisterEveFileType(SCEveFileType *plugin)
-{
-    /* First check that the name doesn't conflict with a built-in filetype. */
-    if (IsBuiltinTypeName(plugin->name)) {
-        SCLogError("Eve file type name conflicts with built-in type: %s", plugin->name);
-        return false;
-    }
-
-    /* Now check against previously registered file types. */
-    SCEveFileType *existing = NULL;
-    TAILQ_FOREACH (existing, &output_types, entries) {
-        if (strcmp(existing->name, plugin->name) == 0) {
-            SCLogError("Eve file type name conflicts with previously registered type: %s",
-                    plugin->name);
-            return false;
-        }
-    }
-
-    SCLogDebug("Registering EVE file type plugin %s", plugin->name);
-    TAILQ_INSERT_TAIL(&output_types, plugin, entries);
-    return true;
-}
-
-SCEveFileType *SCPluginFindFileType(const char *name)
-{
-    SCEveFileType *plugin = NULL;
-    TAILQ_FOREACH(plugin, &output_types, entries) {
-        if (strcmp(name, plugin->name) == 0) {
-            return plugin;
-        }
-    }
-    return NULL;
 }
 
 int SCPluginRegisterCapture(SCCapturePlugin *plugin)
@@ -210,5 +160,33 @@ SCCapturePlugin *SCPluginFindCaptureByName(const char *name)
         }
     }
     return plugin;
+}
+
+int SCPluginRegisterAppLayer(SCAppLayerPlugin *plugin)
+{
+    AppProto alproto = AppProtoNewProtoFromString(plugin->name);
+    if (plugin->Register) {
+        if (AppLayerParserPreRegister(plugin->Register) != 0) {
+            return 1;
+        }
+    }
+    if (plugin->KeywordsRegister) {
+        if (SCSigTablePreRegister(plugin->KeywordsRegister) != 0) {
+            return 1;
+        }
+    }
+    if (plugin->Logger) {
+        EveJsonTxLoggerRegistrationData reg_data = {
+            .confname = plugin->confname,
+            .logname = plugin->logname,
+            .alproto = alproto,
+            .dir = plugin->dir,
+            .LogTx = plugin->Logger,
+        };
+        if (SCOutputEvePreRegisterLogger(reg_data) != 0) {
+            return 1;
+        }
+    }
+    return 0;
 }
 #endif

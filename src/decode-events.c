@@ -27,6 +27,11 @@
 /* code moved to app-layer-events */
 
 const struct DecodeEvents_ DEvents[] = {
+    /* CAPTURE EVENTS */
+    {
+            "decoder.afpacket.trunc_pkt",
+            AFP_TRUNC_PKT,
+    },
     /* IPV4 EVENTS */
     {
             "decoder.ipv4.pkt_too_small",
@@ -81,6 +86,10 @@ const struct DecodeEvents_ DEvents[] = {
     {
             "decoder.ipv4.icmpv6",
             IPV4_WITH_ICMPV6,
+    },
+    {
+            "decoder.ipv4.unknown_protocol",
+            IPV4_PROTO_UNKNOWN,
     },
 
     /* ICMP EVENTS */
@@ -281,10 +290,20 @@ const struct DecodeEvents_ DEvents[] = {
             SLL_PKT_TOO_SMALL,
     },
 
+    /* SLL2 EVENTS */
+    {
+            "decoder.sll2.pkt_too_small",
+            SLL2_PKT_TOO_SMALL,
+    },
+
     /* ETHERNET EVENTS */
     {
             "decoder.ethernet.pkt_too_small",
             ETHERNET_PKT_TOO_SMALL,
+    },
+    {
+            "decoder.ethernet.unknown_ethertype",
+            ETHERNET_UNKNOWN_ETHERTYPE,
     },
 
     /* PPP EVENTS */
@@ -415,6 +434,16 @@ const struct DecodeEvents_ DEvents[] = {
     {
             "decoder.vntag.unknown_type",
             VNTAG_UNKNOWN_TYPE,
+    },
+
+    /* ETAG EVENTS */
+    {
+            "decoder.etag.header_too_small",
+            ETAG_HEADER_TOO_SMALL,
+    },
+    {
+            "decoder.etag.unknown_type",
+            ETAG_UNKNOWN_TYPE,
     },
 
     /* RAW EVENTS */
@@ -584,6 +613,8 @@ const struct DecodeEvents_ DEvents[] = {
             "decoder.nsh.unknown_payload",
             NSH_UNKNOWN_PAYLOAD,
     },
+
+    /* GENERIC EVENTS */
     {
             "decoder.too_many_layers",
             GENERIC_TOO_MANY_LAYERS,
@@ -871,6 +902,40 @@ const struct DecodeEvents_ DEvents[] = {
     {
             "stream.reassembly_insert_invalid",
             STREAM_REASSEMBLY_INSERT_INVALID,
+    },
+    {
+            "stream.reassembly_urgent_oob_limit_reached",
+            STREAM_REASSEMBLY_URGENT_OOB_LIMIT_REACHED,
+    },
+
+    /* ARP EVENTS */
+    {
+            "decoder.arp.pkt_too_small",
+            ARP_PKT_TOO_SMALL,
+    },
+    {
+            "decoder.arp.unsupported_hardware",
+            ARP_UNSUPPORTED_HARDWARE,
+    },
+    {
+            "decoder.arp.unsupported_protocol",
+            ARP_UNSUPPORTED_PROTOCOL,
+    },
+    {
+            "decoder.arp.invalid_pkt",
+            ARP_INVALID_PKT,
+    },
+    {
+            "decoder.arp.invalid_hardware_size",
+            ARP_INVALID_HARDWARE_SIZE,
+    },
+    {
+            "decoder.arp.invalid_protocol_size",
+            ARP_INVALID_PROTOCOL_SIZE,
+    },
+    {
+            "decoder.arp.unsupported_opcode",
+            ARP_UNSUPPORTED_OPCODE,
     },
 
     { NULL, 0 },

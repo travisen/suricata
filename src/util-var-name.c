@@ -68,7 +68,7 @@ typedef struct VarNameStore_ {
     HashListTable *names;
     HashListTable *ids;
     uint32_t max_id;
-    struct timeval free_after;
+    SCTime_t free_after;
     TAILQ_ENTRY(VarNameStore_) next;
 } VarNameStore;
 typedef VarNameStore *VarNameStorePtr;
@@ -154,6 +154,9 @@ void VarNameStoreDestroy(void)
  */
 uint32_t VarNameStoreRegister(const char *name, const enum VarTypes type)
 {
+    if (name == NULL) {
+        return 0;
+    }
     SCMutexLock(&base_lock);
     uint32_t id = 0;
 
@@ -200,6 +203,10 @@ const char *VarNameStoreSetupLookup(const uint32_t id, const enum VarTypes type)
 
 void VarNameStoreUnregister(const uint32_t id, const enum VarTypes type)
 {
+    if (unlikely(id == 0)) {
+        /* There was an error registering the varname, so nothing to unregister */
+        return;
+    }
     SCMutexLock(&base_lock);
     VariableName lookup = { .type = type, .id = id };
     VariableName *found = (VariableName *)HashListTableLookup(base.ids, (void *)&lookup, 0);
@@ -258,15 +265,12 @@ int VarNameStoreActivate(void)
     }
 
     if (new_active) {
+        SCTime_t now = SCTimeGetTime();
+
         VarNameStore *old_active = SC_ATOMIC_GET(active);
         if (old_active) {
-            struct timeval ts, add;
-            memset(&ts, 0, sizeof(ts));
-            memset(&add, 0, sizeof(add));
-            gettimeofday(&ts, NULL);
-            add.tv_sec = 60;
-            timeradd(&ts, &add, &ts);
-            old_active->free_after = ts;
+            SCTime_t free_after = SCTIME_ADD_SECS(now, 60);
+            old_active->free_after = free_after;
 
             TAILQ_INSERT_TAIL(&free_list, old_active, next);
             SCLogDebug("old active is stored in free list");
@@ -275,16 +279,12 @@ int VarNameStoreActivate(void)
         SC_ATOMIC_SET(active, new_active);
         SCLogDebug("new store active");
 
-        struct timeval now;
-        memset(&now, 0, sizeof(now));
-        gettimeofday(&now, NULL);
-
         VarNameStore *s = NULL;
         while ((s = TAILQ_FIRST(&free_list))) {
             char timebuf[64];
-            CreateIsoTimeString(SCTIME_FROM_TIMEVAL(&s->free_after), timebuf, sizeof(timebuf));
+            CreateIsoTimeString(s->free_after, timebuf, sizeof(timebuf));
 
-            if (!timercmp(&now, &s->free_after, >)) {
+            if (SCTIME_CMP_LTE(now, s->free_after)) {
                 SCLogDebug("not yet freeing store %p before %s", s, timebuf);
                 break;
             }
@@ -301,14 +301,17 @@ out:
     return result;
 }
 
-/** \brief find name for id+type at packet time. */
+/** \brief find name for id+type at packet time.
+ *  As the `active` store won't be modified, we don't need locks. */
 const char *VarNameStoreLookupById(const uint32_t id, const enum VarTypes type)
 {
     const char *name = NULL;
 
+    /* coverity[missing_lock] */
     const VarNameStore *current = SC_ATOMIC_GET(active);
     if (current) {
         VariableName lookup = { .type = type, .id = id };
+        /* coverity[missing_lock] */
         const VariableName *found = HashListTableLookup(current->ids, (void *)&lookup, 0);
         if (found) {
             return found->name;
@@ -318,12 +321,15 @@ const char *VarNameStoreLookupById(const uint32_t id, const enum VarTypes type)
     return name;
 }
 
-/** \brief find name for id+type at packet time. */
+/** \brief find name for id+type at packet time.
+ *  As the `active` store won't be modified, we don't need locks. */
 uint32_t VarNameStoreLookupByName(const char *name, const enum VarTypes type)
 {
+    /* coverity[missing_lock] */
     const VarNameStore *current = SC_ATOMIC_GET(active);
     if (current) {
         VariableName lookup = { .name = (char *)name, .type = type };
+        /* coverity[missing_lock] */
         const VariableName *found = HashListTableLookup(current->names, (void *)&lookup, 0);
         if (found) {
             return found->id;
@@ -336,7 +342,8 @@ uint32_t VarNameStoreLookupByName(const char *name, const enum VarTypes type)
 static uint32_t VariableNameHash(HashListTable *ht, void *buf, uint16_t buflen)
 {
     VariableName *vn = (VariableName *)buf;
-    uint32_t hash = StringHashDjb2((const uint8_t *)vn->name, strlen(vn->name)) + vn->type;
+    uint32_t hash =
+            StringHashDjb2((const uint8_t *)vn->name, (uint32_t)strlen(vn->name)) + vn->type;
     return (hash % VARNAME_HASHSIZE);
 }
 

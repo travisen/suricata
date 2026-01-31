@@ -45,8 +45,6 @@ void RunModeErfFileRegister(void)
             "Multi threaded ERF file mode.  Packets from "
             "each flow are assigned to a single detect thread",
             RunModeErfFileAutoFp, NULL);
-
-    return;
 }
 
 int RunModeErfFileSingle(void)
@@ -55,7 +53,7 @@ int RunModeErfFileSingle(void)
 
     SCEnter();
 
-    if (ConfGet("erf-file.file", &file) == 0) {
+    if (SCConfGet("erf-file.file", &file) == 0) {
         FatalError("Failed to get erf-file.file from config.");
     }
 
@@ -112,7 +110,7 @@ int RunModeErfFileAutoFp(void)
     uint16_t thread;
 
     const char *file = NULL;
-    if (ConfGet("erf-file.file", &file) == 0) {
+    if (SCConfGet("erf-file.file", &file) == 0) {
         FatalError("Failed retrieving erf-file.file from config");
     }
 
@@ -213,8 +211,6 @@ int RunModeErfFileAutoFp(void)
                 TmThreadSetThreadPriority(tv_detect_ncpu, PRIO_MEDIUM);
             }
         }
-
-        TmThreadSetGroupName(tv_detect_ncpu, "Detect");
 
         if (TmThreadSpawn(tv_detect_ncpu) != TM_ECODE_OK) {
             printf("ERROR: TmThreadSpawn failed\n");

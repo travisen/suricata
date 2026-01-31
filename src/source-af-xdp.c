@@ -29,7 +29,6 @@
  * AF_XDP socket acquisition support
  *
  */
-#define PCAP_DONT_INCLUDE_PCAP_BPF_H 1
 #define SC_PCAP_DONT_INCLUDE_PCAP_H  1
 #include "suricata-common.h"
 #include "suricata.h"
@@ -45,7 +44,7 @@
 #include "util-cpu.h"
 #include "util-datalink.h"
 #include "util-debug.h"
-#include "util-device.h"
+#include "util-device-private.h"
 #include "util-ebpf.h"
 #include "util-error.h"
 #include "util-privs.h"
@@ -189,14 +188,14 @@ typedef struct AFXDPThreadVars_ {
     /* Stats parameters */
     uint64_t pkts;
     uint64_t bytes;
-    uint16_t capture_afxdp_packets;
-    uint16_t capture_kernel_drops;
-    uint16_t capture_afxdp_poll;
-    uint16_t capture_afxdp_poll_timeout;
-    uint16_t capture_afxdp_poll_failed;
-    uint16_t capture_afxdp_empty_reads;
-    uint16_t capture_afxdp_failed_reads;
-    uint16_t capture_afxdp_acquire_pkt_failed;
+    StatsCounterId capture_afxdp_packets;
+    StatsCounterId capture_kernel_drops;
+    StatsCounterId capture_afxdp_poll;
+    StatsCounterId capture_afxdp_poll_timeout;
+    StatsCounterId capture_afxdp_poll_failed;
+    StatsCounterId capture_afxdp_empty_reads;
+    StatsCounterId capture_afxdp_failed_reads;
+    StatsCounterId capture_afxdp_acquire_pkt_failed;
 } AFXDPThreadVars;
 
 static TmEcode ReceiveAFXDPThreadInit(ThreadVars *, const void *, void **);
@@ -249,16 +248,17 @@ static inline void AFXDPDumpCounters(AFXDPThreadVars *ptv)
     if (getsockopt(fd, SOL_XDP, XDP_STATISTICS, &stats, &len) >= 0) {
         uint64_t rx_dropped = stats.rx_dropped + stats.rx_invalid_descs + stats.rx_ring_full;
 
-        StatsAddUI64(ptv->tv, ptv->capture_kernel_drops,
-                rx_dropped - StatsGetLocalCounterValue(ptv->tv, ptv->capture_kernel_drops));
-        StatsAddUI64(ptv->tv, ptv->capture_afxdp_packets, ptv->pkts);
+        StatsCounterAddI64(&ptv->tv->stats, ptv->capture_kernel_drops,
+                rx_dropped - StatsCounterGetLocalValue(&ptv->tv->stats, ptv->capture_kernel_drops));
+        StatsCounterAddI64(&ptv->tv->stats, ptv->capture_afxdp_packets, ptv->pkts);
 
         (void)SC_ATOMIC_SET(ptv->livedev->drop, rx_dropped);
         (void)SC_ATOMIC_ADD(ptv->livedev->pkts, ptv->pkts);
 
         SCLogDebug("(%s) Kernel: Packets %" PRIu64 ", bytes %" PRIu64 ", dropped %" PRIu64 "",
-                ptv->tv->name, StatsGetLocalCounterValue(ptv->tv, ptv->capture_afxdp_packets),
-                ptv->bytes, StatsGetLocalCounterValue(ptv->tv, ptv->capture_kernel_drops));
+                ptv->tv->name,
+                StatsCounterGetLocalValue(&ptv->tv->stats, ptv->capture_afxdp_packets), ptv->bytes,
+                StatsCounterGetLocalValue(&ptv->tv->stats, ptv->capture_kernel_drops));
 
         ptv->pkts = 0;
     }
@@ -283,14 +283,9 @@ TmEcode AFXDPQueueProtectionInit(void)
     SCReturnInt(TM_ECODE_OK);
 }
 
-void AFXDPMutexClean(void)
-{
-    SCMutexDestroy(&xsk_protect.queue_protect);
-}
-
 static TmEcode AFXDPAssignQueueID(AFXDPThreadVars *ptv)
 {
-    if (ptv->xsk.queue.assigned == false) {
+    if (!ptv->xsk.queue.assigned) {
         ptv->xsk.queue.queue_num = SC_ATOMIC_GET(xsk_protect.queue_num);
         SC_ATOMIC_ADD(xsk_protect.queue_num, 1);
 
@@ -568,7 +563,7 @@ static inline int DumpStatsEverySecond(AFXDPThreadVars *ptv, time_t *last_dump)
         stats_dumped = 1;
     }
 
-    StatsSyncCountersIfSignalled(ptv->tv);
+    StatsSyncCountersIfSignalled(&ptv->tv->stats);
 
     return stats_dumped;
 }
@@ -580,6 +575,7 @@ static inline ssize_t WakeupSocket(void *data)
 
     /* Assuming kernel >= 5.11 in use if xdp_busy_poll is enabled */
     if (ptv->xsk.enable_busy_poll || xsk_ring_prod__needs_wakeup(&ptv->umem.fq)) {
+        // cppcheck-suppress nullPointer
         res = recvfrom(xsk_socket__fd(ptv->xsk.xsk), NULL, 0, MSG_DONTWAIT, NULL, NULL);
     }
 
@@ -664,15 +660,19 @@ static TmEcode ReceiveAFXDPThreadInit(ThreadVars *tv, const void *initdata, void
     ptv->napi_defer_hard_irqs = afxdpconfig->napi_defer_hard_irqs;
 
     /* Stats registration */
-    ptv->capture_afxdp_packets = StatsRegisterCounter("capture.afxdp_packets", ptv->tv);
-    ptv->capture_kernel_drops = StatsRegisterCounter("capture.kernel_drops", ptv->tv);
-    ptv->capture_afxdp_poll = StatsRegisterCounter("capture.afxdp.poll", ptv->tv);
-    ptv->capture_afxdp_poll_timeout = StatsRegisterCounter("capture.afxdp.poll_timeout", ptv->tv);
-    ptv->capture_afxdp_poll_failed = StatsRegisterCounter("capture.afxdp.poll_failed", ptv->tv);
-    ptv->capture_afxdp_empty_reads = StatsRegisterCounter("capture.afxdp.empty_reads", ptv->tv);
-    ptv->capture_afxdp_failed_reads = StatsRegisterCounter("capture.afxdp.failed_reads", ptv->tv);
+    ptv->capture_afxdp_packets = StatsRegisterCounter("capture.afxdp_packets", &ptv->tv->stats);
+    ptv->capture_kernel_drops = StatsRegisterCounter("capture.kernel_drops", &ptv->tv->stats);
+    ptv->capture_afxdp_poll = StatsRegisterCounter("capture.afxdp.poll", &ptv->tv->stats);
+    ptv->capture_afxdp_poll_timeout =
+            StatsRegisterCounter("capture.afxdp.poll_timeout", &ptv->tv->stats);
+    ptv->capture_afxdp_poll_failed =
+            StatsRegisterCounter("capture.afxdp.poll_failed", &ptv->tv->stats);
+    ptv->capture_afxdp_empty_reads =
+            StatsRegisterCounter("capture.afxdp.empty_reads", &ptv->tv->stats);
+    ptv->capture_afxdp_failed_reads =
+            StatsRegisterCounter("capture.afxdp.failed_reads", &ptv->tv->stats);
     ptv->capture_afxdp_acquire_pkt_failed =
-            StatsRegisterCounter("capture.afxdp.acquire_pkt_failed", ptv->tv);
+            StatsRegisterCounter("capture.afxdp.acquire_pkt_failed", &ptv->tv->stats);
 
     /* Reserve memory for umem  */
     if (AcquireBuffer(ptv) != TM_ECODE_OK) {
@@ -736,16 +736,16 @@ static TmEcode ReceiveAFXDPLoop(ThreadVars *tv, void *data, void *slot)
          * performance. xdp_busy_poll must be disabled for kernels < 5.11
          */
         if (!ptv->xsk.enable_busy_poll) {
-            StatsIncr(ptv->tv, ptv->capture_afxdp_poll);
+            StatsCounterIncr(&ptv->tv->stats, ptv->capture_afxdp_poll);
 
             r = poll(&ptv->xsk.fd, 1, POLL_TIMEOUT);
 
             /* Report poll results */
             if (r <= 0) {
                 if (r == 0) {
-                    StatsIncr(ptv->tv, ptv->capture_afxdp_poll_timeout);
+                    StatsCounterIncr(&ptv->tv->stats, ptv->capture_afxdp_poll_timeout);
                 } else if (r < 0) {
-                    StatsIncr(ptv->tv, ptv->capture_afxdp_poll_failed);
+                    StatsCounterIncr(&ptv->tv->stats, ptv->capture_afxdp_poll_failed);
                     SCLogWarning("poll failed with retval %d", r);
                     AFXDPSwitchState(ptv, AFXDP_STATE_DOWN);
                 }
@@ -757,7 +757,7 @@ static TmEcode ReceiveAFXDPLoop(ThreadVars *tv, void *data, void *slot)
 
         rcvd = xsk_ring_cons__peek(&ptv->xsk.rx, ptv->xsk.busy_poll_budget, &idx_rx);
         if (!rcvd) {
-            StatsIncr(ptv->tv, ptv->capture_afxdp_empty_reads);
+            StatsCounterIncr(&ptv->tv->stats, ptv->capture_afxdp_empty_reads);
             ssize_t ret = WakeupSocket(ptv);
             if (ret < 0) {
                 SCLogWarning("recv failed with retval %ld", ret);
@@ -769,7 +769,7 @@ static TmEcode ReceiveAFXDPLoop(ThreadVars *tv, void *data, void *slot)
 
         uint32_t res = xsk_ring_prod__reserve(&ptv->umem.fq, rcvd, &idx_fq);
         while (res != rcvd) {
-            StatsIncr(ptv->tv, ptv->capture_afxdp_failed_reads);
+            StatsCounterIncr(&ptv->tv->stats, ptv->capture_afxdp_failed_reads);
             ssize_t ret = WakeupSocket(ptv);
             if (ret < 0) {
                 SCLogWarning("recv failed with retval %ld", ret);
@@ -784,7 +784,7 @@ static TmEcode ReceiveAFXDPLoop(ThreadVars *tv, void *data, void *slot)
         for (uint32_t i = 0; i < rcvd; i++) {
             p = PacketGetFromQueueOrAlloc();
             if (unlikely(p == NULL)) {
-                StatsIncr(ptv->tv, ptv->capture_afxdp_acquire_pkt_failed);
+                StatsCounterIncr(&ptv->tv->stats, ptv->capture_afxdp_acquire_pkt_failed);
                 continue;
             }
 
@@ -909,8 +909,8 @@ static void ReceiveAFXDPThreadExitStats(ThreadVars *tv, void *data)
     AFXDPDumpCounters(ptv);
 
     SCLogPerf("(%s) Kernel: Packets %" PRIu64 ", bytes %" PRIu64 ", dropped %" PRIu64 "", tv->name,
-            StatsGetLocalCounterValue(tv, ptv->capture_afxdp_packets), ptv->bytes,
-            StatsGetLocalCounterValue(tv, ptv->capture_kernel_drops));
+            StatsCounterGetLocalValue(&tv->stats, ptv->capture_afxdp_packets), ptv->bytes,
+            StatsCounterGetLocalValue(&tv->stats, ptv->capture_kernel_drops));
 }
 
 /**
@@ -936,7 +936,7 @@ static TmEcode DecodeAFXDP(ThreadVars *tv, Packet *p, void *data)
 
     /* If suri has set vlan during reading, we increase vlan counter */
     if (p->vlan_idx) {
-        StatsIncr(tv, dtv->counter_vlan);
+        StatsCounterIncr(&tv->stats, dtv->counter_vlan);
     }
 
     /* call the decoder */

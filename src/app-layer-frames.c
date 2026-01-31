@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2022 Open Information Security Foundation
+/* Copyright (C) 2007-2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -27,25 +27,36 @@
 
 #include "flow.h"
 #include "stream-tcp.h"
+#include "rust.h"
 #include "app-layer-frames.h"
 #include "app-layer-parser.h"
 
 struct FrameConfig {
     SC_ATOMIC_DECLARE(uint64_t, types);
 };
-static struct FrameConfig frame_config[ALPROTO_MAX];
+/* This array should be allocated to contain g_alproto_max protocols. */
+static struct FrameConfig *frame_config;
 
 void FrameConfigInit(void)
 {
-    for (AppProto p = 0; p < ALPROTO_MAX; p++) {
+    frame_config = SCCalloc(g_alproto_max, sizeof(struct FrameConfig));
+    if (unlikely(frame_config == NULL)) {
+        FatalError("Unable to alloc frame_config.");
+    }
+    for (AppProto p = 0; p < g_alproto_max; p++) {
         SC_ATOMIC_INIT(frame_config[p].types);
     }
+}
+
+void FrameConfigDeInit(void)
+{
+    SCFree(frame_config);
 }
 
 void FrameConfigEnableAll(void)
 {
     const uint64_t bits = UINT64_MAX;
-    for (AppProto p = 0; p < ALPROTO_MAX; p++) {
+    for (AppProto p = 0; p < g_alproto_max; p++) {
         struct FrameConfig *fc = &frame_config[p];
         SC_ATOMIC_OR(fc->types, bits);
     }
@@ -66,9 +77,9 @@ static inline bool FrameConfigTypeIsEnabled(const AppProto p, const uint8_t type
     return enabled;
 }
 
+#ifdef DEBUG
 static void FrameDebug(const char *prefix, const Frames *frames, const Frame *frame)
 {
-#ifdef DEBUG
     const char *type_name = "unknown";
     if (frame->type == FRAME_STREAM_TYPE) {
         type_name = "stream";
@@ -80,7 +91,35 @@ static void FrameDebug(const char *prefix, const Frames *frames, const Frame *fr
             prefix, frames, frame, frame->type, type_name, frame->id, frame->flags, frame->offset,
             frame->len, frame->inspect_progress, frame->event_cnt, frame->events[0],
             frame->events[1], frame->events[2], frame->events[3]);
+}
+#else
+#define FrameDebug(prefix, frames, frame)
 #endif
+
+/**
+ * \note "open" means a frame that has no length set (len == -1)
+ * \todo perhaps we can search backwards */
+Frame *FrameGetLastOpenByType(Frames *frames, const uint8_t frame_type)
+{
+    Frame *candidate = NULL;
+
+    SCLogDebug(
+            "frames %p cnt %u, looking for last of type %" PRIu8, frames, frames->cnt, frame_type);
+    for (uint16_t i = 0; i < frames->cnt; i++) {
+        if (i < FRAMES_STATIC_CNT) {
+            Frame *frame = &frames->sframes[i];
+            FrameDebug("get_by_id(static)", frames, frame);
+            if (frame->type == frame_type && frame->len == -1)
+                candidate = frame;
+        } else {
+            const uint16_t o = i - FRAMES_STATIC_CNT;
+            Frame *frame = &frames->dframes[o];
+            FrameDebug("get_by_id(dynamic)", frames, frame);
+            if (frame->type == frame_type && frame->len == -1)
+                candidate = frame;
+        }
+    }
+    return candidate;
 }
 
 Frame *FrameGetById(Frames *frames, const int64_t id)
@@ -122,7 +161,7 @@ Frame *FrameGetByIndex(Frames *frames, const uint32_t idx)
 
 static Frame *FrameNew(Frames *frames, uint64_t offset, int64_t len)
 {
-    BUG_ON(frames == NULL);
+    DEBUG_VALIDATE_BUG_ON(frames == NULL);
 
     if (frames->cnt < FRAMES_STATIC_CNT) {
         Frame *frame = &frames->sframes[frames->cnt];
@@ -132,15 +171,15 @@ static Frame *FrameNew(Frames *frames, uint64_t offset, int64_t len)
         frames->cnt++;
         return frame;
     } else if (frames->dframes == NULL) {
-        BUG_ON(frames->dyn_size != 0);
-        BUG_ON(frames->cnt != FRAMES_STATIC_CNT);
+        DEBUG_VALIDATE_BUG_ON(frames->dyn_size != 0);
+        DEBUG_VALIDATE_BUG_ON(frames->cnt != FRAMES_STATIC_CNT);
 
         frames->dframes = SCCalloc(8, sizeof(Frame));
         if (frames->dframes == NULL) {
             return NULL;
         }
         frames->cnt++;
-        BUG_ON(frames->cnt != FRAMES_STATIC_CNT + 1);
+        DEBUG_VALIDATE_BUG_ON(frames->cnt != FRAMES_STATIC_CNT + 1);
 
         frames->dyn_size = 8;
         frames->dframes[0].offset = offset;
@@ -148,12 +187,12 @@ static Frame *FrameNew(Frames *frames, uint64_t offset, int64_t len)
         frames->dframes[0].id = ++frames->base_id;
         return &frames->dframes[0];
     } else {
-        BUG_ON(frames->cnt < FRAMES_STATIC_CNT);
+        DEBUG_VALIDATE_BUG_ON(frames->cnt < FRAMES_STATIC_CNT);
 
         /* need to handle dynamic storage of frames now */
         const uint16_t dyn_cnt = frames->cnt - FRAMES_STATIC_CNT;
         if (dyn_cnt < frames->dyn_size) {
-            BUG_ON(frames->dframes == NULL);
+            DEBUG_VALIDATE_BUG_ON(frames->dframes == NULL);
 
             // fall through
         } else {
@@ -197,6 +236,7 @@ static void FrameCopy(Frame *dst, Frame *src)
     memcpy(dst, src, sizeof(*dst));
 }
 
+#ifdef DEBUG
 static void AppLayerFrameDumpForFrames(const char *prefix, const Frames *frames)
 {
     SCLogDebug("prefix: %s", prefix);
@@ -212,6 +252,7 @@ static void AppLayerFrameDumpForFrames(const char *prefix, const Frames *frames)
     }
     SCLogDebug("prefix: %s", prefix);
 }
+#endif
 
 static inline uint64_t FrameLeftEdge(const TcpStream *stream, const Frame *frame)
 {
@@ -222,7 +263,7 @@ static inline uint64_t FrameLeftEdge(const TcpStream *stream, const Frame *frame
 
     SCLogDebug("frame_offset %" PRIi64 ", frame_data %" PRIi64 ", frame->len %" PRIi64,
             frame_offset, frame_data, frame->len);
-    BUG_ON(frame_offset > app_progress);
+    DEBUG_VALIDATE_BUG_ON(frame_offset > app_progress);
 
     /* length unknown, make sure to have at least 2500 */
     if (frame->len < 0) {
@@ -290,12 +331,14 @@ static int FrameSlide(const char *ds, Frames *frames, const TcpStream *stream, c
                ", next %" PRIu64,
             (uint64_t)frames->left_edge_rel + STREAM_BASE_OFFSET(stream), frames->left_edge_rel,
             STREAM_BASE_OFFSET(stream), STREAM_BASE_OFFSET(stream) + slide);
-    BUG_ON(frames == NULL);
+    DEBUG_VALIDATE_BUG_ON(frames == NULL);
     SCLogDebug("%s frames %p: sliding %u bytes", ds, frames, slide);
     uint64_t le = STREAM_APP_PROGRESS(stream);
     const uint64_t next_base = STREAM_BASE_OFFSET(stream) + slide;
+#if defined(DEBUG) || defined(DEBUG_VALIDATION)
     const uint16_t start = frames->cnt;
     uint16_t removed = 0;
+#endif
     uint16_t x = 0;
     for (uint16_t i = 0; i < frames->cnt; i++) {
         if (i < FRAMES_STATIC_CNT) {
@@ -305,7 +348,9 @@ static int FrameSlide(const char *ds, Frames *frames, const TcpStream *stream, c
                 // remove by not incrementing 'x'
                 SCLogDebug("removing %p id %" PRIi64, frame, frame->id);
                 FrameClean(frame);
+#if defined(DEBUG) || defined(DEBUG_VALIDATION)
                 removed++;
+#endif
             } else {
                 Frame *nframe = &frames->sframes[x];
                 FrameCopy(nframe, frame);
@@ -323,7 +368,9 @@ static int FrameSlide(const char *ds, Frames *frames, const TcpStream *stream, c
                 // remove by not incrementing 'x'
                 SCLogDebug("removing %p id %" PRIi64, frame, frame->id);
                 FrameClean(frame);
+#if defined(DEBUG) || defined(DEBUG_VALIDATION)
                 removed++;
+#endif
             } else {
                 Frame *nframe;
                 if (x >= FRAMES_STATIC_CNT) {
@@ -342,7 +389,9 @@ static int FrameSlide(const char *ds, Frames *frames, const TcpStream *stream, c
     }
     frames->cnt = x;
     uint64_t o = STREAM_BASE_OFFSET(stream) + slide;
-    frames->left_edge_rel = le - (STREAM_BASE_OFFSET(stream) + slide);
+    DEBUG_VALIDATE_BUG_ON(o > le);
+    DEBUG_VALIDATE_BUG_ON(le - o > UINT32_MAX);
+    frames->left_edge_rel = (uint32_t)(le - o);
 
 #ifdef DEBUG
     SCLogDebug("end: left edge %" PRIu64 ", left_edge_rel %u, stream base %" PRIu64
@@ -353,8 +402,7 @@ static int FrameSlide(const char *ds, Frames *frames, const TcpStream *stream, c
     snprintf(pf, sizeof(pf), "%s:post_slide", ds);
     AppLayerFrameDumpForFrames(pf, frames);
 #endif
-    BUG_ON(o > le);
-    BUG_ON(x != start - removed);
+    DEBUG_VALIDATE_BUG_ON(x != start - removed);
     return 0;
 }
 
@@ -385,7 +433,7 @@ static void FrameFreeSingleFrame(Frames *frames, Frame *r)
 
 static void FramesClear(Frames *frames)
 {
-    BUG_ON(frames == NULL);
+    DEBUG_VALIDATE_BUG_ON(frames == NULL);
 
     SCLogDebug("frames %u", frames->cnt);
     for (uint16_t i = 0; i < frames->cnt; i++) {
@@ -405,7 +453,7 @@ static void FramesClear(Frames *frames)
 
 void FramesFree(Frames *frames)
 {
-    BUG_ON(frames == NULL);
+    DEBUG_VALIDATE_BUG_ON(frames == NULL);
     FramesClear(frames);
     SCFree(frames->dframes);
     frames->dframes = NULL;
@@ -427,12 +475,12 @@ Frame *AppLayerFrameNewByPointer(Flow *f, const StreamSlice *stream_slice,
     if (f->proto == IPPROTO_TCP && f->protoctx == NULL)
         return NULL;
     if (frame_start < stream_slice->input ||
-            frame_start >= stream_slice->input + stream_slice->input_len)
+            frame_start > stream_slice->input + stream_slice->input_len)
         return NULL;
 #endif
-    BUG_ON(frame_start < stream_slice->input);
-    BUG_ON(stream_slice->input == NULL);
-    BUG_ON(f->proto == IPPROTO_TCP && f->protoctx == NULL);
+    DEBUG_VALIDATE_BUG_ON(frame_start < stream_slice->input);
+    DEBUG_VALIDATE_BUG_ON(stream_slice->input == NULL);
+    DEBUG_VALIDATE_BUG_ON(f->proto == IPPROTO_TCP && f->protoctx == NULL);
 
     ptrdiff_t ptr_offset = frame_start - stream_slice->input;
 #ifdef DEBUG
@@ -441,7 +489,7 @@ Frame *AppLayerFrameNewByPointer(Flow *f, const StreamSlice *stream_slice,
                " (offset %" PRIu64 ")",
             f, dir == 0 ? "toserver" : "toclient", frame_start, offset, len, stream_slice->offset);
 #endif
-    BUG_ON(f->alparser == NULL);
+    DEBUG_VALIDATE_BUG_ON(f->alparser == NULL);
 
     FramesContainer *frames_container = AppLayerFramesSetupContainer(f);
     if (frames_container == NULL)
@@ -464,10 +512,10 @@ Frame *AppLayerFrameNewByPointer(Flow *f, const StreamSlice *stream_slice,
     return r;
 }
 
-static Frame *AppLayerFrameUdp(Flow *f, const StreamSlice *stream_slice,
-        const uint32_t frame_start_rel, const int64_t len, int dir, uint8_t frame_type)
+static Frame *AppLayerFrameUdp(
+        Flow *f, const uint32_t frame_start_rel, const int64_t len, int dir, uint8_t frame_type)
 {
-    BUG_ON(f->proto != IPPROTO_UDP);
+    DEBUG_VALIDATE_BUG_ON(f->proto != IPPROTO_UDP);
 
     if (!(FrameConfigTypeIsEnabled(f->alproto, frame_type)))
         return NULL;
@@ -492,9 +540,13 @@ static Frame *AppLayerFrameUdp(Flow *f, const StreamSlice *stream_slice,
 
 /** \brief create new frame using a relative offset from the start of the stream slice
  */
-Frame *AppLayerFrameNewByRelativeOffset(Flow *f, const StreamSlice *stream_slice,
-        const uint32_t frame_start_rel, const int64_t len, int dir, uint8_t frame_type)
+Frame *SCAppLayerFrameNewByRelativeOffset(Flow *f, const void *ss, const uint32_t frame_start_rel,
+        const int64_t len, int dir, uint8_t frame_type)
 {
+    // need to hide StreamSlice argument
+    // as we cannot bindgen a C function with an argument whose type
+    // is defined in rust (at least before a suricata_core crate)
+    const StreamSlice *stream_slice = (const StreamSlice *)ss;
     if (!(FrameConfigTypeIsEnabled(f->alproto, frame_type)))
         return NULL;
 
@@ -505,13 +557,13 @@ Frame *AppLayerFrameNewByRelativeOffset(Flow *f, const StreamSlice *stream_slice
     if (stream_slice->input == NULL)
         return NULL;
 #else
-    BUG_ON(stream_slice->input == NULL);
+    DEBUG_VALIDATE_BUG_ON(stream_slice->input == NULL);
 #endif
-    BUG_ON(f->proto == IPPROTO_TCP && f->protoctx == NULL);
-    BUG_ON(f->alparser == NULL);
+    DEBUG_VALIDATE_BUG_ON(f->proto == IPPROTO_TCP && f->protoctx == NULL);
+    DEBUG_VALIDATE_BUG_ON(f->alparser == NULL);
 
     if (f->proto == IPPROTO_UDP) {
-        return AppLayerFrameUdp(f, stream_slice, frame_start_rel, len, dir, frame_type);
+        return AppLayerFrameUdp(f, frame_start_rel, len, dir, frame_type);
     }
 
     FramesContainer *frames_container = AppLayerFramesSetupContainer(f);
@@ -541,6 +593,7 @@ Frame *AppLayerFrameNewByRelativeOffset(Flow *f, const StreamSlice *stream_slice
 
 void AppLayerFrameDump(Flow *f)
 {
+#ifdef DEBUG
     if (f->proto == IPPROTO_TCP && f->protoctx && f->alparser) {
         FramesContainer *frames_container = AppLayerFramesGetContainer(f);
         if (frames_container != NULL) {
@@ -548,6 +601,7 @@ void AppLayerFrameDump(Flow *f)
             AppLayerFrameDumpForFrames("toclient::dump", &frames_container->toclient);
         }
     }
+#endif
 }
 
 /** \brief create new frame using the absolute offset from the start of the stream
@@ -565,12 +619,12 @@ Frame *AppLayerFrameNewByAbsoluteOffset(Flow *f, const StreamSlice *stream_slice
     if (stream_slice->input == NULL)
         return NULL;
 #else
-    BUG_ON(stream_slice->input == NULL);
+    DEBUG_VALIDATE_BUG_ON(stream_slice->input == NULL);
 #endif
-    BUG_ON(f->proto == IPPROTO_TCP && f->protoctx == NULL);
-    BUG_ON(f->alparser == NULL);
-    BUG_ON(frame_start < stream_slice->offset);
-    BUG_ON(frame_start - stream_slice->offset >= (uint64_t)INT_MAX);
+    DEBUG_VALIDATE_BUG_ON(f->proto == IPPROTO_TCP && f->protoctx == NULL);
+    DEBUG_VALIDATE_BUG_ON(f->alparser == NULL);
+    DEBUG_VALIDATE_BUG_ON(frame_start < stream_slice->offset);
+    DEBUG_VALIDATE_BUG_ON(frame_start - stream_slice->offset >= (uint64_t)INT_MAX);
 
     FramesContainer *frames_container = AppLayerFramesSetupContainer(f);
     if (frames_container == NULL)
@@ -604,19 +658,10 @@ void AppLayerFrameAddEvent(Frame *r, uint8_t e)
     }
 }
 
-void AppLayerFrameAddEventById(Flow *f, const int dir, const FrameId id, uint8_t e)
+void SCAppLayerFrameAddEventById(const Flow *f, const int dir, const FrameId id, uint8_t e)
 {
     Frame *frame = AppLayerFrameGetById(f, dir, id);
     AppLayerFrameAddEvent(frame, e);
-}
-
-FrameId AppLayerFrameGetId(Frame *r)
-{
-    if (r != NULL) {
-        return r->id;
-    } else {
-        return -1;
-    }
 }
 
 void AppLayerFrameSetLength(Frame *frame, int64_t len)
@@ -627,7 +672,7 @@ void AppLayerFrameSetLength(Frame *frame, int64_t len)
     }
 }
 
-void AppLayerFrameSetLengthById(Flow *f, const int dir, const FrameId id, int64_t len)
+void SCAppLayerFrameSetLengthById(const Flow *f, const int dir, const FrameId id, int64_t len)
 {
     Frame *frame = AppLayerFrameGetById(f, dir, id);
     AppLayerFrameSetLength(frame, len);
@@ -642,13 +687,13 @@ void AppLayerFrameSetTxId(Frame *r, uint64_t tx_id)
     }
 }
 
-void AppLayerFrameSetTxIdById(Flow *f, const int dir, const FrameId id, uint64_t tx_id)
+void SCAppLayerFrameSetTxIdById(const Flow *f, const int dir, const FrameId id, uint64_t tx_id)
 {
     Frame *frame = AppLayerFrameGetById(f, dir, id);
     AppLayerFrameSetTxId(frame, tx_id);
 }
 
-Frame *AppLayerFrameGetById(Flow *f, const int dir, const FrameId frame_id)
+Frame *AppLayerFrameGetById(const Flow *f, const int dir, const FrameId frame_id)
 {
     FramesContainer *frames_container = AppLayerFramesGetContainer(f);
     SCLogDebug("get frame_id %" PRIi64 " direction %u/%s frames_container %p", frame_id, dir,
@@ -666,8 +711,28 @@ Frame *AppLayerFrameGetById(Flow *f, const int dir, const FrameId frame_id)
     return FrameGetById(frames, frame_id);
 }
 
-static inline bool FrameIsDone(
-        const Frame *frame, const uint64_t abs_offset, const uint64_t abs_right_edge)
+Frame *AppLayerFrameGetLastOpenByType(Flow *f, const int dir, const uint8_t frame_type)
+{
+    if (!(FrameConfigTypeIsEnabled(f->alproto, frame_type)))
+        return NULL;
+
+    FramesContainer *frames_container = AppLayerFramesGetContainer(f);
+    SCLogDebug("get frame_type %" PRIu8 " direction %u/%s frames_container %p", frame_type, dir,
+            dir == 0 ? "toserver" : "toclient", frames_container);
+    if (frames_container == NULL)
+        return NULL;
+
+    Frames *frames;
+    if (dir == 0) {
+        frames = &frames_container->toserver;
+    } else {
+        frames = &frames_container->toclient;
+    }
+    SCLogDebug("frames %p", frames);
+    return FrameGetLastOpenByType(frames, frame_type);
+}
+
+static inline bool FrameIsDone(const Frame *frame, const uint64_t abs_right_edge)
 {
     /* frame with negative length means we don't know the size yet. */
     if (frame->len < 0)
@@ -684,27 +749,32 @@ static inline bool FrameIsDone(
 
 static void FramePrune(Frames *frames, const TcpStream *stream, const bool eof)
 {
+#ifdef DEBUG_VALIDATION
     const uint64_t frames_le_start = (uint64_t)frames->left_edge_rel + STREAM_BASE_OFFSET(stream);
+#endif
     SCLogDebug("start: left edge %" PRIu64 ", left_edge_rel %u, stream base %" PRIu64,
             (uint64_t)frames->left_edge_rel + STREAM_BASE_OFFSET(stream), frames->left_edge_rel,
             STREAM_BASE_OFFSET(stream));
-    const uint64_t abs_offset = STREAM_BASE_OFFSET(stream);
     const uint64_t acked = StreamTcpGetUsable(stream, eof);
     uint64_t le = STREAM_APP_PROGRESS(stream);
 
+#if defined(DEBUG) || defined(DEBUG_VALIDATION)
     const uint16_t start = frames->cnt;
     uint16_t removed = 0;
+#endif
     uint16_t x = 0;
     for (uint16_t i = 0; i < frames->cnt; i++) {
         if (i < FRAMES_STATIC_CNT) {
             Frame *frame = &frames->sframes[i];
             FrameDebug("prune(s)", frames, frame);
-            if (eof || FrameIsDone(frame, abs_offset, acked)) {
+            if (eof || FrameIsDone(frame, acked)) {
                 // remove by not incrementing 'x'
                 SCLogDebug("removing %p id %" PRIi64, frame, frame->id);
                 FrameDebug("remove(s)", frames, frame);
                 FrameClean(frame);
+#if defined(DEBUG) || defined(DEBUG_VALIDATION)
                 removed++;
+#endif
             } else {
                 const uint64_t fle = FrameLeftEdge(stream, frame);
                 le = MIN(le, fle);
@@ -720,12 +790,14 @@ static void FramePrune(Frames *frames, const TcpStream *stream, const bool eof)
             const uint16_t o = i - FRAMES_STATIC_CNT;
             Frame *frame = &frames->dframes[o];
             FrameDebug("prune(d)", frames, frame);
-            if (eof || FrameIsDone(frame, abs_offset, acked)) {
+            if (eof || FrameIsDone(frame, acked)) {
                 // remove by not incrementing 'x'
                 SCLogDebug("removing %p id %" PRIi64, frame, frame->id);
                 FrameDebug("remove(d)", frames, frame);
                 FrameClean(frame);
+#if defined(DEBUG) || defined(DEBUG_VALIDATION)
                 removed++;
+#endif
             } else {
                 const uint64_t fle = FrameLeftEdge(stream, frame);
                 le = MIN(le, fle);
@@ -745,7 +817,9 @@ static void FramePrune(Frames *frames, const TcpStream *stream, const bool eof)
         }
     }
     frames->cnt = x;
-    frames->left_edge_rel = le - STREAM_BASE_OFFSET(stream);
+    DEBUG_VALIDATE_BUG_ON(le < STREAM_BASE_OFFSET(stream));
+    DEBUG_VALIDATE_BUG_ON(le - STREAM_BASE_OFFSET(stream) > UINT32_MAX);
+    frames->left_edge_rel = (uint32_t)(le - STREAM_BASE_OFFSET(stream));
 #ifdef DEBUG
     SCLogDebug("end: left edge %" PRIu64 ", left_edge_rel %u, stream base %" PRIu64
                ", cnt %u, removed %u, start %u",
@@ -753,11 +827,10 @@ static void FramePrune(Frames *frames, const TcpStream *stream, const bool eof)
             STREAM_BASE_OFFSET(stream), frames->cnt, removed, start);
     AppLayerFrameDumpForFrames("post_slide", frames);
 #endif
-    BUG_ON(le < STREAM_BASE_OFFSET(stream));
     if (frames->cnt > 0) { // if we removed all this can fail
-        BUG_ON(frames_le_start > le);
+        DEBUG_VALIDATE_BUG_ON(frames_le_start > le);
     }
-    BUG_ON(x != start - removed);
+    DEBUG_VALIDATE_BUG_ON(x != start - removed);
 }
 
 void FramesPrune(Flow *f, Packet *p)

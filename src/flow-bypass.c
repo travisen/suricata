@@ -41,9 +41,9 @@
 #endif
 
 typedef struct BypassedFlowManagerThreadData_ {
-    uint16_t flow_bypassed_cnt_clo;
-    uint16_t flow_bypassed_pkts;
-    uint16_t flow_bypassed_bytes;
+    StatsCounterId flow_bypassed_cnt_clo;
+    StatsCounterId flow_bypassed_pkts;
+    StatsCounterId flow_bypassed_bytes;
 } BypassedFlowManagerThreadData;
 
 #define BYPASSFUNCMAX   4
@@ -94,13 +94,9 @@ static TmEcode BypassedFlowManager(ThreadVars *th_v, void *thread_data)
         return TM_ECODE_OK;
 
     TmThreadsSetFlag(th_v, THV_RUNNING);
+    bool run = TmThreadsWaitForUnpause(th_v);
 
-    while (1) {
-        if (TmThreadsCheckFlag(th_v, THV_PAUSE)) {
-            TmThreadsSetFlag(th_v, THV_PAUSED);
-            TmThreadTestThreadUnPaused(th_v);
-            TmThreadsUnsetFlag(th_v, THV_PAUSED);
-        }
+    while (run) {
         SCLogDebug("Dumping the table");
         gettimeofday(&tv, NULL);
         TIMEVAL_TO_TIMESPEC(&tv, &curtime);
@@ -111,23 +107,25 @@ static TmEcode BypassedFlowManager(ThreadVars *th_v, void *thread_data)
                 continue;
             tcount = bypassedfunclist[i].Func(th_v, &bypassstats, &curtime, bypassedfunclist[i].data);
             if (tcount) {
-                StatsAddUI64(th_v, ftd->flow_bypassed_cnt_clo, (uint64_t)bypassstats.count);
+                StatsCounterAddI64(
+                        &th_v->stats, ftd->flow_bypassed_cnt_clo, (uint64_t)bypassstats.count);
             }
-            StatsAddUI64(th_v, ftd->flow_bypassed_pkts, (uint64_t)bypassstats.packets);
-            StatsAddUI64(th_v, ftd->flow_bypassed_bytes, (uint64_t)bypassstats.bytes);
+            StatsCounterAddI64(
+                    &th_v->stats, ftd->flow_bypassed_pkts, (uint64_t)bypassstats.packets);
+            StatsCounterAddI64(&th_v->stats, ftd->flow_bypassed_bytes, (uint64_t)bypassstats.bytes);
         }
 
         if (TmThreadsCheckFlag(th_v, THV_KILL)) {
-            StatsSyncCounters(th_v);
+            StatsSyncCounters(&th_v->stats);
             return TM_ECODE_OK;
         }
         for (i = 0; i < FLOW_BYPASS_DELAY * 100; i++) {
             if (TmThreadsCheckFlag(th_v, THV_KILL)) {
-                StatsSyncCounters(th_v);
+                StatsSyncCounters(&th_v->stats);
                 return TM_ECODE_OK;
             }
-            StatsSyncCountersIfSignalled(th_v);
-            usleep(10000);
+            StatsSyncCountersIfSignalled(&th_v->stats);
+            SleepMsec(10);
         }
     }
     return TM_ECODE_OK;
@@ -141,9 +139,9 @@ static TmEcode BypassedFlowManagerThreadInit(ThreadVars *t, const void *initdata
 
     *data = ftd;
 
-    ftd->flow_bypassed_cnt_clo = StatsRegisterCounter("flow_bypassed.closed", t);
-    ftd->flow_bypassed_pkts = StatsRegisterCounter("flow_bypassed.pkts", t);
-    ftd->flow_bypassed_bytes = StatsRegisterCounter("flow_bypassed.bytes", t);
+    ftd->flow_bypassed_cnt_clo = StatsRegisterCounter("flow_bypassed.closed", &t->stats);
+    ftd->flow_bypassed_pkts = StatsRegisterCounter("flow_bypassed.pkts", &t->stats);
+    ftd->flow_bypassed_bytes = StatsRegisterCounter("flow_bypassed.bytes", &t->stats);
 
     return TM_ECODE_OK;
 }

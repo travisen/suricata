@@ -15,7 +15,8 @@
 * 02110-1301, USA.
 */
 use crate::applayer::{self, *};
-use crate::core::{self, AppProto, ALPROTO_FAILED, ALPROTO_UNKNOWN, IPPROTO_TCP};
+use crate::core::*;
+use crate::flow::Flow;
 
 use std::ffi::CString;
 
@@ -24,6 +25,11 @@ use sawp::error::ErrorKind as SawpErrorKind;
 use sawp::parser::{Direction, Parse};
 use sawp::probe::{Probe, Status};
 use sawp_modbus::{self, AccessType, ErrorFlags, Flags, Message};
+use suricata_sys::sys::{
+    AppLayerParserState, AppProto, SCAppLayerParserConfParserEnabled,
+    SCAppLayerParserRegisterLogger, SCAppLayerParserStateIssetFlag,
+    SCAppLayerProtoDetectConfProtoDetectionEnabledDefault,
+};
 
 pub const REQUEST_FLOOD: usize = 500; // Default unreplied Modbus requests are considered a flood
 pub const MODBUS_PARSER: sawp_modbus::Modbus = sawp_modbus::Modbus { probe_strict: true };
@@ -124,6 +130,8 @@ impl ModbusState {
         for tx in &mut self.transactions {
             if let Some(req) = &tx.request {
                 if tx.response.is_none() && resp.matches(req) {
+                    tx.tx_data.updated_tc = true;
+                    tx.tx_data.updated_ts = true;
                     return Some(tx);
                 }
             }
@@ -139,6 +147,8 @@ impl ModbusState {
         for tx in &mut self.transactions {
             if let Some(resp) = &tx.response {
                 if tx.request.is_none() && req.matches(resp) {
+                    tx.tx_data.updated_tc = true;
+                    tx.tx_data.updated_ts = true;
                     return Some(tx);
                 }
             }
@@ -174,7 +184,9 @@ impl ModbusState {
         }
     }
 
-    pub fn parse(&mut self, input: &[u8], direction: Direction) -> AppLayerResult {
+    pub fn parse(
+        &mut self, flow: *mut Flow, input: &[u8], direction: Direction,
+    ) -> AppLayerResult {
         let mut rest = input;
         while !rest.is_empty() {
             match MODBUS_PARSER.parse(rest, direction.clone()) {
@@ -184,16 +196,30 @@ impl ModbusState {
                             match self.find_response_and_validate(&mut msg) {
                                 Some(tx) => {
                                     tx.set_events_from_flags(&msg.error_flags);
+                                    tx.tx_data.updated_tc = true;
+                                    tx.tx_data.updated_ts = true;
                                     tx.request = Some(msg);
+                                    if !flow.is_null() {
+                                        sc_app_layer_parser_trigger_raw_stream_inspection(
+                                            flow,
+                                            Direction::ToServer as i32,
+                                        );
+                                    }
                                 }
                                 None => {
                                     let mut tx = match self.new_tx() {
                                         Some(tx) => tx,
-                                        None => return AppLayerResult::ok(),
+                                        None => return AppLayerResult::err(),
                                     };
                                     tx.set_events_from_flags(&msg.error_flags);
                                     tx.request = Some(msg);
                                     self.transactions.push(tx);
+                                    if !flow.is_null() {
+                                        sc_app_layer_parser_trigger_raw_stream_inspection(
+                                            flow,
+                                            Direction::ToServer as i32,
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -210,12 +236,20 @@ impl ModbusState {
                                 } else {
                                     tx.set_events_from_flags(&msg.error_flags);
                                 }
+                                tx.tx_data.updated_tc = true;
+                                tx.tx_data.updated_ts = true;
                                 tx.response = Some(msg);
+                                if !flow.is_null() {
+                                    sc_app_layer_parser_trigger_raw_stream_inspection(
+                                        flow,
+                                        Direction::ToClient as i32,
+                                    );
+                                }
                             }
                             None => {
                                 let mut tx = match self.new_tx() {
                                     Some(tx) => tx,
-                                    None => return AppLayerResult::ok(),
+                                    None => return AppLayerResult::err(),
                                 };
                                 if msg
                                     .access_type
@@ -231,6 +265,12 @@ impl ModbusState {
                                 tx.response = Some(msg);
                                 tx.set_event(ModbusEvent::UnsolicitedResponse);
                                 self.transactions.push(tx);
+                                if !flow.is_null() {
+                                    sc_app_layer_parser_trigger_raw_stream_inspection(
+                                        flow,
+                                        Direction::ToClient as i32,
+                                    );
+                                }
                             }
                         },
                     }
@@ -270,45 +310,42 @@ impl ModbusState {
 }
 
 /// Probe input to see if it looks like Modbus.
-#[no_mangle]
-pub extern "C" fn rs_modbus_probe(
-    _flow: *const core::Flow, _direction: u8, input: *const u8, len: u32, _rdir: *mut u8,
+extern "C" fn modbus_probe(
+    _flow: *const Flow, _direction: u8, input: *const u8, len: u32, _rdir: *mut u8,
 ) -> AppProto {
+    if input.is_null() {
+        return ALPROTO_UNKNOWN;
+    }
     let slice: &[u8] = unsafe { std::slice::from_raw_parts(input as *mut u8, len as usize) };
     match MODBUS_PARSER.probe(slice, Direction::Unknown) {
         Status::Recognized => unsafe { ALPROTO_MODBUS },
         Status::Incomplete => ALPROTO_UNKNOWN,
-        Status::Unrecognized => unsafe { ALPROTO_FAILED },
+        Status::Unrecognized => ALPROTO_FAILED,
     }
 }
 
-#[no_mangle]
-pub extern "C" fn rs_modbus_state_new(
+extern "C" fn modbus_state_new(
     _orig_state: *mut std::os::raw::c_void, _orig_proto: AppProto,
 ) -> *mut std::os::raw::c_void {
     Box::into_raw(Box::new(ModbusState::new())) as *mut std::os::raw::c_void
 }
 
-#[no_mangle]
-pub extern "C" fn rs_modbus_state_free(state: *mut std::os::raw::c_void) {
+extern "C" fn modbus_state_free(state: *mut std::os::raw::c_void) {
     let _state: Box<ModbusState> = unsafe { Box::from_raw(state as *mut ModbusState) };
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_modbus_state_tx_free(state: *mut std::os::raw::c_void, tx_id: u64) {
+unsafe extern "C" fn modbus_state_tx_free(state: *mut std::os::raw::c_void, tx_id: u64) {
     let state = cast_pointer!(state, ModbusState);
     state.free_tx(tx_id);
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_modbus_parse_request(
-    _flow: *const core::Flow, state: *mut std::os::raw::c_void, pstate: *mut std::os::raw::c_void,
-    stream_slice: StreamSlice,
-    _data: *const std::os::raw::c_void,
+unsafe extern "C" fn modbus_parse_request(
+    flow: *mut Flow, state: *mut std::os::raw::c_void, pstate: *mut AppLayerParserState,
+    stream_slice: StreamSlice, _data: *mut std::os::raw::c_void,
 ) -> AppLayerResult {
     let buf = stream_slice.as_slice();
     if buf.is_empty() {
-        if AppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TS) > 0 {
+        if SCAppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TS) > 0 {
             return AppLayerResult::ok();
         } else {
             return AppLayerResult::err();
@@ -316,18 +353,16 @@ pub unsafe extern "C" fn rs_modbus_parse_request(
     }
 
     let state = cast_pointer!(state, ModbusState);
-    state.parse(buf, Direction::ToServer)
+    state.parse(flow, buf, Direction::ToServer)
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_modbus_parse_response(
-    _flow: *const core::Flow, state: *mut std::os::raw::c_void, pstate: *mut std::os::raw::c_void,
-    stream_slice: StreamSlice,
-    _data: *const std::os::raw::c_void,
+unsafe extern "C" fn modbus_parse_response(
+    flow: *mut Flow, state: *mut std::os::raw::c_void, pstate: *mut AppLayerParserState,
+    stream_slice: StreamSlice, _data: *mut std::os::raw::c_void,
 ) -> AppLayerResult {
     let buf = stream_slice.as_slice();
     if buf.is_empty() {
-        if AppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TC) > 0 {
+        if SCAppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TC) > 0 {
             return AppLayerResult::ok();
         } else {
             return AppLayerResult::err();
@@ -335,17 +370,16 @@ pub unsafe extern "C" fn rs_modbus_parse_response(
     }
 
     let state = cast_pointer!(state, ModbusState);
-    state.parse(buf, Direction::ToClient)
+    state.parse(flow, buf, Direction::ToClient)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn rs_modbus_state_get_tx_count(state: *mut std::os::raw::c_void) -> u64 {
+pub unsafe extern "C" fn SCModbusStateGetTxCount(state: *mut std::os::raw::c_void) -> u64 {
     let state = cast_pointer!(state, ModbusState);
     state.tx_id
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_modbus_state_get_tx(
+unsafe extern "C" fn modbus_state_get_tx(
     state: *mut std::os::raw::c_void, tx_id: u64,
 ) -> *mut std::os::raw::c_void {
     let state = cast_pointer!(state, ModbusState);
@@ -355,67 +389,72 @@ pub unsafe extern "C" fn rs_modbus_state_get_tx(
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_modbus_tx_get_alstate_progress(
+unsafe extern "C" fn modbus_tx_get_alstate_progress(
     tx: *mut std::os::raw::c_void, _direction: u8,
 ) -> std::os::raw::c_int {
     let tx = cast_pointer!(tx, ModbusTransaction);
     tx.response.is_some() as std::os::raw::c_int
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_modbus_state_get_tx_data(
+unsafe extern "C" fn modbus_state_get_tx_data(
     tx: *mut std::os::raw::c_void,
 ) -> *mut AppLayerTxData {
     let tx = cast_pointer!(tx, ModbusTransaction);
     &mut tx.tx_data
 }
 
-export_state_data_get!(rs_modbus_get_state_data, ModbusState);
+export_state_data_get!(modbus_get_state_data, ModbusState);
 
 #[no_mangle]
-pub unsafe extern "C" fn rs_modbus_register_parser() {
+pub unsafe extern "C" fn SCRegisterModbusParser() {
     let default_port = std::ffi::CString::new("[502]").unwrap();
     let parser = RustParser {
         name: b"modbus\0".as_ptr() as *const std::os::raw::c_char,
         default_port: default_port.as_ptr(),
         ipproto: IPPROTO_TCP,
-        probe_ts: Some(rs_modbus_probe),
-        probe_tc: Some(rs_modbus_probe),
+        probe_ts: Some(modbus_probe),
+        probe_tc: Some(modbus_probe),
         min_depth: 0,
         max_depth: 16,
-        state_new: rs_modbus_state_new,
-        state_free: rs_modbus_state_free,
-        tx_free: rs_modbus_state_tx_free,
-        parse_ts: rs_modbus_parse_request,
-        parse_tc: rs_modbus_parse_response,
-        get_tx_count: rs_modbus_state_get_tx_count,
-        get_tx: rs_modbus_state_get_tx,
+        state_new: modbus_state_new,
+        state_free: modbus_state_free,
+        tx_free: modbus_state_tx_free,
+        parse_ts: modbus_parse_request,
+        parse_tc: modbus_parse_response,
+        get_tx_count: SCModbusStateGetTxCount,
+        get_tx: modbus_state_get_tx,
         tx_comp_st_ts: 1,
         tx_comp_st_tc: 1,
-        tx_get_progress: rs_modbus_tx_get_alstate_progress,
+        tx_get_progress: modbus_tx_get_alstate_progress,
         get_eventinfo: Some(ModbusEvent::get_event_info),
         get_eventinfo_byid: Some(ModbusEvent::get_event_info_by_id),
         localstorage_new: None,
         localstorage_free: None,
         get_tx_files: None,
         get_tx_iterator: Some(applayer::state_get_tx_iterator::<ModbusState, ModbusTransaction>),
-        get_tx_data: rs_modbus_state_get_tx_data,
-        get_state_data: rs_modbus_get_state_data,
+        get_tx_data: modbus_state_get_tx_data,
+        get_state_data: modbus_get_state_data,
         apply_tx_config: None,
         flags: 0,
-        truncate: None,
         get_frame_id_by_name: None,
         get_frame_name_by_id: None,
+        get_state_id_by_name: None,
+        get_state_name_by_id: None,
     };
 
     let ip_proto_str = CString::new("tcp").unwrap();
-    if AppLayerProtoDetectConfProtoDetectionEnabledDefault(ip_proto_str.as_ptr(), parser.name, false) != 0 {
-        let alproto = AppLayerRegisterProtocolDetection(&parser, 1);
+    if SCAppLayerProtoDetectConfProtoDetectionEnabledDefault(
+        ip_proto_str.as_ptr(),
+        parser.name,
+        false,
+    ) != 0
+    {
+        let alproto = applayer_register_protocol_detection(&parser, 1);
         ALPROTO_MODBUS = alproto;
-        if AppLayerParserConfParserEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
+        if SCAppLayerParserConfParserEnabled(ip_proto_str.as_ptr(), parser.name) != 0 {
             let _ = AppLayerRegisterParser(&parser, alproto);
         }
+        SCAppLayerParserRegisterLogger(IPPROTO_TCP, ALPROTO_MODBUS);
     }
 }
 
@@ -428,14 +467,14 @@ pub mod test {
     pub struct ModbusMessage(*const c_void);
 
     #[no_mangle]
-    pub unsafe extern "C" fn rs_modbus_message_get_function(msg: *const ModbusMessage) -> u8 {
+    pub unsafe extern "C" fn SCModbusMessageGetFunction(msg: *const ModbusMessage) -> u8 {
         let msg = msg.as_ref().unwrap().0 as *const Message;
         let msg = msg.as_ref().unwrap();
         msg.function.raw
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn rs_modbus_message_get_subfunction(msg: *const ModbusMessage) -> u16 {
+    pub unsafe extern "C" fn SCModbusMessageGetSubfunction(msg: *const ModbusMessage) -> u16 {
         let msg = msg.as_ref().unwrap().0 as *const Message;
         let msg = msg.as_ref().unwrap();
         if let Data::Diagnostic { func, data: _ } = &msg.data {
@@ -446,7 +485,7 @@ pub mod test {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn rs_modbus_message_get_read_request_address(
+    pub unsafe extern "C" fn SCModbusMessageGetReadRequestAddress(
         msg: *const ModbusMessage,
     ) -> u16 {
         let msg = msg.as_ref().unwrap().0 as *const Message;
@@ -463,7 +502,7 @@ pub mod test {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn rs_modbus_message_get_read_request_quantity(
+    pub unsafe extern "C" fn SCModbusMessageGetReadRequestQuantity(
         msg: *const ModbusMessage,
     ) -> u16 {
         let msg = msg.as_ref().unwrap().0 as *const Message;
@@ -480,7 +519,7 @@ pub mod test {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn rs_modbus_message_get_rw_multreq_read_address(
+    pub unsafe extern "C" fn SCModbusMessageGetRwMultreqReadAddress(
         msg: *const ModbusMessage,
     ) -> u16 {
         let msg = msg.as_ref().unwrap().0 as *const Message;
@@ -501,7 +540,7 @@ pub mod test {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn rs_modbus_message_get_rw_multreq_read_quantity(
+    pub unsafe extern "C" fn SCModbusMessageGetRwMultreqReadQuantity(
         msg: *const ModbusMessage,
     ) -> u16 {
         let msg = msg.as_ref().unwrap().0 as *const Message;
@@ -522,7 +561,7 @@ pub mod test {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn rs_modbus_message_get_rw_multreq_write_address(
+    pub unsafe extern "C" fn SCModbusMessageGetRwMultreqWriteAddress(
         msg: *const ModbusMessage,
     ) -> u16 {
         let msg = msg.as_ref().unwrap().0 as *const Message;
@@ -544,7 +583,7 @@ pub mod test {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn rs_modbus_message_get_rw_multreq_write_quantity(
+    pub unsafe extern "C" fn SCModbusMessageGetRwMultreqWriteQuantity(
         msg: *const ModbusMessage,
     ) -> u16 {
         let msg = msg.as_ref().unwrap().0 as *const Message;
@@ -566,7 +605,7 @@ pub mod test {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn rs_modbus_message_get_rw_multreq_write_data(
+    pub unsafe extern "C" fn SCModbusMessageGetRwMultreqWriteData(
         msg: *const ModbusMessage, data_len: *mut usize,
     ) -> *const u8 {
         let msg = msg.as_ref().unwrap().0 as *const Message;
@@ -589,7 +628,7 @@ pub mod test {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn rs_modbus_message_get_write_multreq_address(
+    pub unsafe extern "C" fn SCModbusMessageGetWriteMultreqAddress(
         msg: *const ModbusMessage,
     ) -> u16 {
         let msg = msg.as_ref().unwrap().0 as *const Message;
@@ -607,7 +646,7 @@ pub mod test {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn rs_modbus_message_get_write_multreq_quantity(
+    pub unsafe extern "C" fn SCModbusMessageGetWriteMultreqQuantity(
         msg: *const ModbusMessage,
     ) -> u16 {
         let msg = msg.as_ref().unwrap().0 as *const Message;
@@ -625,7 +664,7 @@ pub mod test {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn rs_modbus_message_get_write_multreq_data(
+    pub unsafe extern "C" fn SCModbusMessageGetWriteMultreqData(
         msg: *const ModbusMessage, data_len: *mut usize,
     ) -> *const u8 {
         let msg = msg.as_ref().unwrap().0 as *const Message;
@@ -644,7 +683,7 @@ pub mod test {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn rs_modbus_message_get_and_mask(msg: *const ModbusMessage) -> u16 {
+    pub unsafe extern "C" fn SCModbusMessageGetAndMask(msg: *const ModbusMessage) -> u16 {
         let msg = msg.as_ref().unwrap().0 as *const Message;
         let msg = msg.as_ref().unwrap();
         if let Data::Write(Write::Mask {
@@ -660,7 +699,7 @@ pub mod test {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn rs_modbus_message_get_or_mask(msg: *const ModbusMessage) -> u16 {
+    pub unsafe extern "C" fn SCModbusMessageGetOrMask(msg: *const ModbusMessage) -> u16 {
         let msg = msg.as_ref().unwrap().0 as *const Message;
         let msg = msg.as_ref().unwrap();
         if let Data::Write(Write::Mask {
@@ -676,7 +715,7 @@ pub mod test {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn rs_modbus_message_get_write_address(msg: *const ModbusMessage) -> u16 {
+    pub unsafe extern "C" fn SCModbusMessageGetWriteAddress(msg: *const ModbusMessage) -> u16 {
         let msg = msg.as_ref().unwrap().0 as *const Message;
         let msg = msg.as_ref().unwrap();
         if let Data::Write(Write::Other { address, data: _ }) = &msg.data {
@@ -687,7 +726,7 @@ pub mod test {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn rs_modbus_message_get_write_data(msg: *const ModbusMessage) -> u16 {
+    pub unsafe extern "C" fn SCModbusMessageGetWriteData(msg: *const ModbusMessage) -> u16 {
         let msg = msg.as_ref().unwrap().0 as *const Message;
         let msg = msg.as_ref().unwrap();
         if let Data::Write(Write::Other { address: _, data }) = &msg.data {
@@ -698,7 +737,7 @@ pub mod test {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn rs_modbus_message_get_bytevec_data(
+    pub unsafe extern "C" fn SCModbusMessageGetBytevecData(
         msg: *const ModbusMessage, data_len: *mut usize,
     ) -> *const u8 {
         let msg = msg.as_ref().unwrap().0 as *const Message;
@@ -712,7 +751,7 @@ pub mod test {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn rs_modbus_state_get_tx_request(
+    pub unsafe extern "C" fn SCModbusStateGetTxRequest(
         state: *mut std::os::raw::c_void, tx_id: u64,
     ) -> ModbusMessage {
         let state = cast_pointer!(state, ModbusState);
@@ -728,7 +767,7 @@ pub mod test {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn rs_modbus_state_get_tx_response(
+    pub unsafe extern "C" fn SCModbusStateGetTxResponse(
         state: *mut std::os::raw::c_void, tx_id: u64,
     ) -> ModbusMessage {
         let state = cast_pointer!(state, ModbusState);
@@ -957,7 +996,7 @@ mod tests {
         let mut state = ModbusState::new();
         assert_eq!(
             AppLayerResult::ok(),
-            state.parse(RD_COILS_REQ, Direction::ToServer)
+            state.parse(std::ptr::null_mut(), RD_COILS_REQ, Direction::ToServer)
         );
         assert_eq!(state.transactions.len(), 1);
 
@@ -974,7 +1013,7 @@ mod tests {
 
         assert_eq!(
             AppLayerResult::ok(),
-            state.parse(RD_COILS_RESP, Direction::ToClient)
+            state.parse(std::ptr::null_mut(), RD_COILS_RESP, Direction::ToClient)
         );
         assert_eq!(state.transactions.len(), 1);
 
@@ -989,7 +1028,7 @@ mod tests {
         let mut state = ModbusState::new();
         assert_eq!(
             AppLayerResult::ok(),
-            state.parse(WR_MULT_REG_REQ, Direction::ToServer)
+            state.parse(std::ptr::null_mut(), WR_MULT_REG_REQ, Direction::ToServer)
         );
         assert_eq!(state.transactions.len(), 1);
 
@@ -1007,7 +1046,7 @@ mod tests {
 
         assert_eq!(
             AppLayerResult::ok(),
-            state.parse(WR_MULT_REG_RESP, Direction::ToClient)
+            state.parse(std::ptr::null_mut(), WR_MULT_REG_RESP, Direction::ToClient)
         );
         assert_eq!(state.transactions.len(), 1);
 
@@ -1028,7 +1067,7 @@ mod tests {
         let mut state = ModbusState::new();
         assert_eq!(
             AppLayerResult::ok(),
-            state.parse(RD_WR_MULT_REG_REQ, Direction::ToServer)
+            state.parse(std::ptr::null_mut(), RD_WR_MULT_REG_REQ, Direction::ToServer)
         );
         assert_eq!(state.transactions.len(), 1);
 
@@ -1052,7 +1091,7 @@ mod tests {
 
         assert_eq!(
             AppLayerResult::ok(),
-            state.parse(RD_WR_MULT_REG_RESP, Direction::ToClient)
+            state.parse(std::ptr::null_mut(), RD_WR_MULT_REG_RESP, Direction::ToClient)
         );
         assert_eq!(state.transactions.len(), 1);
 
@@ -1072,7 +1111,11 @@ mod tests {
         let mut state = ModbusState::new();
         assert_eq!(
             AppLayerResult::ok(),
-            state.parse(FORCE_LISTEN_ONLY_MODE, Direction::ToServer)
+            state.parse(
+                std::ptr::null_mut(),
+                FORCE_LISTEN_ONLY_MODE,
+                Direction::ToServer
+            )
         );
         assert_eq!(state.transactions.len(), 1);
 
@@ -1096,7 +1139,7 @@ mod tests {
         let mut state = ModbusState::new();
         assert_eq!(
             AppLayerResult::ok(),
-            state.parse(INVALID_PROTO_REQ, Direction::ToServer)
+            state.parse(std::ptr::null_mut(), INVALID_PROTO_REQ, Direction::ToServer)
         );
 
         assert_eq!(state.transactions.len(), 1);
@@ -1110,7 +1153,7 @@ mod tests {
         let mut state = ModbusState::new();
         assert_eq!(
             AppLayerResult::ok(),
-            state.parse(RD_COILS_RESP, Direction::ToClient)
+            state.parse(std::ptr::null_mut(), RD_COILS_RESP, Direction::ToClient)
         );
         assert_eq!(state.transactions.len(), 1);
 
@@ -1125,7 +1168,11 @@ mod tests {
         let mut state = ModbusState::new();
         assert_eq!(
             AppLayerResult::incomplete(15, 4),
-            state.parse(INVALID_LEN_WR_MULT_REG_REQ, Direction::ToServer)
+            state.parse(
+                std::ptr::null_mut(),
+                INVALID_LEN_WR_MULT_REG_REQ,
+                Direction::ToServer
+            )
         );
         assert_eq!(state.transactions.len(), 1);
 
@@ -1148,7 +1195,7 @@ mod tests {
         let mut state = ModbusState::new();
         assert_eq!(
             AppLayerResult::ok(),
-            state.parse(RD_COILS_REQ, Direction::ToServer)
+            state.parse(std::ptr::null_mut(), RD_COILS_REQ, Direction::ToServer)
         );
         assert_eq!(state.transactions.len(), 1);
 
@@ -1165,7 +1212,7 @@ mod tests {
 
         assert_eq!(
             AppLayerResult::ok(),
-            state.parse(RD_COILS_ERR_RESP, Direction::ToClient)
+            state.parse(std::ptr::null_mut(), RD_COILS_ERR_RESP, Direction::ToClient)
         );
         assert_eq!(state.transactions.len(), 1);
 
@@ -1187,6 +1234,7 @@ mod tests {
         assert_eq!(
             AppLayerResult::incomplete(0, 12),
             state.parse(
+                std::ptr::null_mut(),
                 &RD_COILS_REQ[0..(RD_COILS_REQ.len() - 3)],
                 Direction::ToServer
             )
@@ -1194,7 +1242,7 @@ mod tests {
         assert_eq!(state.transactions.len(), 0);
         assert_eq!(
             AppLayerResult::ok(),
-            state.parse(RD_COILS_REQ, Direction::ToServer)
+            state.parse(std::ptr::null_mut(), RD_COILS_REQ, Direction::ToServer)
         );
         assert_eq!(state.transactions.len(), 1);
 
@@ -1217,7 +1265,10 @@ mod tests {
         let resp = [RD_COILS_RESP, WR_MULT_REG_RESP].concat();
 
         let mut state = ModbusState::new();
-        assert_eq!(AppLayerResult::ok(), state.parse(&req, Direction::ToServer));
+        assert_eq!(
+            AppLayerResult::ok(),
+            state.parse(std::ptr::null_mut(), &req, Direction::ToServer)
+        );
         assert_eq!(state.transactions.len(), 2);
 
         let tx = &state.transactions[0];
@@ -1245,7 +1296,7 @@ mod tests {
 
         assert_eq!(
             AppLayerResult::ok(),
-            state.parse(&resp, Direction::ToClient)
+            state.parse(std::ptr::null_mut(), &resp, Direction::ToClient)
         );
         assert_eq!(state.transactions.len(), 2);
 
@@ -1271,7 +1322,11 @@ mod tests {
         let mut state = ModbusState::new();
         assert_eq!(
             AppLayerResult::ok(),
-            state.parse(EXCEEDED_LEN_WR_MULT_REG_REQ, Direction::ToServer)
+            state.parse(
+                std::ptr::null_mut(),
+                EXCEEDED_LEN_WR_MULT_REG_REQ,
+                Direction::ToServer
+            )
         );
 
         assert_eq!(state.transactions.len(), 1);
@@ -1285,7 +1340,11 @@ mod tests {
         let mut state = ModbusState::new();
         assert_eq!(
             AppLayerResult::ok(),
-            state.parse(INVALID_PDU_WR_MULT_REG_REQ, Direction::ToServer)
+            state.parse(
+                std::ptr::null_mut(),
+                INVALID_PDU_WR_MULT_REG_REQ,
+                Direction::ToServer
+            )
         );
 
         assert_eq!(state.transactions.len(), 1);
@@ -1301,7 +1360,7 @@ mod tests {
         let mut state = ModbusState::new();
         assert_eq!(
             AppLayerResult::ok(),
-            state.parse(MASK_WR_REG_REQ, Direction::ToServer)
+            state.parse(std::ptr::null_mut(), MASK_WR_REG_REQ, Direction::ToServer)
         );
         assert_eq!(state.transactions.len(), 1);
 
@@ -1319,7 +1378,7 @@ mod tests {
 
         assert_eq!(
             AppLayerResult::ok(),
-            state.parse(MASK_WR_REG_RESP, Direction::ToClient)
+            state.parse(std::ptr::null_mut(), MASK_WR_REG_RESP, Direction::ToClient)
         );
         assert_eq!(state.transactions.len(), 1);
 
@@ -1341,7 +1400,7 @@ mod tests {
         let mut state = ModbusState::new();
         assert_eq!(
             AppLayerResult::ok(),
-            state.parse(WR_SINGLE_REG_REQ, Direction::ToServer)
+            state.parse(std::ptr::null_mut(), WR_SINGLE_REG_REQ, Direction::ToServer)
         );
         assert_eq!(state.transactions.len(), 1);
 
@@ -1358,7 +1417,7 @@ mod tests {
 
         assert_eq!(
             AppLayerResult::ok(),
-            state.parse(WR_SINGLE_REG_RESP, Direction::ToClient)
+            state.parse(std::ptr::null_mut(), WR_SINGLE_REG_RESP, Direction::ToClient)
         );
         assert_eq!(state.transactions.len(), 1);
 
@@ -1379,7 +1438,11 @@ mod tests {
         let mut state = ModbusState::new();
         assert_eq!(
             AppLayerResult::ok(),
-            state.parse(INVALID_MASK_WR_REG_REQ, Direction::ToServer)
+            state.parse(
+                std::ptr::null_mut(),
+                INVALID_MASK_WR_REG_REQ,
+                Direction::ToServer
+            )
         );
         assert_eq!(state.transactions.len(), 1);
 
@@ -1391,7 +1454,7 @@ mod tests {
 
         assert_eq!(
             AppLayerResult::ok(),
-            state.parse(MASK_WR_REG_RESP, Direction::ToClient)
+            state.parse(std::ptr::null_mut(), MASK_WR_REG_RESP, Direction::ToClient)
         );
         assert_eq!(state.transactions.len(), 1);
 
@@ -1413,7 +1476,11 @@ mod tests {
         let mut state = ModbusState::new();
         assert_eq!(
             AppLayerResult::ok(),
-            state.parse(INVALID_WR_SINGLE_REG_REQ, Direction::ToServer)
+            state.parse(
+                std::ptr::null_mut(),
+                INVALID_WR_SINGLE_REG_REQ,
+                Direction::ToServer
+            )
         );
         assert_eq!(state.transactions.len(), 1);
 
@@ -1425,7 +1492,7 @@ mod tests {
 
         assert_eq!(
             AppLayerResult::ok(),
-            state.parse(WR_SINGLE_REG_RESP, Direction::ToClient)
+            state.parse(std::ptr::null_mut(), WR_SINGLE_REG_RESP, Direction::ToClient)
         );
         assert_eq!(state.transactions.len(), 1);
 
@@ -1446,7 +1513,7 @@ mod tests {
         let mut state = ModbusState::new();
         assert_eq!(
             AppLayerResult::ok(),
-            state.parse(INVALID_FUNC_CODE, Direction::ToServer)
+            state.parse(std::ptr::null_mut(), INVALID_FUNC_CODE, Direction::ToServer)
         );
         assert_eq!(state.transactions.len(), 1);
 

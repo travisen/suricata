@@ -41,6 +41,7 @@
 #include "detect-bytemath.h"
 #include "detect-bytejump.h"
 #include "detect-byte-extract.h"
+#include "detect-entropy.h"
 #include "detect-replace.h"
 #include "detect-engine-content-inspection.h"
 #include "detect-uricontent.h"
@@ -62,9 +63,7 @@
 #include "util-unittest-helper.h"
 #include "util-profiling.h"
 
-#ifdef HAVE_LUA
 #include "util-lua.h"
-#endif
 
 #ifdef UNITTESTS
 thread_local uint32_t ut_inspection_recursion_counter = 0;
@@ -108,7 +107,7 @@ struct DetectEngineContentInspectionCtx {
 static int DetectEngineContentInspectionInternal(DetectEngineThreadCtx *det_ctx,
         struct DetectEngineContentInspectionCtx *ctx, const Signature *s, const SigMatchData *smd,
         Packet *p, Flow *f, const uint8_t *buffer, const uint32_t buffer_len,
-        const uint32_t stream_start_offset, const uint8_t flags,
+        const uint64_t stream_start_offset, const uint8_t flags,
         const enum DetectContentInspectionType inspection_mode)
 {
     SCEnter();
@@ -158,7 +157,8 @@ static int DetectEngineContentInspectionInternal(DetectEngineThreadCtx *det_ctx,
                 int distance = cd->distance;
                 if (cd->flags & DETECT_CONTENT_DISTANCE) {
                     if (cd->flags & DETECT_CONTENT_DISTANCE_VAR) {
-                        distance = det_ctx->byte_values[cd->distance];
+                        // This cast is wrong if a 64-bit value was extracted
+                        distance = (uint32_t)det_ctx->byte_values[cd->distance];
                     }
                     if (distance < 0 && (uint32_t)(abs(distance)) > offset)
                         offset = 0;
@@ -171,8 +171,10 @@ static int DetectEngineContentInspectionInternal(DetectEngineThreadCtx *det_ctx,
 
                 if (cd->flags & DETECT_CONTENT_WITHIN) {
                     if (cd->flags & DETECT_CONTENT_WITHIN_VAR) {
+                        // This cast is wrong if a 64-bit value was extracted for within
                         if ((int32_t)depth > (int32_t)(prev_buffer_offset + det_ctx->byte_values[cd->within] + distance)) {
-                            depth = prev_buffer_offset + det_ctx->byte_values[cd->within] + distance;
+                            depth = prev_buffer_offset +
+                                    (uint32_t)det_ctx->byte_values[cd->within] + distance;
                         }
                     } else {
                         if ((int32_t)depth > (int32_t)(prev_buffer_offset + cd->within + distance)) {
@@ -189,14 +191,15 @@ static int DetectEngineContentInspectionInternal(DetectEngineThreadCtx *det_ctx,
                         } else if (depth >= (stream_start_offset + buffer_len)) {
                             ;
                         } else {
-                            depth = depth - stream_start_offset;
+                            depth = depth - (uint32_t)stream_start_offset;
                         }
                     }
                 }
 
                 if (cd->flags & DETECT_CONTENT_DEPTH_VAR) {
                     if ((det_ctx->byte_values[cd->depth] + prev_buffer_offset) < depth) {
-                        depth = prev_buffer_offset + det_ctx->byte_values[cd->depth];
+                        // ok to cast as we checked the byte value fits in a u32
+                        depth = prev_buffer_offset + (uint32_t)det_ctx->byte_values[cd->depth];
                     }
                 } else {
                     if (cd->depth != 0) {
@@ -209,8 +212,10 @@ static int DetectEngineContentInspectionInternal(DetectEngineThreadCtx *det_ctx,
                 }
 
                 if (cd->flags & DETECT_CONTENT_OFFSET_VAR) {
-                    if (det_ctx->byte_values[cd->offset] > offset)
-                        offset = det_ctx->byte_values[cd->offset];
+                    if (det_ctx->byte_values[cd->offset] > offset) {
+                        // This cast is wrong if a 64-bit value was extracted
+                        offset = (uint32_t)det_ctx->byte_values[cd->offset];
+                    }
                 } else {
                     if (cd->offset > offset) {
                         offset = cd->offset;
@@ -220,7 +225,8 @@ static int DetectEngineContentInspectionInternal(DetectEngineThreadCtx *det_ctx,
             } else { /* implied no relative matches */
                 /* set depth */
                 if (cd->flags & DETECT_CONTENT_DEPTH_VAR) {
-                    depth = det_ctx->byte_values[cd->depth];
+                    // This cast is wrong if a 64-bit value was extracted
+                    depth = (uint32_t)det_ctx->byte_values[cd->depth];
                 } else {
                     if (cd->depth != 0) {
                         depth = cd->depth;
@@ -233,23 +239,25 @@ static int DetectEngineContentInspectionInternal(DetectEngineThreadCtx *det_ctx,
                     } else if (depth >= (stream_start_offset + buffer_len)) {
                         ;
                     } else {
-                        depth = depth - stream_start_offset;
+                        depth = (uint32_t)(depth - stream_start_offset);
                     }
                 }
 
                 /* set offset */
-                if (cd->flags & DETECT_CONTENT_OFFSET_VAR)
-                    offset = det_ctx->byte_values[cd->offset];
-                else
+                if (cd->flags & DETECT_CONTENT_OFFSET_VAR) {
+                    // This cast is wrong if a 64-bit value was extracted
+                    offset = (uint32_t)det_ctx->byte_values[cd->offset];
+                } else {
                     offset = cd->offset;
+                }
                 prev_buffer_offset = 0;
             }
 
             /* If the value came from a variable, make sure to adjust the depth so it's relative
              * to the offset value.
              */
-            if (cd->flags & (DETECT_CONTENT_DISTANCE_VAR|DETECT_CONTENT_OFFSET_VAR|DETECT_CONTENT_DEPTH_VAR)) {
-                 depth += offset;
+            if (cd->flags & (DETECT_CONTENT_OFFSET_VAR | DETECT_CONTENT_DEPTH_VAR)) {
+                depth += offset;
             }
 
             /* update offset with prev_offset if we're searching for
@@ -384,6 +392,13 @@ static int DetectEngineContentInspectionInternal(DetectEngineThreadCtx *det_ctx,
                     prev_offset);
         } while(1);
 
+    } else if (smd->type == DETECT_ABSENT) {
+        const DetectAbsentData *id = (DetectAbsentData *)smd->ctx;
+        if (!id->or_else) {
+            // we match only on absent buffer
+            goto no_match;
+        }
+        goto match;
     } else if (smd->type == DETECT_ISDATAAT) {
         SCLogDebug("inspecting isdataat");
 
@@ -452,7 +467,6 @@ static int DetectEngineContentInspectionInternal(DetectEngineThreadCtx *det_ctx,
             if (r == 0) {
                 goto no_match;
             }
-
             if (!(pe->flags & DETECT_PCRE_RELATIVE_NEXT)) {
                 SCLogDebug("no relative match coming up, so this is a match");
                 goto match;
@@ -473,10 +487,20 @@ static int DetectEngineContentInspectionInternal(DetectEngineThreadCtx *det_ctx,
                 SCReturnInt(-1);
             }
 
+            if (prev_offset == 0) {
+                // This happens for negated PCRE
+                // We do not search for another occurrence of this pcre
+                SCReturnInt(0);
+            }
             det_ctx->buffer_offset = prev_buffer_offset;
             det_ctx->pcre_match_start_offset = prev_offset;
         } while (1);
 
+    } else if (smd->type == DETECT_ENTROPY) {
+        if (!DetectEntropyDoMatch(det_ctx, s, smd->ctx, f, buffer, buffer_len)) {
+            goto no_match;
+        }
+        goto match;
     } else if (smd->type == DETECT_BYTETEST) {
         const DetectBytetestData *btd = (const DetectBytetestData *)smd->ctx;
         uint16_t btflags = btd->flags;
@@ -484,13 +508,15 @@ static int DetectEngineContentInspectionInternal(DetectEngineThreadCtx *det_ctx,
         uint64_t value = btd->value;
         int32_t nbytes = btd->nbytes;
         if (btflags & DETECT_BYTETEST_OFFSET_VAR) {
-            offset = det_ctx->byte_values[offset];
+            // This cast is wrong if a 64-bit value was extracted
+            offset = (int32_t)det_ctx->byte_values[offset];
         }
         if (btflags & DETECT_BYTETEST_VALUE_VAR) {
             value = det_ctx->byte_values[value];
         }
         if (btflags & DETECT_BYTETEST_NBYTES_VAR) {
-            nbytes = det_ctx->byte_values[nbytes];
+            // This cast is wrong if a 64-bit value was extracted
+            nbytes = (int32_t)det_ctx->byte_values[nbytes];
         }
 
         /* if we have dce enabled we will have to use the endianness
@@ -516,13 +542,18 @@ static int DetectEngineContentInspectionInternal(DetectEngineThreadCtx *det_ctx,
         int32_t nbytes;
 
         if (bjflags & DETECT_BYTEJUMP_OFFSET_VAR) {
-            offset = det_ctx->byte_values[offset];
+            // This cast is wrong if a 64-bit value was extracted
+            offset = (int32_t)det_ctx->byte_values[offset];
+            SCLogDebug("[BJ] using offset value %d", offset);
         }
 
         if (bjflags & DETECT_BYTEJUMP_NBYTES_VAR) {
-            nbytes = det_ctx->byte_values[bjd->nbytes];
+            // This cast is wrong if a 64-bit value was extracted
+            nbytes = (int32_t)det_ctx->byte_values[bjd->nbytes];
+            SCLogDebug("[BJ] using nbytes value %d [index %d]", nbytes, bjd->nbytes);
         } else {
             nbytes = bjd->nbytes;
+            SCLogDebug("[BJ] using nbytes value %d [index n/a]", nbytes);
         }
 
         /* if we have dce enabled we will have to use the endianness
@@ -543,19 +574,17 @@ static int DetectEngineContentInspectionInternal(DetectEngineThreadCtx *det_ctx,
 
     } else if (smd->type == DETECT_BYTE_EXTRACT) {
 
-        const DetectByteExtractData *bed = (const DetectByteExtractData *)smd->ctx;
+        const SCDetectByteExtractData *bed = (const SCDetectByteExtractData *)smd->ctx;
         uint8_t endian = bed->endian;
 
         /* if we have dce enabled we will have to use the endianness
          * specified by the dce header */
-        if ((bed->flags & DETECT_BYTE_EXTRACT_FLAG_ENDIAN) &&
-            endian == DETECT_BYTE_EXTRACT_ENDIAN_DCE &&
-            flags & (DETECT_CI_FLAGS_DCE_LE|DETECT_CI_FLAGS_DCE_BE)) {
+        if ((bed->flags & DETECT_BYTE_EXTRACT_FLAG_ENDIAN) && endian == EndianDCE &&
+                flags & (DETECT_CI_FLAGS_DCE_LE | DETECT_CI_FLAGS_DCE_BE)) {
 
             /* enable the endianness flag temporarily.  once we are done
              * processing we reset the flags to the original value*/
-            endian |= ((flags & DETECT_CI_FLAGS_DCE_LE) ?
-                       DETECT_BYTE_EXTRACT_ENDIAN_LITTLE : DETECT_BYTE_EXTRACT_ENDIAN_BIG);
+            endian |= ((flags & DETECT_CI_FLAGS_DCE_LE) ? LittleEndian : BigEndian);
         }
 
         if (DetectByteExtractDoMatch(det_ctx, smd, s, buffer, buffer_len,
@@ -635,7 +664,7 @@ static int DetectEngineContentInspectionInternal(DetectEngineThreadCtx *det_ctx,
         }
         goto no_match_discontinue;
 
-    } else if (smd->type == DETECT_AL_URILEN) {
+    } else if (smd->type == DETECT_URILEN) {
         SCLogDebug("inspecting uri len");
 
         int r;
@@ -650,9 +679,7 @@ static int DetectEngineContentInspectionInternal(DetectEngineThreadCtx *det_ctx,
             goto match;
         }
         goto no_match_discontinue;
-#ifdef HAVE_LUA
-    }
-    else if (smd->type == DETECT_LUA) {
+    } else if (smd->type == DETECT_LUA) {
         SCLogDebug("lua starting");
 
         if (DetectLuaMatchBuffer(det_ctx, s, smd, buffer, buffer_len,
@@ -663,11 +690,12 @@ static int DetectEngineContentInspectionInternal(DetectEngineThreadCtx *det_ctx,
         }
         SCLogDebug("lua match");
         goto match;
-#endif /* HAVE_LUA */
     } else if (smd->type == DETECT_BASE64_DECODE) {
         if (DetectBase64DecodeDoMatch(det_ctx, s, smd, buffer, buffer_len)) {
             if (s->sm_arrays[DETECT_SM_LIST_BASE64_DATA] != NULL) {
                 if (det_ctx->base64_decoded_len) {
+                    /* reset buffer offset, as we treat this like a new buffer */
+                    det_ctx->buffer_offset = 0;
                     KEYWORD_PROFILING_END(det_ctx, smd->type, 1);
                     int r = DetectEngineContentInspectionInternal(det_ctx, ctx, s,
                             s->sm_arrays[DETECT_SM_LIST_BASE64_DATA], NULL, f,
@@ -722,7 +750,7 @@ final_match:
  */
 bool DetectEngineContentInspection(DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx,
         const Signature *s, const SigMatchData *smd, Packet *p, Flow *f, const uint8_t *buffer,
-        const uint32_t buffer_len, const uint32_t stream_start_offset, const uint8_t flags,
+        const uint32_t buffer_len, const uint64_t stream_start_offset, const uint8_t flags,
         const enum DetectContentInspectionType inspection_mode)
 {
     struct DetectEngineContentInspectionCtx ctx = { .recursion.count = 0,
@@ -762,6 +790,24 @@ bool DetectEngineContentInspectionBuffer(DetectEngineCtx *de_ctx, DetectEngineTh
         return true;
     else
         return false;
+}
+
+bool DetectContentInspectionMatchOnAbsentBuffer(const SigMatchData *smd)
+{
+    // we will match on NULL buffers there is one absent
+    bool absent_data = false;
+    while (1) {
+        if (smd->type == DETECT_ABSENT) {
+            absent_data = true;
+            break;
+        }
+        if (smd->is_last) {
+            break;
+        }
+        // smd does not get reused after this loop
+        smd++;
+    }
+    return absent_data;
 }
 
 #ifdef UNITTESTS

@@ -28,6 +28,7 @@
 #include "tmqh-packetpool.h"
 #include "util-conf.h"
 #include "packet.h"
+#include "nallocinc.c"
 
 #include <fuzz_pcap.h>
 
@@ -42,13 +43,15 @@ void *fwd;
 SCInstance surifuzz;
 SC_ATOMIC_EXTERN(unsigned int, engine_stage);
 
-#include "confyaml.c"
+extern const char *configNoChecksum;
 
 char *filepath = NULL;
 
 int LLVMFuzzerInitialize(const int *argc, char ***argv)
 {
     filepath = dirname(strdup((*argv)[0]));
+    nalloc_init((*argv)[0]);
+    nalloc_restrict_file_prefix(3);
     return 0;
 }
 
@@ -69,11 +72,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         InitGlobal();
 
         GlobalsInitPreConfig();
-        run_mode = RUNMODE_PCAP_FILE;
+        SCRunmodeSet(RUNMODE_PCAP_FILE);
         // redirect logs to /tmp
         ConfigSetLogDirectory("/tmp/");
         // disables checksums validation for fuzzing
-        if (ConfYamlLoadString(configNoChecksum, strlen(configNoChecksum)) != 0) {
+        if (SCConfYamlLoadString(configNoChecksum, strlen(configNoChecksum)) != 0) {
             abort();
         }
         surifuzz.sig_file = malloc(strlen(filepath) + strlen("/fuzz.rules") + 1);
@@ -85,7 +88,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         surifuzz.delayed_detect = 1;
 
         PostConfLoadedSetup(&surifuzz);
-        PreRunPostPrivsDropInit(run_mode);
+        PreRunPostPrivsDropInit(SCRunmodeGet());
         PostConfLoadedDetectSetup(&surifuzz);
 
         memset(&tv, 0, sizeof(tv));
@@ -95,9 +98,9 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         dtv = DecodeThreadVarsAlloc(&tv);
         DecodeRegisterPerfCounters(dtv, &tv);
         tmm_modules[TMM_FLOWWORKER].ThreadInit(&tv, NULL, &fwd);
-        StatsSetupPrivate(&tv);
+        StatsSetupPrivate(&tv.stats, NULL);
 
-        extern uint16_t max_pending_packets;
+        extern uint32_t max_pending_packets;
         max_pending_packets = 128;
         PacketPoolInit();
         if (DetectEngineReload(&surifuzz) < 0) {
@@ -116,6 +119,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         return 0;
     }
 
+    nalloc_start(data, size);
     // loop over packets
     r = FPC_next(&pkts, &header, &pkt);
     p = PacketGetFromAlloc();
@@ -152,7 +156,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         p->ts = SCTIME_FROM_TIMEVAL(&header.ts);
         p->datalink = pkts.datalink;
         pcap_cnt++;
-        p->pcap_cnt = pcap_cnt;
+        PcapPacketCntSet(p, pcap_cnt);
         p->pkt_src = PKT_SRC_WIRE;
     }
 bail:
@@ -160,6 +164,7 @@ bail:
         PacketFree(p);
     }
     FlowReset();
+    nalloc_end();
 
     return 0;
 }

@@ -36,7 +36,7 @@
 
 #include "runmodes.h"
 #include "util-error.h"
-#include "util-device.h"
+#include "util-device-private.h"
 #include "util-datalink.h"
 
 #ifndef HAVE_NFLOG
@@ -106,8 +106,8 @@ typedef struct NFLOGThreadVars_ {
     uint64_t bytes;
     uint32_t errs;
 
-    uint16_t capture_kernel_packets;
-    uint16_t capture_kernel_drops;
+    StatsCounterId capture_kernel_packets;
+    StatsCounterId capture_kernel_drops;
 } NFLOGThreadVars;
 
 /**
@@ -308,10 +308,8 @@ TmEcode ReceiveNFLOGThreadInit(ThreadVars *tv, const void *initdata, void **data
     }
 
 #ifdef PACKET_STATISTICS
-    ntv->capture_kernel_packets = StatsRegisterCounter("capture.kernel_packets",
-                                                       ntv->tv);
-    ntv->capture_kernel_drops = StatsRegisterCounter("capture.kernel_drops",
-                                                     ntv->tv);
+    ntv->capture_kernel_packets = StatsRegisterCounter("capture.kernel_packets", &ntv->tv->stats);
+    ntv->capture_kernel_drops = StatsRegisterCounter("capture.kernel_drops", &ntv->tv->stats);
 #endif
 
     char *active_runmode = RunmodeGetActive();
@@ -470,7 +468,7 @@ TmEcode ReceiveNFLOGLoop(ThreadVars *tv, void *data, void *slot)
         if (ret != 0)
             SCLogWarning("nflog_handle_packet error %" PRId32 "", ret);
 
-        StatsSyncCountersIfSignalled(tv);
+        StatsSyncCountersIfSignalled(&tv->stats);
     }
 
     SCReturnInt(TM_ECODE_OK);

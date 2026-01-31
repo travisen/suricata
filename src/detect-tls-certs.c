@@ -30,6 +30,7 @@
 
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-prefilter.h"
 #include "detect-engine-content-inspection.h"
@@ -59,51 +60,64 @@ static int DetectTlsCertsSetup(DetectEngineCtx *, Signature *, const char *);
 #ifdef UNITTESTS
 static void DetectTlsCertsRegisterTests(void);
 #endif
-static uint8_t DetectEngineInspectTlsCerts(DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx,
-        const DetectEngineAppInspectionEngine *engine, const Signature *s, Flow *f, uint8_t flags,
-        void *alstate, void *txv, uint64_t tx_id);
-static int PrefilterMpmTlsCertsRegister(DetectEngineCtx *de_ctx, SigGroupHead *sgh, MpmCtx *mpm_ctx,
-        const DetectBufferMpmRegistry *mpm_reg, int list_id);
 
 static int g_tls_certs_buffer_id = 0;
 
-struct TlsCertsGetDataArgs {
-    uint32_t local_id; /**< used as index into thread inspect array */
-    SSLCertsChain *cert;
-};
+static bool TlsCertsGetData(DetectEngineThreadCtx *det_ctx, const void *txv, const uint8_t flags,
+        uint32_t local_id, const uint8_t **buf, uint32_t *buf_len)
+{
+    const SSLState *ssl_state = (SSLState *)txv;
+    const SSLStateConnp *connp;
 
-typedef struct PrefilterMpmTlsCerts {
-    int list_id;
-    const MpmCtx *mpm_ctx;
-    const DetectEngineTransforms *transforms;
-} PrefilterMpmTlsCerts;
+    if (flags & STREAM_TOSERVER) {
+        connp = &ssl_state->client_connp;
+    } else {
+        connp = &ssl_state->server_connp;
+    }
+
+    if (TAILQ_EMPTY(&connp->certs)) {
+        return false;
+    }
+
+    SSLCertsChain *cert;
+    if (local_id == 0) {
+        cert = TAILQ_FIRST(&connp->certs);
+    } else {
+        // TODO optimize ?
+        cert = TAILQ_FIRST(&connp->certs);
+        for (uint32_t i = 0; i < local_id; i++) {
+            cert = TAILQ_NEXT(cert, next);
+        }
+    }
+    if (cert == NULL) {
+        return false;
+    }
+
+    *buf = cert->cert_data;
+    *buf_len = cert->cert_len;
+    return true;
+}
 
 /**
  * \brief Registration function for keyword: tls.certs
  */
 void DetectTlsCertsRegister(void)
 {
-    sigmatch_table[DETECT_AL_TLS_CERTS].name = "tls.certs";
-    sigmatch_table[DETECT_AL_TLS_CERTS].desc = "sticky buffer to match the TLS certificate buffer";
-    sigmatch_table[DETECT_AL_TLS_CERTS].url = "/rules/tls-keywords.html#tls-certs";
-    sigmatch_table[DETECT_AL_TLS_CERTS].Setup = DetectTlsCertsSetup;
+    sigmatch_table[DETECT_TLS_CERTS].name = "tls.certs";
+    sigmatch_table[DETECT_TLS_CERTS].desc = "sticky buffer to match the TLS certificate buffer";
+    sigmatch_table[DETECT_TLS_CERTS].url = "/rules/tls-keywords.html#tls-certs";
+    sigmatch_table[DETECT_TLS_CERTS].Setup = DetectTlsCertsSetup;
 #ifdef UNITTESTS
-    sigmatch_table[DETECT_AL_TLS_CERTS].RegisterTests = DetectTlsCertsRegisterTests;
+    sigmatch_table[DETECT_TLS_CERTS].RegisterTests = DetectTlsCertsRegisterTests;
 #endif
-    sigmatch_table[DETECT_AL_TLS_CERTS].flags |= SIGMATCH_NOOPT;
-    sigmatch_table[DETECT_AL_TLS_CERTS].flags |= SIGMATCH_INFO_STICKY_BUFFER;
+    sigmatch_table[DETECT_TLS_CERTS].flags |= SIGMATCH_NOOPT;
+    sigmatch_table[DETECT_TLS_CERTS].flags |=
+            SIGMATCH_INFO_STICKY_BUFFER | SIGMATCH_INFO_MULTI_BUFFER;
 
-    DetectAppLayerInspectEngineRegister("tls.certs", ALPROTO_TLS, SIG_FLAG_TOCLIENT,
-            TLS_STATE_CERT_READY, DetectEngineInspectTlsCerts, NULL);
-
-    DetectAppLayerMpmRegister("tls.certs", SIG_FLAG_TOCLIENT, 2, PrefilterMpmTlsCertsRegister, NULL,
-            ALPROTO_TLS, TLS_STATE_CERT_READY);
-
-    DetectAppLayerInspectEngineRegister("tls.certs", ALPROTO_TLS, SIG_FLAG_TOSERVER,
-            TLS_STATE_CERT_READY, DetectEngineInspectTlsCerts, NULL);
-
-    DetectAppLayerMpmRegister("tls.certs", SIG_FLAG_TOSERVER, 2, PrefilterMpmTlsCertsRegister, NULL,
-            ALPROTO_TLS, TLS_STATE_CERT_READY);
+    DetectAppLayerMultiRegister("tls.certs", ALPROTO_TLS, SIG_FLAG_TOCLIENT,
+            TLS_STATE_SERVER_CERT_DONE, TlsCertsGetData, 2);
+    DetectAppLayerMultiRegister("tls.certs", ALPROTO_TLS, SIG_FLAG_TOSERVER,
+            TLS_STATE_CLIENT_CERT_DONE, TlsCertsGetData, 2);
 
     DetectBufferTypeSetDescriptionByName("tls.certs", "TLS certificate");
 
@@ -125,138 +139,18 @@ void DetectTlsCertsRegister(void)
 static int DetectTlsCertsSetup(DetectEngineCtx *de_ctx, Signature *s,
                                const char *str)
 {
-    if (DetectBufferSetActiveList(de_ctx, s, g_tls_certs_buffer_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_tls_certs_buffer_id) < 0)
         return -1;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_TLS) < 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_TLS) < 0)
         return -1;
 
     return 0;
 }
 
-static InspectionBuffer *TlsCertsGetData(DetectEngineThreadCtx *det_ctx,
-        const DetectEngineTransforms *transforms, Flow *f,
-	struct TlsCertsGetDataArgs *cbdata, int list_id)
-{
-    SCEnter();
-
-    InspectionBuffer *buffer =
-            InspectionBufferMultipleForListGet(det_ctx, list_id, cbdata->local_id);
-    if (buffer == NULL || buffer->initialized)
-        return buffer;
-
-    const SSLState *ssl_state = (SSLState *)f->alstate;
-    const SSLStateConnp *connp;
-
-    if (f->flags & STREAM_TOSERVER) {
-        connp = &ssl_state->client_connp;
-    } else {
-        connp = &ssl_state->server_connp;
-    }
-
-    if (TAILQ_EMPTY(&connp->certs)) {
-        InspectionBufferSetupMultiEmpty(buffer);
-        return NULL;
-    }
-
-    if (cbdata->cert == NULL) {
-        cbdata->cert = TAILQ_FIRST(&connp->certs);
-    } else {
-        cbdata->cert = TAILQ_NEXT(cbdata->cert, next);
-    }
-    if (cbdata->cert == NULL) {
-        InspectionBufferSetupMultiEmpty(buffer);
-        return NULL;
-    }
-
-    InspectionBufferSetupMulti(buffer, transforms, cbdata->cert->cert_data, cbdata->cert->cert_len);
-
-    SCReturnPtr(buffer, "InspectionBuffer");
-}
-
-static uint8_t DetectEngineInspectTlsCerts(DetectEngineCtx *de_ctx, DetectEngineThreadCtx *det_ctx,
-        const DetectEngineAppInspectionEngine *engine, const Signature *s, Flow *f, uint8_t flags,
-        void *alstate, void *txv, uint64_t tx_id)
-{
-    const DetectEngineTransforms *transforms = NULL;
-    if (!engine->mpm) {
-        transforms = engine->v2.transforms;
-    }
-
-    struct TlsCertsGetDataArgs cbdata = { 0, NULL };
-
-    while (1)
-    {
-        InspectionBuffer *buffer = TlsCertsGetData(det_ctx, transforms, f,
-			                           &cbdata, engine->sm_list);
-        if (buffer == NULL || buffer->inspect == NULL)
-            break;
-
-        const bool match = DetectEngineContentInspection(de_ctx, det_ctx, s, engine->smd, NULL, f,
-                buffer->inspect, buffer->inspect_len, buffer->inspect_offset,
-                DETECT_CI_FLAGS_SINGLE, DETECT_ENGINE_CONTENT_INSPECTION_MODE_STATE);
-        if (match) {
-            return DETECT_ENGINE_INSPECT_SIG_MATCH;
-        }
-
-        cbdata.local_id++;
-    }
-
-    return DETECT_ENGINE_INSPECT_SIG_NO_MATCH;
-}
-
-static void PrefilterTxTlsCerts(DetectEngineThreadCtx *det_ctx, const void *pectx, Packet *p,
-        Flow *f, void *txv, const uint64_t idx, const AppLayerTxData *_txd, const uint8_t flags)
-{
-    SCEnter();
-
-    const PrefilterMpmTlsCerts *ctx = (const PrefilterMpmTlsCerts *)pectx;
-    const MpmCtx *mpm_ctx = ctx->mpm_ctx;
-    const int list_id = ctx->list_id;
-
-    struct TlsCertsGetDataArgs cbdata = { 0, NULL };
-
-    while (1)
-    {
-        InspectionBuffer *buffer = TlsCertsGetData(det_ctx, ctx->transforms,
-                                                   f, &cbdata, list_id);
-        if (buffer == NULL)
-            break;
-
-        if (buffer->inspect_len >= mpm_ctx->minlen) {
-            (void)mpm_table[mpm_ctx->mpm_type].Search(
-                    mpm_ctx, &det_ctx->mtc, &det_ctx->pmq, buffer->inspect, buffer->inspect_len);
-            PREFILTER_PROFILING_ADD_BYTES(det_ctx, buffer->inspect_len);
-        }
-
-        cbdata.local_id++;
-    }
-}
-
-static void PrefilterMpmTlsCertsFree(void *ptr)
-{
-    SCFree(ptr);
-}
-
-static int PrefilterMpmTlsCertsRegister(DetectEngineCtx *de_ctx, SigGroupHead *sgh, MpmCtx *mpm_ctx,
-        const DetectBufferMpmRegistry *mpm_reg, int list_id)
-{
-    PrefilterMpmTlsCerts *pectx = SCCalloc(1, sizeof(*pectx));
-    if (pectx == NULL)
-        return -1;
-
-    pectx->list_id = list_id;
-    pectx->mpm_ctx = mpm_ctx;
-    pectx->transforms = &mpm_reg->transforms;
-
-    return PrefilterAppendTxEngine(de_ctx, sgh, PrefilterTxTlsCerts,
-            mpm_reg->app_v2.alproto, mpm_reg->app_v2.tx_min_progress,
-            pectx, PrefilterMpmTlsCertsFree, mpm_reg->name);
-}
-
 static int g_tls_cert_buffer_id = 0;
-#define BUFFER_NAME  "tls_validity"
-#define KEYWORD_ID   DETECT_AL_TLS_CHAIN_LEN
+#define BUFFER_NAME  "tls:server_cert_done:generic"
+#define KEYWORD_ID   DETECT_TLS_CHAIN_LEN
 #define KEYWORD_NAME "tls.cert_chain_len"
 #define KEYWORD_DESC "match TLS certificate chain length"
 #define KEYWORD_URL  "/rules/tls-keywords.html#tls-cert-chain-len"
@@ -308,7 +202,7 @@ static int DetectTLSCertChainLenMatch(DetectEngineThreadCtx *det_ctx, Flow *f, u
  */
 static void DetectTLSCertChainLenFree(DetectEngineCtx *de_ctx, void *ptr)
 {
-    rs_detect_u32_free(ptr);
+    SCDetectU32Free(ptr);
 }
 
 /**
@@ -324,7 +218,7 @@ static void DetectTLSCertChainLenFree(DetectEngineCtx *de_ctx, void *ptr)
  */
 static int DetectTLSCertChainLenSetup(DetectEngineCtx *de_ctx, Signature *s, const char *rawstr)
 {
-    if (DetectSignatureSetAppProto(s, ALPROTO_TLS) != 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_TLS) != 0)
         return -1;
 
     DetectU32Data *dd = DetectU32Parse(rawstr);
@@ -333,9 +227,9 @@ static int DetectTLSCertChainLenSetup(DetectEngineCtx *de_ctx, Signature *s, con
         return -1;
     }
 
-    if (SigMatchAppendSMToList(de_ctx, s, KEYWORD_ID, (SigMatchCtx *)dd, g_tls_cert_buffer_id) ==
+    if (SCSigMatchAppendSMToList(de_ctx, s, KEYWORD_ID, (SigMatchCtx *)dd, g_tls_cert_buffer_id) ==
             NULL) {
-        rs_detect_u32_free(dd);
+        SCDetectU32Free(dd);
         return -1;
     }
     return 0;
@@ -349,9 +243,7 @@ void DetectTlsCertChainLenRegister(void)
     sigmatch_table[KEYWORD_ID].AppLayerTxMatch = DetectTLSCertChainLenMatch;
     sigmatch_table[KEYWORD_ID].Setup = DetectTLSCertChainLenSetup;
     sigmatch_table[KEYWORD_ID].Free = DetectTLSCertChainLenFree;
-
-    DetectAppLayerInspectEngineRegister(BUFFER_NAME, ALPROTO_TLS, SIG_FLAG_TOCLIENT,
-            TLS_STATE_CERT_READY, DetectEngineInspectGenericList, NULL);
+    sigmatch_table[KEYWORD_ID].flags = SIGMATCH_INFO_UINT32;
 
     g_tls_cert_buffer_id = DetectBufferTypeGetByName(BUFFER_NAME);
 }

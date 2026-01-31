@@ -17,35 +17,23 @@
 
 // written by Pierre Chifflier  <chifflier@wzdftpd.net>
 
+use crate::detect::EnumString;
 use crate::jsonbuilder::{JsonBuilder, JsonError};
-use crate::snmp::snmp::SNMPTransaction;
-use crate::snmp::snmp_parser::{NetworkAddress,PduType};
-use std::borrow::Cow;
+use crate::snmp::snmp::{SNMPTransaction, SnmpPduType};
+use crate::snmp::snmp_parser::NetworkAddress;
 
-fn str_of_pdu_type(t:&PduType) -> Cow<str> {
-    match t {
-        &PduType::GetRequest => Cow::Borrowed("get_request"),
-        &PduType::GetNextRequest => Cow::Borrowed("get_next_request"),
-        &PduType::Response => Cow::Borrowed("response"),
-        &PduType::SetRequest => Cow::Borrowed("set_request"),
-        &PduType::TrapV1 => Cow::Borrowed("trap_v1"),
-        &PduType::GetBulkRequest => Cow::Borrowed("get_bulk_request"),
-        &PduType::InformRequest => Cow::Borrowed("inform_request"),
-        &PduType::TrapV2 => Cow::Borrowed("trap_v2"),
-        &PduType::Report => Cow::Borrowed("report"),
-        x => Cow::Owned(format!("Unknown(0x{:x})", x.0)),
-    }
-}
-
-fn snmp_log_response(jsb: &mut JsonBuilder, tx: &mut SNMPTransaction) -> Result<(), JsonError>
-{
+fn snmp_log_response(jsb: &mut JsonBuilder, tx: &SNMPTransaction) -> Result<(), JsonError> {
     jsb.open_object("snmp")?;
     jsb.set_uint("version", tx.version as u64)?;
     if tx.encrypted {
         jsb.set_string("pdu_type", "encrypted")?;
     } else {
         if let Some(ref info) = tx.info {
-            jsb.set_string("pdu_type", &str_of_pdu_type(&info.pdu_type))?;
+            if let Some(pt) = SnmpPduType::from_u(info.pdu_type.0) {
+                jsb.set_string("pdu_type", pt.to_str())?;
+            } else {
+                jsb.set_string("pdu_type", &format!("Unknown(0x{:x})", info.pdu_type.0))?;
+            }
             if info.err.0 != 0 {
                 jsb.set_string("error", &format!("{:?}", info.err))?;
             }
@@ -53,7 +41,9 @@ fn snmp_log_response(jsb: &mut JsonBuilder, tx: &mut SNMPTransaction) -> Result<
                 jsb.set_string("trap_type", &format!("{:?}", trap_type))?;
                 jsb.set_string("trap_oid", &oid.to_string())?;
                 match address {
-                    NetworkAddress::IPv4(ip) => {jsb.set_string("trap_address", &ip.to_string())?;},
+                    NetworkAddress::IPv4(ip) => {
+                        jsb.set_string("trap_address", &ip.to_string())?;
+                    }
                 }
             }
             if !info.vars.is_empty() {
@@ -76,8 +66,10 @@ fn snmp_log_response(jsb: &mut JsonBuilder, tx: &mut SNMPTransaction) -> Result<
     return Ok(());
 }
 
-#[no_mangle]
-pub extern "C" fn rs_snmp_log_json_response(tx: &mut SNMPTransaction, jsb: &mut JsonBuilder) -> bool
-{
+pub(super) unsafe extern "C" fn snmp_log_json_response(
+    tx: *const std::os::raw::c_void, jsb: *mut std::os::raw::c_void,
+) -> bool {
+    let tx = cast_pointer!(tx, SNMPTransaction);
+    let jsb = cast_pointer!(jsb, JsonBuilder);
     snmp_log_response(jsb, tx).is_ok()
 }

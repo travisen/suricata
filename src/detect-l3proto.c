@@ -118,7 +118,6 @@ error:
 
 static int DetectL3protoTestSig1(void)
 {
-
     Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
     Signature *s = NULL;
@@ -127,11 +126,12 @@ static int DetectL3protoTestSig1(void)
     IPV4Hdr ip4h;
 
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
 
     p->src.family = AF_INET;
     p->dst.family = AF_INET;
     p->proto = IPPROTO_TCP;
-    p->ip4h = &ip4h;
+    UTHSetIPV4Hdr(p, &ip4h);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     FAIL_IF_NULL(de_ctx);
@@ -166,8 +166,8 @@ static int DetectL3protoTestSig1(void)
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
 
-    SCFree(p);
-
+    PacketFree(p);
+    StatsThreadCleanup(&th_v.stats);
     PASS;
 }
 
@@ -179,7 +179,6 @@ static int DetectL3protoTestSig1(void)
 
 static int DetectL3protoTestSig2(void)
 {
-
     Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
     Signature *s = NULL;
@@ -188,11 +187,12 @@ static int DetectL3protoTestSig2(void)
     IPV6Hdr ip6h;
 
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
 
     p->src.family = AF_INET6;
     p->dst.family = AF_INET6;
     p->proto = IPPROTO_TCP;
-    p->ip6h = &ip6h;
+    UTHSetIPV6Hdr(p, &ip6h);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     FAIL_IF_NULL(de_ctx);
@@ -227,7 +227,8 @@ static int DetectL3protoTestSig2(void)
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
 
-    SCFree(p);
+    PacketFree(p);
+    StatsThreadCleanup(&th_v.stats);
 
     PASS;
 }
@@ -239,7 +240,6 @@ static int DetectL3protoTestSig2(void)
 
 static int DetectL3protoTestSig3(void)
 {
-
     Packet *p = PacketGetFromAlloc();
     FAIL_IF_NULL(p);
     Signature *s = NULL;
@@ -248,11 +248,12 @@ static int DetectL3protoTestSig3(void)
     IPV6Hdr ip6h;
 
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
 
     p->src.family = AF_INET6;
     p->dst.family = AF_INET6;
     p->proto = IPPROTO_TCP;
-    p->ip6h = &ip6h;
+    UTHSetIPV6Hdr(p, &ip6h);
 
     DetectEngineCtx *de_ctx = DetectEngineCtxInit();
     FAIL_IF_NULL(de_ctx);
@@ -287,7 +288,8 @@ static int DetectL3protoTestSig3(void)
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
 
-    SCFree(p);
+    PacketFree(p);
+    StatsThreadCleanup(&th_v.stats);
 
     PASS;
 }

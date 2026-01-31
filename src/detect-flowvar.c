@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2020 Open Information Security Foundation
+/* Copyright (C) 2007-2025 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -178,12 +178,15 @@ static int DetectFlowvarSetup (DetectEngineCtx *de_ctx, Signature *s, const char
     fd->name = SCStrdup(varname);
     if (unlikely(fd->name == NULL))
         goto error;
-    fd->idx = VarNameStoreRegister(varname, VAR_TYPE_FLOW_VAR);
+    uint32_t varname_id = VarNameStoreRegister(varname, VAR_TYPE_FLOW_VAR);
+    if (unlikely(varname_id == 0))
+        goto error;
+    fd->idx = varname_id;
 
     /* Okay so far so good, lets get this into a SigMatch
      * and put it in the Signature. */
 
-    if (SigMatchAppendSMToList(
+    if (SCSigMatchAppendSMToList(
                 de_ctx, s, DETECT_FLOWVAR, (SigMatchCtx *)fd, DETECT_SM_LIST_MATCH) == NULL) {
         goto error;
     }
@@ -192,17 +195,15 @@ static int DetectFlowvarSetup (DetectEngineCtx *de_ctx, Signature *s, const char
     return 0;
 
 error:
-    if (fd != NULL)
-        DetectFlowvarDataFree(de_ctx, fd);
+    DetectFlowvarDataFree(de_ctx, fd);
     if (content != NULL)
         SCFree(content);
     return -1;
 }
 
 /** \brief Store flowvar in det_ctx so we can exec it post-match */
-int DetectVarStoreMatchKeyValue(DetectEngineThreadCtx *det_ctx,
-        uint8_t *key, uint16_t key_len,
-        uint8_t *buffer, uint16_t len, int type)
+int DetectVarStoreMatchKeyValue(DetectEngineThreadCtx *det_ctx, uint8_t *key, uint16_t key_len,
+        uint8_t *buffer, uint16_t len, uint16_t type)
 {
     DetectVarList *fs = SCCalloc(1, sizeof(*fs));
     if (unlikely(fs == NULL))
@@ -220,9 +221,8 @@ int DetectVarStoreMatchKeyValue(DetectEngineThreadCtx *det_ctx,
 }
 
 /** \brief Store flowvar in det_ctx so we can exec it post-match */
-int DetectVarStoreMatch(DetectEngineThreadCtx *det_ctx,
-        uint32_t idx,
-        uint8_t *buffer, uint16_t len, int type)
+int DetectVarStoreMatch(
+        DetectEngineThreadCtx *det_ctx, uint32_t idx, uint8_t *buffer, uint16_t len, uint16_t type)
 {
     DetectVarList *fs = det_ctx->varlist;
 
@@ -268,14 +268,13 @@ int DetectFlowvarPostMatchSetup(DetectEngineCtx *de_ctx, Signature *s, uint32_t 
     fv->idx = idx;
     fv->post_match = true;
 
-    if (SigMatchAppendSMToList(de_ctx, s, DETECT_FLOWVAR_POSTMATCH, (SigMatchCtx *)fv,
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_FLOWVAR_POSTMATCH, (SigMatchCtx *)fv,
                 DETECT_SM_LIST_POSTMATCH) == NULL) {
         goto error;
     }
     return 0;
 error:
-    if (fv != NULL)
-        DetectFlowvarDataFree(de_ctx, fv);
+    DetectFlowvarDataFree(de_ctx, fv);
     return -1;
 }
 

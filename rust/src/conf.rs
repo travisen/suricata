@@ -17,28 +17,27 @@
 
 //! Module for retrieving configuration details.
 
+use nom8::{
+    character::complete::{multispace0, not_line_ending},
+    combinator::verify,
+    number::complete::double,
+    sequence::preceded,
+    IResult, Parser,
+};
+use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
-use std::os::raw::c_void;
 use std::os::raw::c_int;
-use std::ffi::{CString, CStr};
 use std::ptr;
 use std::str;
-use nom7::{
-    character::complete::{multispace0, not_line_ending},
-    sequence::{preceded, tuple},
-    number::complete::double,
-    combinator::verify,
-    IResult,
-};
-
-extern {
-    fn ConfGet(key: *const c_char, res: *mut *const c_char) -> i8;
-    fn ConfGetChildValue(conf: *const c_void, key: *const c_char,
-                         vptr: *mut *const c_char) -> i8;
-    fn ConfGetChildValueBool(conf: *const c_void, key: *const c_char,
-                             vptr: *mut c_int) -> i8;
-    fn ConfGetNode(key: *const c_char) -> *const c_void;
-}
+use suricata_sys::sys::SCConfGet;
+use suricata_sys::sys::SCConfGetChildValue;
+use suricata_sys::sys::SCConfGetChildValueBool;
+use suricata_sys::sys::SCConfGetNode;
+use suricata_sys::sys::SCConfNode;
+use suricata_sys::sys::SCConfNodeLookupChild;
+use suricata_sys::sys::SCConfGetFirstNode;
+use suricata_sys::sys::SCConfGetNextNode;
+use suricata_sys::sys::SCConfGetValueNode;
 
 pub fn conf_get_node(key: &str) -> Option<ConfNode> {
     let key = if let Ok(key) = CString::new(key) {
@@ -47,7 +46,7 @@ pub fn conf_get_node(key: &str) -> Option<ConfNode> {
         return None;
     };
 
-    let node = unsafe { ConfGetNode(key.as_ptr()) };
+    let node = unsafe { SCConfGetNode(key.as_ptr()) };
     if node.is_null() {
         None
     } else {
@@ -61,7 +60,7 @@ pub fn conf_get(key: &str) -> Option<&str> {
 
     unsafe {
         let s = CString::new(key).unwrap();
-        if ConfGet(s.as_ptr(), &mut vptr) != 1 {
+        if SCConfGet(s.as_ptr(), &mut vptr) != 1 {
             SCLogDebug!("Failed to find value for key {}", key);
             return None;
         }
@@ -71,9 +70,7 @@ pub fn conf_get(key: &str) -> Option<&str> {
         return None;
     }
 
-    let value = str::from_utf8(unsafe{
-        CStr::from_ptr(vptr).to_bytes()
-    }).unwrap();
+    let value = str::from_utf8(unsafe { CStr::from_ptr(vptr).to_bytes() }).unwrap();
 
     return Some(value);
 }
@@ -81,13 +78,8 @@ pub fn conf_get(key: &str) -> Option<&str> {
 // Return the value of key as a boolean. A value that is not set is
 // the same as having it set to false.
 pub fn conf_get_bool(key: &str) -> bool {
-    if let Some(val) = conf_get(key) {
-        match val {
-            "1" | "yes" | "true" | "on" => {
-                return true;
-            },
-            _ => {},
-        }
+    if let Some("1" | "yes" | "true" | "on") = conf_get(key) {
+        return true;
     }
 
     return false;
@@ -96,13 +88,48 @@ pub fn conf_get_bool(key: &str) -> bool {
 /// Wrap a Suricata ConfNode and expose some of its methods with a
 /// Rust friendly interface.
 pub struct ConfNode {
-    pub conf: *const c_void,
+    pub conf: *const SCConfNode,
 }
 
 impl ConfNode {
+    pub fn wrap(conf: *const SCConfNode) -> Self {
+        return Self { conf };
+    }
 
-    pub fn wrap(conf: *const c_void) -> Self {
-        return Self { conf }
+    pub fn get_child_node(&self, key: &str) -> Option<ConfNode> {
+        let node = unsafe {
+            let s = CString::new(key).unwrap();
+            SCConfNodeLookupChild(self.conf, s.as_ptr())
+        };
+        if node.is_null() {
+            None
+        } else {
+            Some(ConfNode::wrap(node))
+        }
+    }
+
+    pub fn first(&self) -> Option<ConfNode> {
+        let node = unsafe { SCConfGetFirstNode(self.conf) };
+        if node.is_null() {
+            None
+        } else {
+            Some(ConfNode::wrap(node))
+        }
+    }
+
+    pub fn next(&self) -> Option<ConfNode> {
+        let node = unsafe { SCConfGetNextNode(self.conf) };
+        if node.is_null() {
+            None
+        } else {
+            Some(ConfNode::wrap(node))
+        }
+    }
+
+    pub fn value(&self) -> &str {
+        let vptr = unsafe { SCConfGetValueNode(self.conf) };
+        let value = std::str::from_utf8(unsafe { CStr::from_ptr(vptr).to_bytes() }).unwrap();
+        return value;
     }
 
     pub fn get_child_value(&self, key: &str) -> Option<&str> {
@@ -110,9 +137,7 @@ impl ConfNode {
 
         unsafe {
             let s = CString::new(key).unwrap();
-            if ConfGetChildValue(self.conf,
-                                 s.as_ptr(),
-                                 &mut vptr) != 1 {
+            if SCConfGetChildValue(self.conf, s.as_ptr(), &mut vptr) != 1 {
                 return None;
             }
         }
@@ -121,9 +146,7 @@ impl ConfNode {
             return None;
         }
 
-        let value = str::from_utf8(unsafe{
-            CStr::from_ptr(vptr).to_bytes()
-        }).unwrap();
+        let value = str::from_utf8(unsafe { CStr::from_ptr(vptr).to_bytes() }).unwrap();
 
         return Some(value);
     }
@@ -133,9 +156,7 @@ impl ConfNode {
 
         unsafe {
             let s = CString::new(key).unwrap();
-            if ConfGetChildValueBool(self.conf,
-                                     s.as_ptr(),
-                                     &mut vptr) != 1 {
+            if SCConfGetChildValueBool(self.conf, s.as_ptr(), &mut vptr) != 1 {
                 return false;
             }
         }
@@ -145,13 +166,12 @@ impl ConfNode {
         }
         return false;
     }
-
 }
 
-const BYTE: u64       = 1;
-const KILOBYTE: u64   = 1024;
-const MEGABYTE: u64   = 1_048_576;
-const GIGABYTE: u64   = 1_073_741_824;
+const BYTE: u64 = 1;
+const KILOBYTE: u64 = 1024;
+const MEGABYTE: u64 = 1_048_576;
+const GIGABYTE: u64 = 1_073_741_824;
 
 /// Helper function to retrieve memory unit from a string slice
 ///
@@ -163,11 +183,14 @@ const GIGABYTE: u64   = 1_073_741_824;
 fn get_memunit(unit: &str) -> u64 {
     let unit = &unit.to_lowercase()[..];
     match unit {
-        "b"     => { BYTE }
-        "kb"    => { KILOBYTE }
-        "mb"    => { MEGABYTE }
-        "gb"    => { GIGABYTE }
-        _       => { 0 }
+        "b" => BYTE,
+        "kb" => KILOBYTE,
+        "kib" => KILOBYTE,
+        "mb" => MEGABYTE,
+        "mib" => MEGABYTE,
+        "gb" => GIGABYTE,
+        "gib" => GIGABYTE,
+        _ => 0,
     }
 }
 
@@ -180,13 +203,16 @@ fn get_memunit(unit: &str) -> u64 {
 /// # Arguments
 ///
 /// * `arg` - A string slice that holds the value parsed from the config
+///
+/// Note that kb/mb/gb and kib/mib/gib are equivalent
 pub fn get_memval(arg: &str) -> Result<u64, &'static str> {
     let arg = arg.trim();
     let val: f64;
     let mut unit: &str;
-    let mut parser = tuple((preceded(multispace0, double),
-                        preceded(multispace0, verify(not_line_ending, |c: &str| c.len() < 3))));
-    let r: IResult<&str, (f64, &str)> = parser(arg);
+    let r: IResult<&str, (f64, &str)> = (
+        preceded(multispace0, double),
+        preceded(multispace0, verify(not_line_ending, |c: &str| c.len() < 4)),
+    ).parse(arg);
     if let Ok(r) = r {
         val = (r.1).0;
         unit = (r.1).1;
@@ -211,7 +237,7 @@ mod tests {
     #[test]
     fn test_memval_nospace() {
         let s = "10";
-        let res = 10 ;
+        let res = 10;
         assert_eq!(Ok(10), get_memval(s));
 
         let s = "10kb";
@@ -220,20 +246,29 @@ mod tests {
         let s = "10Kb";
         assert_eq!(Ok(res * KILOBYTE), get_memval(s));
 
+        let s = "10Kib";
+        assert_eq!(Ok(res * KILOBYTE), get_memval(s));
+
         let s = "10KB";
         assert_eq!(Ok(res * KILOBYTE), get_memval(s));
 
         let s = "10mb";
         assert_eq!(Ok(res * MEGABYTE), get_memval(s));
 
+        let s = "10mib";
+        assert_eq!(Ok(res * MEGABYTE), get_memval(s));
+
         let s = "10gb";
+        assert_eq!(Ok(res * GIGABYTE), get_memval(s));
+
+        let s = "10gib";
         assert_eq!(Ok(res * GIGABYTE), get_memval(s));
     }
 
     #[test]
     fn test_memval_space_start() {
         let s = " 10";
-        let res = 10 ;
+        let res = 10;
         assert_eq!(Ok(res), get_memval(s));
 
         let s = " 10Kb";
@@ -252,7 +287,7 @@ mod tests {
     #[test]
     fn test_memval_space_end() {
         let s = " 10                  ";
-        let res = 10 ;
+        let res = 10;
         assert_eq!(Ok(res), get_memval(s));
 
         let s = "10Kb    ";
@@ -271,7 +306,7 @@ mod tests {
     #[test]
     fn test_memval_space_in_bw() {
         let s = " 10                  ";
-        let res = 10 ;
+        let res = 10;
         assert_eq!(Ok(res), get_memval(s));
 
         let s = "10 Kb    ";

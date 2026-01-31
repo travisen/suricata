@@ -22,17 +22,16 @@ use std::{cmp::Ordering, ffi::CStr};
 // Rust 1.64.0.
 use std::os::raw::{c_char, c_int};
 
-use nom7::bytes::complete::take_while;
-use nom7::combinator::map;
-use nom7::multi::{many1, separated_list1};
-use nom7::sequence::tuple;
-use nom7::{
+use nom8::bytes::complete::take_while;
+use nom8::combinator::map;
+use nom8::multi::{many1, separated_list1};
+use nom8::{
     branch::alt,
     bytes::complete::{tag, take_till},
     character::complete::{char, multispace0},
     combinator::map_res,
     sequence::preceded,
-    IResult,
+    IResult, Parser,
 };
 
 #[derive(Debug, Eq, PartialEq)]
@@ -57,6 +56,12 @@ enum RequiresError {
 
     /// Passed in requirements not a valid UTF-8 string.
     Utf8Error,
+
+    /// An unknown requirement was provided.
+    UnknownRequirement(String),
+
+    /// Suricata does not have support for a required keyword.
+    MissingKeyword(String),
 }
 
 impl RequiresError {
@@ -70,6 +75,8 @@ impl RequiresError {
             Self::BadRequires => "Failed to parse requires expression\0",
             Self::MultipleVersions => "Version may only be specified once\0",
             Self::Utf8Error => "Requires expression is not valid UTF-8\0",
+            Self::UnknownRequirement(_) => "Unknown requirements\0",
+            Self::MissingKeyword(_) => "Suricata missing a required keyword\0",
         };
         msg.as_ptr() as *const c_char
     }
@@ -138,8 +145,8 @@ impl SuricataVersion {
 /// ]
 fn parse_version_expression(input: &str) -> IResult<&str, Vec<Vec<RuleRequireVersion>>> {
     let sep = preceded(multispace0, tag("|"));
-    let inner_parser = many1(tuple((parse_op, parse_version)));
-    let (input, versions) = separated_list1(sep, inner_parser)(input)?;
+    let inner_parser = many1((parse_op, parse_version));
+    let (input, versions) = separated_list1(sep, inner_parser).parse(input)?;
 
     let versions = versions
         .into_iter()
@@ -162,13 +169,20 @@ struct RuleRequireVersion {
 
 #[derive(Debug, Default, Eq, PartialEq)]
 struct Requires {
+    /// Features required to be enabled.
     pub features: Vec<String>,
+
+    /// Rule keywords required to exist.
+    pub keywords: Vec<String>,
 
     /// The version expression.
     ///
     /// - All of the inner most must evaluate to true.
     /// - To pass, any of the outer must be true.
     pub version: Vec<Vec<RuleRequireVersion>>,
+
+    /// Unknown parameters to requires.
+    pub unknown: Vec<String>,
 }
 
 fn parse_op(input: &str) -> IResult<&str, VersionCompareOp> {
@@ -180,7 +194,7 @@ fn parse_op(input: &str) -> IResult<&str, VersionCompareOp> {
             map(tag("<="), |_| VersionCompareOp::Lte),
             map(tag("<"), |_| VersionCompareOp::Lt),
         )),
-    )(input)
+    ).parse(input)
 }
 
 /// Parse the next part of the version.
@@ -190,21 +204,21 @@ fn parse_next_version_part(input: &str) -> IResult<&str, u8> {
     map_res(
         take_till(|c| c == '.' || c == '-' || c == ' '),
         |s: &str| s.parse::<u8>(),
-    )(input)
+    ).parse(input)
 }
 
 /// Parse a version string into a SuricataVersion.
 fn parse_version(input: &str) -> IResult<&str, SuricataVersion> {
-    let (input, major) = preceded(multispace0, parse_next_version_part)(input)?;
+    let (input, major) = preceded(multispace0, parse_next_version_part).parse(input)?;
     let (input, minor) = if input.is_empty() || input.starts_with(' ') {
         (input, 0)
     } else {
-        preceded(char('.'), parse_next_version_part)(input)?
+        preceded(char('.'), parse_next_version_part).parse(input)?
     };
     let (input, patch) = if input.is_empty() || input.starts_with(' ') {
         (input, 0)
     } else {
-        preceded(char('.'), parse_next_version_part)(input)?
+        preceded(char('.'), parse_next_version_part).parse(input)?
     };
 
     Ok((input, SuricataVersion::new(major, minor, patch)))
@@ -215,8 +229,8 @@ fn parse_key_value(input: &str) -> IResult<&str, (&str, &str)> {
     let (input, key) = preceded(
         multispace0,
         take_while(|c: char| c.is_alphanumeric() || c == '-' || c == '_'),
-    )(input)?;
-    let (input, value) = preceded(multispace0, take_till(|c: char| c == ','))(input)?;
+    ).parse(input)?;
+    let (input, value) = preceded(multispace0, take_till(|c: char| c == ',')).parse(input)?;
     Ok((input, (key, value)))
 }
 
@@ -238,10 +252,14 @@ fn parse_requires(mut input: &str) -> Result<Requires, RequiresError> {
                     parse_version_expression(value).map_err(|_| RequiresError::BadRequires)?;
                 requires.version = versions;
             }
+            "keyword" => {
+                requires.keywords.push(value.trim().to_string());
+            }
             _ => {
                 // Unknown keyword, allow by warn in case we extend
                 // this in the future.
                 SCLogWarning!("Unknown requires keyword: {}", keyword);
+                requires.unknown.push(format!("{} {}", keyword, value));
             }
         }
 
@@ -291,6 +309,12 @@ fn check_version(
 fn check_requires(
     requires: &Requires, suricata_version: &SuricataVersion,
 ) -> Result<(), RequiresError> {
+    if !requires.unknown.is_empty() {
+        return Err(RequiresError::UnknownRequirement(
+            requires.unknown.join(","),
+        ));
+    }
+
     if !requires.version.is_empty() {
         let mut errs = VecDeque::new();
         let mut ok = 0;
@@ -316,6 +340,12 @@ fn check_requires(
     for feature in &requires.features {
         if !crate::feature::requires(feature) {
             return Err(RequiresError::MissingFeature(feature.to_string()));
+        }
+    }
+
+    for keyword in &requires.keywords {
+        if !crate::feature::has_keyword(keyword) {
+            return Err(RequiresError::MissingKeyword(keyword.to_string()));
         }
     }
 
@@ -434,8 +464,8 @@ pub unsafe extern "C" fn SCDetectRequiresStatusLog(
 ///   *  0 - OK, rule should continue loading
 ///   * -1 - Error parsing the requires content
 ///   * -4 - Requirements not met, don't continue loading the rule, this
-///          value is chosen so it can be passed back to the options parser
-///          as its treated as a non-fatal silent error.
+///     value is chosen so it can be passed back to the options parser
+///     as its treated as a non-fatal silent error.
 #[no_mangle]
 pub unsafe extern "C" fn SCDetectCheckRequires(
     requires: *const c_char, suricata_version_string: *const c_char, errstr: *mut *const c_char,
@@ -586,6 +616,7 @@ mod test {
             requires,
             Requires {
                 features: vec![],
+                keywords: vec![],
                 version: vec![vec![RuleRequireVersion {
                     op: VersionCompareOp::Gte,
                     version: SuricataVersion {
@@ -594,6 +625,7 @@ mod test {
                         patch: 0,
                     }
                 }]],
+                unknown: vec![],
             }
         );
 
@@ -602,6 +634,7 @@ mod test {
             requires,
             Requires {
                 features: vec![],
+                keywords: vec![],
                 version: vec![vec![RuleRequireVersion {
                     op: VersionCompareOp::Gte,
                     version: SuricataVersion {
@@ -610,6 +643,7 @@ mod test {
                         patch: 0,
                     }
                 }]],
+                unknown: vec![],
             }
         );
 
@@ -618,6 +652,7 @@ mod test {
             requires,
             Requires {
                 features: vec!["output::file-store".to_string()],
+                keywords: vec![],
                 version: vec![vec![RuleRequireVersion {
                     op: VersionCompareOp::Gte,
                     version: SuricataVersion {
@@ -626,6 +661,7 @@ mod test {
                         patch: 2,
                     }
                 }]],
+                unknown: vec![],
             }
         );
 
@@ -634,6 +670,7 @@ mod test {
             requires,
             Requires {
                 features: vec!["geoip".to_string()],
+                keywords: vec![],
                 version: vec![vec![
                     RuleRequireVersion {
                         op: VersionCompareOp::Gte,
@@ -652,6 +689,7 @@ mod test {
                         }
                     }
                 ]],
+                unknown: vec![],
             }
         );
     }
@@ -748,11 +786,12 @@ mod test {
         assert!(check_requires(&requires, &SuricataVersion::new(9, 0, 0)).is_err());
 
         // Unknown keyword.
-        let requires = parse_requires("feature lua, foo bar, version >= 7.0.3").unwrap();
+        let requires = parse_requires("feature true_lua, foo bar, version >= 7.0.3").unwrap();
         assert_eq!(
             requires,
             Requires {
-                features: vec!["lua".to_string()],
+                features: vec!["true_lua".to_string()],
+                keywords: vec![],
                 version: vec![vec![RuleRequireVersion {
                     op: VersionCompareOp::Gte,
                     version: SuricataVersion {
@@ -761,8 +800,14 @@ mod test {
                         patch: 3,
                     }
                 }]],
+                unknown: vec!["foo bar".to_string()],
             }
         );
+
+        // This should not pass the requires check as it contains an
+        // unknown requires keyword.
+        //check_requires(&requires, &SuricataVersion::new(8, 0, 0)).unwrap();
+        assert!(check_requires(&requires, &SuricataVersion::new(8, 0, 0)).is_err());
     }
 
     #[test]
@@ -801,5 +846,14 @@ mod test {
                 },],
             ]
         );
+    }
+
+    #[test]
+    fn test_requires_keyword() {
+        let requires = parse_requires("keyword true_bar").unwrap();
+        assert!(check_requires(&requires, &SuricataVersion::new(8, 0, 0)).is_ok());
+
+        let requires = parse_requires("keyword bar").unwrap();
+        assert!(check_requires(&requires, &SuricataVersion::new(8, 0, 0)).is_err());
     }
 }

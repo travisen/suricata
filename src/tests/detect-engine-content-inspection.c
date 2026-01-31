@@ -31,10 +31,11 @@
 
 extern thread_local uint32_t ut_inspection_recursion_counter;
 
-#define TEST_HEADER                                     \
-    ThreadVars tv;                                      \
-    memset(&tv, 0, sizeof(tv));                         \
-    Flow f;                                             \
+#define TEST_HEADER                                                                                \
+    ThreadVars tv;                                                                                 \
+    memset(&tv, 0, sizeof(tv));                                                                    \
+    StatsThreadInit(&tv.stats);                                                                    \
+    Flow f;                                                                                        \
     memset(&f, 0, sizeof(f));
 
 #define TEST_RUN(buf, buflen, sig, match, steps)                                                   \
@@ -56,6 +57,7 @@ extern thread_local uint32_t ut_inspection_recursion_counter;
         FAIL_IF_NOT(ut_inspection_recursion_counter == (steps));                                   \
         DetectEngineThreadCtxDeinit(&tv, det_ctx);                                                 \
         DetectEngineCtxFree(de_ctx);                                                               \
+        StatsThreadCleanup(&tv.stats);                                                             \
     }
 #define TEST_FOOTER     \
     PASS

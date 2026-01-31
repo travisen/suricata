@@ -21,8 +21,9 @@ use nom7::bytes::streaming::take;
 use nom7::number::streaming::be_u32;
 use nom7::{Err, IResult};
 
-use crate::core::*;
+use crate::direction::Direction;
 use crate::nfs::nfs::*;
+use crate::flow::Flow;
 use crate::nfs::nfs4_records::*;
 use crate::nfs::nfs_records::*;
 use crate::nfs::rpc_records::*;
@@ -68,9 +69,16 @@ impl NFSState {
         let found = match self.get_file_tx_by_handle(&file_handle, Direction::ToServer) {
             Some(tx) => {
                 if let Some(NFSTransactionTypeData::FILE(ref mut tdf)) = tx.type_data {
-                    filetracker_newchunk(&mut tdf.file_tracker,
-                            &file_name, w.data, w.offset,
-                            w.write_len, fill_bytes as u8, is_last, &r.hdr.xid);
+                    filetracker_newchunk(
+                        &mut tdf.file_tracker,
+                        &file_name,
+                        w.data,
+                        w.offset,
+                        w.write_len,
+                        fill_bytes as u8,
+                        is_last,
+                        &r.hdr.xid,
+                    );
                     tdf.chunk_count += 1;
                     if is_last {
                         tdf.file_last_xid = r.hdr.xid;
@@ -85,9 +93,16 @@ impl NFSState {
         if !found {
             let tx = self.new_file_tx(&file_handle, &file_name, Direction::ToServer);
             if let Some(NFSTransactionTypeData::FILE(ref mut tdf)) = tx.type_data {
-                filetracker_newchunk(&mut tdf.file_tracker,
-                        &file_name, w.data, w.offset,
-                        w.write_len, fill_bytes as u8, is_last, &r.hdr.xid);
+                filetracker_newchunk(
+                    &mut tdf.file_tracker,
+                    &file_name,
+                    w.data,
+                    w.offset,
+                    w.write_len,
+                    fill_bytes as u8,
+                    is_last,
+                    &r.hdr.xid,
+                );
                 tx.procedure = NFSPROC4_WRITE;
                 tx.xid = r.hdr.xid;
                 tx.is_first = true;
@@ -102,7 +117,7 @@ impl NFSState {
         }
         self.ts_chunk_xid = r.hdr.xid;
         debug_validate_bug_on!(w.data.len() as u32 > w.write_len);
-        self.ts_chunk_left = w.write_len - w.data.len()  as u32;
+        self.ts_chunk_left = w.write_len - w.data.len() as u32;
     }
 
     fn close_v4<'b>(&mut self, r: &RpcPacket<'b>, fh: &'b [u8]) {
@@ -125,8 +140,7 @@ impl NFSState {
     }
 
     fn new_tx_v4(
-        &mut self, r: &RpcPacket, xidmap: &NFSRequestXidMap, procedure: u32,
-        _aux_opcodes: &[u32],
+        &mut self, r: &RpcPacket, xidmap: &NFSRequestXidMap, procedure: u32, _aux_opcodes: &[u32],
     ) {
         let mut tx = self.new_tx();
         tx.xid = r.hdr.xid;
@@ -307,7 +321,7 @@ impl NFSState {
     }
 
     fn compound_response<'b>(
-        &mut self, r: &RpcReplyPacket<'b>, cr: &Nfs4ResponseCompoundRecord<'b>,
+        &mut self, flow: *mut Flow, r: &RpcReplyPacket<'b>, cr: &Nfs4ResponseCompoundRecord<'b>,
         xidmap: &mut NFSRequestXidMap,
     ) {
         let mut insert_filename_with_getfh = false;
@@ -319,7 +333,7 @@ impl NFSState {
             match *c {
                 Nfs4ResponseContent::ReadDir(_s, Some(ref rd)) => {
                     SCLogDebug!("READDIRv4: status {} eof {}", _s, rd.eof);
-                    
+
                     #[allow(clippy::manual_flatten)]
                     for d in &rd.listing {
                         if let Some(_d) = d {
@@ -354,7 +368,7 @@ impl NFSState {
                         data_len: rd.data.len() as u32,
                         data: rd.data,
                     };
-                    self.process_read_record(r, &reply, Some(xidmap));
+                    self.process_read_record(flow, r, &reply, Some(xidmap));
                 }
                 Nfs4ResponseContent::Open(_s, Some(ref _rd)) => {
                     SCLogDebug!("OPENv4: status {} opendata {:?}", _s, _rd);
@@ -378,13 +392,11 @@ impl NFSState {
 
         if main_opcode_status_set {
             let resp_handle = Vec::new();
-            self.mark_response_tx_done(r.hdr.xid, r.reply_state, main_opcode_status, &resp_handle);
+            self.mark_response_tx_done(flow, r.hdr.xid, r.reply_state, main_opcode_status, &resp_handle);
         }
     }
 
-    pub fn process_reply_record_v4(
-        &mut self, r: &RpcReplyPacket, xidmap: &mut NFSRequestXidMap,
-    ) {
+    pub fn process_reply_record_v4(&mut self, flow: *mut Flow, r: &RpcReplyPacket, xidmap: &mut NFSRequestXidMap) {
         if xidmap.procedure == NFSPROC4_COMPOUND {
             let mut data = r.prog_data;
 
@@ -410,7 +422,7 @@ impl NFSState {
             match parse_nfs4_response_compound(data) {
                 Ok((_, rd)) => {
                     SCLogDebug!("COMPOUNDv4: {:?}", rd);
-                    self.compound_response(r, &rd, xidmap);
+                    self.compound_response(flow, r, &rd, xidmap);
                 }
                 Err(Err::Incomplete(_)) => {
                     self.set_event(NFSEvent::MalformedData);

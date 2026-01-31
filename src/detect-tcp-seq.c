@@ -32,6 +32,7 @@
 #include "detect-engine-prefilter.h"
 #include "detect-engine-prefilter-common.h"
 #include "detect-engine-build.h"
+#include "detect-engine-uint.h"
 
 #include "detect-tcp-seq.h"
 
@@ -59,6 +60,7 @@ void DetectSeqRegister(void)
     sigmatch_table[DETECT_SEQ].Match = DetectSeqMatch;
     sigmatch_table[DETECT_SEQ].Setup = DetectSeqSetup;
     sigmatch_table[DETECT_SEQ].Free = DetectSeqFree;
+    sigmatch_table[DETECT_SEQ].flags = SIGMATCH_INFO_UINT32;
 #ifdef UNITTESTS
     sigmatch_table[DETECT_SEQ].RegisterTests = DetectSeqRegisterTests;
 #endif
@@ -81,14 +83,15 @@ void DetectSeqRegister(void)
 static int DetectSeqMatch(DetectEngineThreadCtx *det_ctx,
                           Packet *p, const Signature *s, const SigMatchCtx *ctx)
 {
-    const DetectSeqData *data = (const DetectSeqData *)ctx;
+    const DetectU32Data *data = (const DetectU32Data *)ctx;
 
+    DEBUG_VALIDATE_BUG_ON(PKT_IS_PSEUDOPKT(p));
     /* This is only needed on TCP packets */
-    if (!(PKT_IS_TCP(p)) || PKT_IS_PSEUDOPKT(p)) {
+    if (!(PacketIsTCP(p))) {
         return 0;
     }
 
-    return (data->seq == TCP_GET_SEQ(p)) ? 1 : 0;
+    return DetectU32Match(TCP_GET_RAW_SEQ(PacketGetTCP(p)), data);
 }
 
 /**
@@ -104,29 +107,17 @@ static int DetectSeqMatch(DetectEngineThreadCtx *det_ctx,
  */
 static int DetectSeqSetup (DetectEngineCtx *de_ctx, Signature *s, const char *optstr)
 {
-    DetectSeqData *data = NULL;
+    DetectU32Data *data = SCDetectU32Parse(optstr);
+    if (data == NULL)
+        return -1;
 
-    data = SCMalloc(sizeof(DetectSeqData));
-    if (unlikely(data == NULL))
-        goto error;
-
-    if (StringParseUint32(&data->seq, 10, 0, optstr) < 0) {
-        goto error;
-    }
-
-    if (SigMatchAppendSMToList(de_ctx, s, DETECT_SEQ, (SigMatchCtx *)data, DETECT_SM_LIST_MATCH) ==
-            NULL) {
-        goto error;
+    if (SCSigMatchAppendSMToList(
+                de_ctx, s, DETECT_SEQ, (SigMatchCtx *)data, DETECT_SM_LIST_MATCH) == NULL) {
+        DetectSeqFree(de_ctx, data);
+        return -1;
     }
     s->flags |= SIG_FLAG_REQUIRE_PACKET;
-
     return 0;
-
-error:
-    if (data)
-        SCFree(data);
-    return -1;
-
 }
 
 /**
@@ -137,8 +128,7 @@ error:
  */
 static void DetectSeqFree(DetectEngineCtx *de_ctx, void *ptr)
 {
-    DetectSeqData *data = (DetectSeqData *)ptr;
-    SCFree(data);
+    SCDetectU32Free(ptr);
 }
 
 /* prefilter code */
@@ -148,51 +138,31 @@ PrefilterPacketSeqMatch(DetectEngineThreadCtx *det_ctx, Packet *p, const void *p
 {
     const PrefilterPacketHeaderCtx *ctx = pectx;
 
+    DEBUG_VALIDATE_BUG_ON(PKT_IS_PSEUDOPKT(p));
     if (!PrefilterPacketHeaderExtraMatch(ctx, p))
         return;
 
-    if ((p->proto) == IPPROTO_TCP && !(PKT_IS_PSEUDOPKT(p)) &&
-        (p->tcph != NULL) && (TCP_GET_SEQ(p) == ctx->v1.u32[0]))
-    {
-        SCLogDebug("packet matches TCP seq %u", ctx->v1.u32[0]);
-        PrefilterAddSids(&det_ctx->pmq, ctx->sigs_array, ctx->sigs_cnt);
+    if (p->proto == IPPROTO_TCP && PacketIsTCP(p)) {
+        DetectU32Data du32;
+        du32.mode = ctx->v1.u8[0];
+        du32.arg1 = ctx->v1.u32[1];
+        du32.arg2 = ctx->v1.u32[2];
+        if (DetectU32Match(TCP_GET_RAW_SEQ(PacketGetTCP(p)), &du32)) {
+            SCLogDebug("packet matches TCP seq %u", ctx->v1.u32[0]);
+            PrefilterAddSids(&det_ctx->pmq, ctx->sigs_array, ctx->sigs_cnt);
+        }
     }
-}
-
-static void
-PrefilterPacketSeqSet(PrefilterPacketHeaderValue *v, void *smctx)
-{
-    const DetectSeqData *a = smctx;
-    v->u32[0] = a->seq;
-}
-
-static bool
-PrefilterPacketSeqCompare(PrefilterPacketHeaderValue v, void *smctx)
-{
-    const DetectSeqData *a = smctx;
-    if (v.u32[0] == a->seq)
-        return true;
-    return false;
 }
 
 static int PrefilterSetupTcpSeq(DetectEngineCtx *de_ctx, SigGroupHead *sgh)
 {
-    return PrefilterSetupPacketHeader(de_ctx, sgh, DETECT_SEQ,
-        PrefilterPacketSeqSet,
-        PrefilterPacketSeqCompare,
-        PrefilterPacketSeqMatch);
+    return PrefilterSetupPacketHeader(de_ctx, sgh, DETECT_SEQ, SIG_MASK_REQUIRE_REAL_PKT,
+            PrefilterPacketU32Set, PrefilterPacketU32Compare, PrefilterPacketSeqMatch);
 }
 
 static bool PrefilterTcpSeqIsPrefilterable(const Signature *s)
 {
-    const SigMatch *sm;
-    for (sm = s->init_data->smlists[DETECT_SM_LIST_MATCH] ; sm != NULL; sm = sm->next) {
-        switch (sm->type) {
-            case DETECT_SEQ:
-                return true;
-        }
-    }
-    return false;
+    return PrefilterIsPrefilterableById(s, DETECT_SEQ);
 }
 
 
@@ -258,10 +228,10 @@ static int DetectSeqSigTest02(void)
         goto end;
 
     /* TCP w/seq=42 */
-    p[0]->tcph->th_seq = htonl(42);
+    p[0]->l4.hdrs.tcph->th_seq = htonl(42);
 
     /* TCP w/seq=100 */
-    p[1]->tcph->th_seq = htonl(100);
+    p[1]->l4.hdrs.tcph->th_seq = htonl(100);
 
     const char *sigs[2];
     sigs[0]= "alert tcp any any -> any any (msg:\"Testing seq\"; seq:41; sid:1;)";

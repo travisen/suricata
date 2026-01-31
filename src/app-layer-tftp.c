@@ -1,4 +1,4 @@
-/* Copyright (C) 2017-2021 Open Information Security Foundation
+/* Copyright (C) 2017-2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -27,17 +27,12 @@
 
 #include "suricata-common.h"
 #include "suricata.h"
-#include "stream.h"
-#include "conf.h"
-
-#include "util-unittest.h"
 
 #include "app-layer.h"
 #include "app-layer-detect-proto.h"
 #include "app-layer-parser.h"
 
 #include "app-layer-tftp.h"
-#include "rust.h"
 
 /* The default port to probe if not provided in the configuration file. */
 #define TFTP_DEFAULT_PORT "69"
@@ -48,12 +43,12 @@
 
 static void *TFTPStateAlloc(void *orig_state, AppProto proto_orig)
 {
-    return rs_tftp_state_alloc();
+    return SCTftpStateAlloc();
 }
 
 static void TFTPStateFree(void *state)
 {
-    rs_tftp_state_free(state);
+    SCTftpStateFree(state);
 }
 
 /**
@@ -64,11 +59,11 @@ static void TFTPStateFree(void *state)
  */
 static void TFTPStateTxFree(void *state, uint64_t tx_id)
 {
-    rs_tftp_state_tx_free(state, tx_id);
+    SCTftpStateTxFree(state, tx_id);
 }
 
-static int TFTPStateGetEventInfo(const char *event_name, int *event_id,
-    AppLayerEventType *event_type)
+static int TFTPStateGetEventInfo(
+        const char *event_name, uint8_t *event_id, AppLayerEventType *event_type)
 {
     return -1;
 }
@@ -79,8 +74,8 @@ static int TFTPStateGetEventInfo(const char *event_name, int *event_id,
  * \retval ALPROTO_TFTP if it looks like tftp, otherwise
  *     ALPROTO_UNKNOWN.
  */
-static AppProto TFTPProbingParser(Flow *f, uint8_t direction,
-        const uint8_t *input, uint32_t input_len, uint8_t *rdir)
+static AppProto TFTPProbingParser(
+        const Flow *f, uint8_t direction, const uint8_t *input, uint32_t input_len, uint8_t *rdir)
 {
     /* Very simple test - if there is input, this is tftp.
      * Also check if it's starting by a zero */
@@ -103,7 +98,7 @@ static AppLayerResult TFTPParseRequest(Flow *f, void *state, AppLayerParserState
 
     /* Likely connection closed, we can just return here. */
     if ((input == NULL || input_len == 0) &&
-        AppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TS)) {
+            SCAppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TS)) {
         SCReturnStruct(APP_LAYER_OK);
     }
 
@@ -113,7 +108,7 @@ static AppLayerResult TFTPParseRequest(Flow *f, void *state, AppLayerParserState
         SCReturnStruct(APP_LAYER_OK);
     }
 
-    int res = rs_tftp_request(state, input, input_len);
+    int64_t res = SCTftpParseRequest(state, input, input_len);
     if (res < 0) {
         SCReturnStruct(APP_LAYER_ERROR);
     }
@@ -131,12 +126,12 @@ static AppLayerResult TFTPParseResponse(Flow *f, void *state, AppLayerParserStat
 
 static uint64_t TFTPGetTxCnt(void *state)
 {
-    return rs_tftp_get_tx_cnt(state);
+    return SCTftpGetTxCnt(state);
 }
 
 static void *TFTPGetTx(void *state, uint64_t tx_id)
 {
-    return rs_tftp_get_tx(state, tx_id);
+    return SCTftpGetTx(state, tx_id);
 }
 
 /**
@@ -163,7 +158,7 @@ void RegisterTFTPParsers(void)
 
     /* Check if TFTP UDP detection is enabled. If it does not exist in
      * the configuration file then it will be enabled by default. */
-    if (AppLayerProtoDetectConfProtoDetectionEnabled("udp", proto_name)) {
+    if (SCAppLayerProtoDetectConfProtoDetectionEnabled("udp", proto_name)) {
 
         SCLogDebug("TFTP UDP protocol detection enabled.");
 
@@ -171,31 +166,25 @@ void RegisterTFTPParsers(void)
 
         if (RunmodeIsUnittests()) {
             SCLogDebug("Unittest mode, registering default configuration.");
-            AppLayerProtoDetectPPRegister(IPPROTO_UDP, TFTP_DEFAULT_PORT,
-                                          ALPROTO_TFTP, 0, TFTP_MIN_FRAME_LEN,
-                                          STREAM_TOSERVER, TFTPProbingParser,
-                                          TFTPProbingParser);
+            SCAppLayerProtoDetectPPRegister(IPPROTO_UDP, TFTP_DEFAULT_PORT, ALPROTO_TFTP, 0,
+                    TFTP_MIN_FRAME_LEN, STREAM_TOSERVER, TFTPProbingParser, TFTPProbingParser);
         } else {
-            if (!AppLayerProtoDetectPPParseConfPorts("udp", IPPROTO_UDP,
-                                                     proto_name, ALPROTO_TFTP,
-                                                     0, TFTP_MIN_FRAME_LEN,
-                                                     TFTPProbingParser, TFTPProbingParser)) {
+            if (!SCAppLayerProtoDetectPPParseConfPorts("udp", IPPROTO_UDP, proto_name, ALPROTO_TFTP,
+                        0, TFTP_MIN_FRAME_LEN, TFTPProbingParser, TFTPProbingParser)) {
                 SCLogDebug("No tftp app-layer configuration, enabling tftp"
                            " detection UDP detection on port %s.",
                         TFTP_DEFAULT_PORT);
-                AppLayerProtoDetectPPRegister(IPPROTO_UDP,
-                                              TFTP_DEFAULT_PORT, ALPROTO_TFTP,
-                                              0, TFTP_MIN_FRAME_LEN,
-                                              STREAM_TOSERVER,TFTPProbingParser,
-                                              TFTPProbingParser);
+                SCAppLayerProtoDetectPPRegister(IPPROTO_UDP, TFTP_DEFAULT_PORT, ALPROTO_TFTP, 0,
+                        TFTP_MIN_FRAME_LEN, STREAM_TOSERVER, TFTPProbingParser, TFTPProbingParser);
             }
         }
+        SCAppLayerParserRegisterLogger(IPPROTO_UDP, ALPROTO_TFTP);
     } else {
         SCLogDebug("Protocol detector and parser disabled for TFTP.");
         return;
     }
 
-    if (AppLayerParserConfParserEnabled("udp", proto_name)) {
+    if (SCAppLayerParserConfParserEnabled("udp", proto_name)) {
 
         SCLogDebug("Registering TFTP protocol parser.");
 
@@ -232,11 +221,9 @@ void RegisterTFTPParsers(void)
         AppLayerParserRegisterGetEventInfo(IPPROTO_UDP, ALPROTO_TFTP,
                                            TFTPStateGetEventInfo);
 
-        AppLayerParserRegisterTxDataFunc(IPPROTO_UDP, ALPROTO_TFTP,
-                                         rs_tftp_get_tx_data);
-        AppLayerParserRegisterStateDataFunc(IPPROTO_UDP, ALPROTO_TFTP, rs_tftp_get_state_data);
-    }
-    else {
+        AppLayerParserRegisterTxDataFunc(IPPROTO_UDP, ALPROTO_TFTP, SCTftpGetTxData);
+        AppLayerParserRegisterStateDataFunc(IPPROTO_UDP, ALPROTO_TFTP, SCTftpGetStateData);
+    } else {
         SCLogDebug("TFTP protocol parsing disabled.");
     }
 }

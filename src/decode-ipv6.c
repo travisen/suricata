@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2013 Open Information Security Foundation
+/* Copyright (C) 2007-2025 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -34,6 +34,7 @@
 #include "decode-ipv6.h"
 #include "decode.h"
 #include "defrag.h"
+#include "flow-hash.h"
 #include "util-print.h"
 #include "util-validate.h"
 
@@ -53,13 +54,12 @@ static void DecodeIPv4inIPv6(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p, c
         if (tp != NULL) {
             PKT_SET_SRC(tp, PKT_SRC_DECODER_IPV6);
             PacketEnqueueNoLock(&tv->decode_pq,tp);
-            StatsIncr(tv, dtv->counter_ipv4inipv6);
-            return;
+            StatsCounterIncr(&tv->stats, dtv->counter_ipv4inipv6);
         }
+        FlowSetupPacket(p);
     } else {
-        ENGINE_SET_EVENT(p, IPV4_IN_IPV6_WRONG_IP_VER);
+        ENGINE_SET_INVALID_EVENT(p, IPV4_IN_IPV6_WRONG_IP_VER);
     }
-    return;
 }
 
 /**
@@ -79,10 +79,11 @@ static int DecodeIP6inIP6(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
         if (tp != NULL) {
             PKT_SET_SRC(tp, PKT_SRC_DECODER_IPV6);
             PacketEnqueueNoLock(&tv->decode_pq,tp);
-            StatsIncr(tv, dtv->counter_ipv6inipv6);
+            StatsCounterIncr(&tv->stats, dtv->counter_ipv6inipv6);
         }
+        FlowSetupPacket(p);
     } else {
-        ENGINE_SET_EVENT(p, IPV6_IN_IPV6_WRONG_IP_VER);
+        ENGINE_SET_INVALID_EVENT(p, IPV6_IN_IPV6_WRONG_IP_VER);
     }
     return TM_ECODE_OK;
 }
@@ -97,47 +98,44 @@ void DecodeIPV6FragHeader(Packet *p, const uint8_t *pkt,
     uint16_t frag_offset = (*(pkt + 2) << 8 | *(pkt + 3)) & 0xFFF8;
     int frag_morefrags   = (*(pkt + 2) << 8 | *(pkt + 3)) & 0x0001;
 
-    p->ip6eh.fh_offset = frag_offset;
-    p->ip6eh.fh_more_frags_set = frag_morefrags ? true : false;
-    p->ip6eh.fh_nh = *pkt;
+    p->l3.vars.ip6.eh.fh_offset = frag_offset;
+    p->l3.vars.ip6.eh.fh_more_frags_set = frag_morefrags ? true : false;
+    p->l3.vars.ip6.eh.fh_nh = *pkt;
 
     uint32_t fh_id;
     memcpy(&fh_id, pkt+4, 4);
-    p->ip6eh.fh_id = SCNtohl(fh_id);
+    p->l3.vars.ip6.eh.fh_id = SCNtohl(fh_id);
 
-    SCLogDebug("IPV6 FH: offset %u, mf %s, nh %u, id %u/%x",
-            p->ip6eh.fh_offset,
-            p->ip6eh.fh_more_frags_set ? "true" : "false",
-            p->ip6eh.fh_nh,
-            p->ip6eh.fh_id, p->ip6eh.fh_id);
+    SCLogDebug("IPV6 FH: offset %u, mf %s, nh %u, id %u/%x", p->l3.vars.ip6.eh.fh_offset,
+            p->l3.vars.ip6.eh.fh_more_frags_set ? "true" : "false", p->l3.vars.ip6.eh.fh_nh,
+            p->l3.vars.ip6.eh.fh_id, p->l3.vars.ip6.eh.fh_id);
 
     // store header offset, data offset
     uint16_t frag_hdr_offset = (uint16_t)(pkt - GET_PKT_DATA(p));
     uint16_t data_offset = (uint16_t)(frag_hdr_offset + hdrextlen);
     uint16_t data_len = plen - hdrextlen;
 
-    p->ip6eh.fh_header_offset = frag_hdr_offset;
-    p->ip6eh.fh_data_offset = data_offset;
-    p->ip6eh.fh_data_len = data_len;
+    p->l3.vars.ip6.eh.fh_header_offset = frag_hdr_offset;
+    p->l3.vars.ip6.eh.fh_data_offset = data_offset;
+    p->l3.vars.ip6.eh.fh_data_len = data_len;
 
     /* if we have a prev hdr, store the type and offset of it */
     if (prev_hdrextlen) {
-        p->ip6eh.fh_prev_hdr_offset = frag_hdr_offset - prev_hdrextlen;
+        p->l3.vars.ip6.eh.fh_prev_hdr_offset = frag_hdr_offset - prev_hdrextlen;
     }
 
     SCLogDebug("IPV6 FH: frag_hdr_offset %u, data_offset %u, data_len %u",
-            p->ip6eh.fh_header_offset, p->ip6eh.fh_data_offset,
-            p->ip6eh.fh_data_len);
+            p->l3.vars.ip6.eh.fh_header_offset, p->l3.vars.ip6.eh.fh_data_offset,
+            p->l3.vars.ip6.eh.fh_data_len);
 }
 
-static void
-DecodeIPV6ExtHdrs(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
+static void DecodeIPV6ExtHdrs(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p, const IPV6Hdr *ip6h,
         const uint8_t *pkt, uint16_t len)
 {
     SCEnter();
 
     const uint8_t *orig_pkt = pkt;
-    uint8_t nh = IPV6_GET_NH(p); /* careful, 0 is actually a real type */
+    uint8_t nh = IPV6_GET_RAW_NH(ip6h); /* careful, 0 is actually a real type */
     uint16_t hdrextlen = 0;
     uint16_t plen = len;
     char dstopts = 0;
@@ -213,7 +211,7 @@ DecodeIPV6ExtHdrs(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
                 if (ip6rh_type == 0) {
                     ENGINE_SET_EVENT(p, IPV6_EXTHDR_RH_TYPE_0);
                 }
-                p->ip6eh.rh_type = ip6rh_type;
+                p->l3.vars.ip6.eh.rh_type = ip6rh_type;
 
                 nh = *pkt;
                 pkt += hdrextlen;
@@ -314,14 +312,12 @@ DecodeIPV6ExtHdrs(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
 
                     if (*ptr == IPV6OPT_PADN) /* PadN */
                     {
-                        //printf("PadN option\n");
                         padn_cnt++;
 
                         /* a zero padN len would be weird */
                         if (ip6_optlen == 0)
                             ENGINE_SET_EVENT(p, IPV6_EXTHDR_ZERO_LEN_PADN);
-                    }
-                    else if (*ptr == IPV6OPT_RA) /* RA */
+                    } else if (*ptr == IPV6OPT_RA) /* RA */
                     {
                         ra->ip6ra_type = *(ptr);
                         ra->ip6ra_len  = ip6_optlen;
@@ -333,11 +329,8 @@ DecodeIPV6ExtHdrs(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
 
                         memcpy(&ra->ip6ra_value, (ptr + 2), sizeof(ra->ip6ra_value));
                         ra->ip6ra_value = SCNtohs(ra->ip6ra_value);
-                        //printf("RA option: type %" PRIu32 " len %" PRIu32 " value %" PRIu32 "\n",
-                        //    ra->ip6ra_type, ra->ip6ra_len, ra->ip6ra_value);
                         other_cnt++;
-                    }
-                    else if (*ptr == IPV6OPT_JUMBO) /* Jumbo */
+                    } else if (*ptr == IPV6OPT_JUMBO) /* Jumbo */
                     {
                         jumbo->ip6j_type = *(ptr);
                         jumbo->ip6j_len  = ip6_optlen;
@@ -349,10 +342,7 @@ DecodeIPV6ExtHdrs(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
 
                         memcpy(&jumbo->ip6j_payload_len, (ptr+2), sizeof(jumbo->ip6j_payload_len));
                         jumbo->ip6j_payload_len = SCNtohl(jumbo->ip6j_payload_len);
-                        //printf("Jumbo option: type %" PRIu32 " len %" PRIu32 " payload len %" PRIu32 "\n",
-                        //    jumbo->ip6j_type, jumbo->ip6j_len, jumbo->ip6j_payload_len);
-                    }
-                    else if (*ptr == IPV6OPT_HAO) /* HAO */
+                    } else if (*ptr == IPV6OPT_HAO) /* HAO */
                     {
                         hao->ip6hao_type = *(ptr);
                         hao->ip6hao_len  = ip6_optlen;
@@ -362,13 +352,7 @@ DecodeIPV6ExtHdrs(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
                             break;
                         }
 
-                        memcpy(&hao->ip6hao_hoa, (ptr+2), sizeof(hao->ip6hao_hoa));
-                        //printf("HAO option: type %" PRIu32 " len %" PRIu32 " ",
-                        //    hao->ip6hao_type, hao->ip6hao_len);
-                        //char addr_buf[46];
-                        //PrintInet(AF_INET6, (char *)&(hao->ip6hao_hoa),
-                        //    addr_buf,sizeof(addr_buf));
-                        //printf("home addr %s\n", addr_buf);
+                        memcpy(&hao->ip6hao_hoa, (ptr + 2), sizeof(hao->ip6hao_hoa));
                         other_cnt++;
                     } else {
                         if (nh == IPPROTO_HOPOPTS)
@@ -404,7 +388,7 @@ DecodeIPV6ExtHdrs(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
                  * a defragmented packet without the frag header */
                 if (exthdr_fh_done == 0) {
                     DEBUG_VALIDATE_BUG_ON(pkt - orig_pkt > UINT16_MAX);
-                    p->ip6eh.fh_offset = (uint16_t)(pkt - orig_pkt);
+                    p->l3.vars.ip6.eh.fh_offset = (uint16_t)(pkt - orig_pkt);
                     exthdr_fh_done = 1;
                 }
 
@@ -439,7 +423,7 @@ DecodeIPV6ExtHdrs(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
                  * parse this packet further right away, no defrag will be
                  * needed. It is a useless FH then though, so we do set an
                  * decoder event. */
-                if (p->ip6eh.fh_more_frags_set == 0 && p->ip6eh.fh_offset == 0) {
+                if (p->l3.vars.ip6.eh.fh_more_frags_set == 0 && p->l3.vars.ip6.eh.fh_offset == 0) {
                     ENGINE_SET_EVENT(p, IPV6_EXTHDR_USELESS_FH);
 
                     nh = *pkt;
@@ -447,7 +431,7 @@ DecodeIPV6ExtHdrs(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
                     plen -= hdrextlen;
                     break;
                 }
-                if (p->ip6eh.fh_more_frags_set != 0 && plen % 8 != 0) {
+                if (p->l3.vars.ip6.eh.fh_more_frags_set != 0 && plen % 8 != 0) {
                     // cf https://datatracker.ietf.org/doc/html/rfc2460#section-4.5
                     // each, except possibly the last ("rightmost") one,
                     // being an integer multiple of 8 octets long.
@@ -535,46 +519,47 @@ DecodeIPV6ExtHdrs(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p,
     SCReturn;
 }
 
-static int DecodeIPV6Packet (ThreadVars *tv, DecodeThreadVars *dtv, Packet *p, const uint8_t *pkt, uint16_t len)
+static const IPV6Hdr *DecodeIPV6Packet(
+        ThreadVars *tv, DecodeThreadVars *dtv, Packet *p, const uint8_t *pkt, uint16_t len)
 {
     if (unlikely(len < IPV6_HEADER_LEN)) {
-        return -1;
+        ENGINE_SET_INVALID_EVENT(p, IPV6_PKT_TOO_SMALL);
+        return NULL;
     }
 
     if (unlikely(IP_GET_RAW_VER(pkt) != 6)) {
         SCLogDebug("wrong ip version %d",IP_GET_RAW_VER(pkt));
         ENGINE_SET_INVALID_EVENT(p, IPV6_WRONG_IP_VER);
-        return -1;
+        return NULL;
     }
 
-    p->ip6h = (IPV6Hdr *)pkt;
+    const IPV6Hdr *ip6h = PacketSetIPV6(p, pkt);
 
-    if (unlikely(len < (IPV6_HEADER_LEN + IPV6_GET_PLEN(p))))
-    {
+    if (unlikely(len < (IPV6_HEADER_LEN + IPV6_GET_RAW_PLEN(ip6h)))) {
         ENGINE_SET_INVALID_EVENT(p, IPV6_TRUNC_PKT);
-        return -1;
+        return NULL;
     }
 
-    SET_IPV6_SRC_ADDR(p,&p->src);
-    SET_IPV6_DST_ADDR(p,&p->dst);
+    SET_IPV6_SRC_ADDR(ip6h, &p->src);
+    SET_IPV6_DST_ADDR(ip6h, &p->dst);
 
-    return 0;
+    return ip6h;
 }
 
 int DecodeIPV6(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p, const uint8_t *pkt, uint16_t len)
 {
-    StatsIncr(tv, dtv->counter_ipv6);
+    StatsCounterIncr(&tv->stats, dtv->counter_ipv6);
 
     if (!PacketIncreaseCheckLayers(p)) {
         return TM_ECODE_FAILED;
     }
     /* do the actual decoding */
-    int ret = DecodeIPV6Packet (tv, dtv, p, pkt, len);
-    if (unlikely(ret < 0)) {
-        CLEAR_IPV6_PACKET(p);
+    const IPV6Hdr *ip6h = DecodeIPV6Packet(tv, dtv, p, pkt, len);
+    if (unlikely(ip6h == NULL)) {
+        PacketClearL3(p);
         return TM_ECODE_FAILED;
     }
-    p->proto = IPV6_GET_NH(p);
+    p->proto = IPV6_GET_RAW_NH(ip6h);
 
 #ifdef DEBUG
     if (SCLogDebugEnabled()) { /* only convert the addresses if debug is really enabled */
@@ -582,40 +567,43 @@ int DecodeIPV6(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p, const uint8_t *
         char s[46], d[46];
         PrintInet(AF_INET6, (const void *)GET_IPV6_SRC_ADDR(p), s, sizeof(s));
         PrintInet(AF_INET6, (const void *)GET_IPV6_DST_ADDR(p), d, sizeof(d));
-        SCLogDebug("IPV6 %s->%s - CLASS: %" PRIu32 " FLOW: %" PRIu32 " NH: %" PRIu32 " PLEN: %" PRIu32 " HLIM: %" PRIu32 "", s,d,
-                IPV6_GET_CLASS(p), IPV6_GET_FLOW(p), IPV6_GET_NH(p), IPV6_GET_PLEN(p),
-                IPV6_GET_HLIM(p));
+        SCLogDebug("IPV6 %s->%s - CLASS: %" PRIu32 " FLOW: %" PRIu32 " NH: %" PRIu32
+                   " PLEN: %" PRIu32 " HLIM: %" PRIu32 "",
+                s, d, IPV6_GET_RAW_CLASS(ip6h), IPV6_GET_RAW_FLOW(ip6h), IPV6_GET_RAW_NH(ip6h),
+                IPV6_GET_RAW_PLEN(ip6h), IPV6_GET_RAW_HLIM(ip6h));
     }
 #endif /* DEBUG */
+    const uint8_t *data = pkt + IPV6_HEADER_LEN;
+    const uint16_t data_len = IPV6_GET_RAW_PLEN(ip6h);
 
     /* now process the Ext headers and/or the L4 Layer */
-    switch(IPV6_GET_NH(p)) {
+    switch (IPV6_GET_RAW_NH(ip6h)) {
         case IPPROTO_TCP:
             IPV6_SET_L4PROTO (p, IPPROTO_TCP);
-            DecodeTCP(tv, dtv, p, pkt + IPV6_HEADER_LEN, IPV6_GET_PLEN(p));
+            DecodeTCP(tv, dtv, p, data, data_len);
             return TM_ECODE_OK;
         case IPPROTO_UDP:
             IPV6_SET_L4PROTO (p, IPPROTO_UDP);
-            DecodeUDP(tv, dtv, p, pkt + IPV6_HEADER_LEN, IPV6_GET_PLEN(p));
+            DecodeUDP(tv, dtv, p, data, data_len);
             return TM_ECODE_OK;
         case IPPROTO_ICMPV6:
             IPV6_SET_L4PROTO (p, IPPROTO_ICMPV6);
-            DecodeICMPV6(tv, dtv, p, pkt + IPV6_HEADER_LEN, IPV6_GET_PLEN(p));
+            DecodeICMPV6(tv, dtv, p, data, data_len);
             return TM_ECODE_OK;
         case IPPROTO_SCTP:
             IPV6_SET_L4PROTO (p, IPPROTO_SCTP);
-            DecodeSCTP(tv, dtv, p, pkt + IPV6_HEADER_LEN, IPV6_GET_PLEN(p));
+            DecodeSCTP(tv, dtv, p, data, data_len);
             return TM_ECODE_OK;
         case IPPROTO_IPIP:
             IPV6_SET_L4PROTO(p, IPPROTO_IPIP);
-            DecodeIPv4inIPv6(tv, dtv, p, pkt + IPV6_HEADER_LEN, IPV6_GET_PLEN(p));
+            DecodeIPv4inIPv6(tv, dtv, p, data, data_len);
             return TM_ECODE_OK;
         case IPPROTO_IPV6:
-            DecodeIP6inIP6(tv, dtv, p, pkt + IPV6_HEADER_LEN, IPV6_GET_PLEN(p));
+            DecodeIP6inIP6(tv, dtv, p, data, data_len);
             return TM_ECODE_OK;
         case IPPROTO_GRE:
             IPV6_SET_L4PROTO(p, IPPROTO_GRE);
-            DecodeGRE(tv, dtv, p, pkt + IPV6_HEADER_LEN, IPV6_GET_PLEN(p));
+            DecodeGRE(tv, dtv, p, data, data_len);
             break;
         case IPPROTO_FRAGMENT:
         case IPPROTO_HOPOPTS:
@@ -627,14 +615,14 @@ int DecodeIPV6(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p, const uint8_t *
         case IPPROTO_MH:
         case IPPROTO_HIP:
         case IPPROTO_SHIM6:
-            DecodeIPV6ExtHdrs(tv, dtv, p, pkt + IPV6_HEADER_LEN, IPV6_GET_PLEN(p));
+            DecodeIPV6ExtHdrs(tv, dtv, p, ip6h, data, data_len);
             break;
         case IPPROTO_ICMP:
             ENGINE_SET_EVENT(p,IPV6_WITH_ICMPV4);
             break;
         default:
             ENGINE_SET_EVENT(p, IPV6_UNKNOWN_NEXT_HEADER);
-            IPV6_SET_L4PROTO (p, IPV6_GET_NH(p));
+            IPV6_SET_L4PROTO(p, IPV6_GET_RAW_NH(ip6h));
             break;
     }
     p->proto = IPV6_GET_L4PROTO (p);
@@ -768,7 +756,7 @@ static int DecodeIPV6FragTest01 (void)
         return 0;
     Packet *p2 = PacketGetFromAlloc();
     if (unlikely(p2 == NULL)) {
-        SCFree(p1);
+        PacketFree(p1);
         return 0;
     }
     ThreadVars tv;
@@ -807,12 +795,12 @@ static int DecodeIPV6FragTest01 (void)
 end:
     PacketRecycle(p1);
     PacketRecycle(p2);
-    SCFree(p1);
-    SCFree(p2);
+    PacketFree(p1);
+    PacketFree(p2);
     pkt = PacketDequeueNoLock(&tv.decode_pq);
     while (pkt != NULL) {
         PacketRecycle(pkt);
-        SCFree(pkt);
+        PacketFree(pkt);
         pkt = PacketDequeueNoLock(&tv.decode_pq);
     }
     DefragDestroy();
@@ -852,9 +840,9 @@ static int DecodeIPV6RouteTest01 (void)
     DecodeIPV6(&tv, &dtv, p1, GET_PKT_DATA(p1), GET_PKT_LEN(p1));
 
     FAIL_IF (!(IPV6_EXTHDR_ISSET_RH(p1)));
-    FAIL_IF (p1->ip6eh.rh_type != 0);
+    FAIL_IF(p1->l3.vars.ip6.eh.rh_type != 0);
     PacketRecycle(p1);
-    SCFree(p1);
+    PacketFree(p1);
     FlowShutdown();
     PASS;
 }
@@ -887,7 +875,40 @@ static int DecodeIPV6HopTest01 (void)
     FAIL_IF (!(ENGINE_ISSET_EVENT(p1, IPV6_HOPOPTS_UNKNOWN_OPT)));
 
     PacketRecycle(p1);
-    SCFree(p1);
+    PacketFree(p1);
+    FlowShutdown();
+    PASS;
+}
+
+/**
+ * \test pkt too small event setting
+ */
+static int DecodeIPV6PktTooSmallTest01(void)
+{
+    uint8_t raw_pkt1[] = { 0x60, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00, 0x01, 0xfe, 0x80, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x02, 0x0f, 0xfe, 0xff, 0xfe, 0x98, 0x3d, 0x01, 0xff, 0x02, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x3a, 0x00,
+        0xff, /* 0xff is a nonsense opt */
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x82, 0x00, 0x1c, 0x6f, 0x27, 0x10, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    Packet *p1 = PacketGetFromAlloc();
+    FAIL_IF(unlikely(p1 == NULL));
+    ThreadVars tv;
+    DecodeThreadVars dtv;
+
+    FlowInitConfig(FLOW_QUIET);
+
+    memset(&tv, 0, sizeof(ThreadVars));
+    memset(&dtv, 0, sizeof(DecodeThreadVars));
+
+    PacketCopyData(p1, raw_pkt1, sizeof(raw_pkt1));
+
+    /* force pkt length to be shorter than headers length */
+    DecodeIPV6(&tv, &dtv, p1, GET_PKT_DATA(p1), GET_PKT_LEN(p1) - 33);
+
+    FAIL_IF_NOT(ENGINE_ISSET_EVENT(p1, IPV6_PKT_TOO_SMALL));
+    PacketRecycle(p1);
+    PacketFree(p1);
     FlowShutdown();
     PASS;
 }
@@ -904,6 +925,7 @@ void DecodeIPV6RegisterTests(void)
     UtRegisterTest("DecodeIPV6FragTest01", DecodeIPV6FragTest01);
     UtRegisterTest("DecodeIPV6RouteTest01", DecodeIPV6RouteTest01);
     UtRegisterTest("DecodeIPV6HopTest01", DecodeIPV6HopTest01);
+    UtRegisterTest("DecodeIPV6PktTooSmallTest01", DecodeIPV6PktTooSmallTest01);
 #endif /* UNITTESTS */
 }
 

@@ -18,30 +18,16 @@
 //! Module for bindings to the Suricata C frame API.
 
 use crate::applayer::StreamSlice;
-use crate::core::Flow;
 #[cfg(not(test))]
 use crate::core::STREAM_TOSERVER;
-use crate::core::Direction;
+use crate::direction::Direction;
+use crate::flow::Flow;
 
 #[cfg(not(test))]
-#[repr(C)]
-struct CFrame {
-    _private: [u8; 0],
-}
-
-// Defined in app-layer-register.h
-extern {
-    #[cfg(not(test))]
-    fn AppLayerFrameNewByRelativeOffset(
-        flow: *const Flow, stream_slice: *const StreamSlice, frame_start_rel: u32, len: i64,
-        dir: i32, frame_type: u8,
-    ) -> *const CFrame;
-    fn AppLayerFrameAddEventById(flow: *const Flow, dir: i32, id: i64, event: u8);
-    fn AppLayerFrameSetLengthById(flow: *const Flow, dir: i32, id: i64, len: i64);
-    fn AppLayerFrameSetTxIdById(flow: *const Flow, dir: i32, id: i64, tx_id: u64);
-    #[cfg(not(test))]
-    fn AppLayerFrameGetId(frame: *const CFrame) -> i64;
-}
+use std::os::raw::c_void;
+#[cfg(not(test))]
+use suricata_sys::sys::{SCAppLayerFrameNewByRelativeOffset, SCAppLayerFrameSetTxIdById};
+use suricata_sys::sys::{SCAppLayerFrameAddEventById, SCAppLayerFrameSetLengthById};
 
 pub struct Frame {
     pub id: i64,
@@ -58,27 +44,38 @@ impl Frame {
     #[cfg(not(test))]
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn new(
-        flow: *const Flow, stream_slice: &StreamSlice, frame_start: &[u8], frame_len: i64,
-        frame_type: u8,
+        flow: *mut Flow, stream_slice: &StreamSlice, frame_start: &[u8], frame_len: i64,
+        frame_type: u8, tx_id: Option<u64>,
     ) -> Option<Self> {
         let offset = frame_start.as_ptr() as usize - stream_slice.as_slice().as_ptr() as usize;
-        SCLogDebug!("offset {} stream_slice.len() {} frame_start.len() {}", offset, stream_slice.len(), frame_start.len());
+        SCLogDebug!(
+            "offset {} stream_slice.len() {} frame_start.len() {}",
+            offset,
+            stream_slice.len(),
+            frame_start.len()
+        );
         let frame = unsafe {
-            AppLayerFrameNewByRelativeOffset(
+            SCAppLayerFrameNewByRelativeOffset(
                 flow,
-                stream_slice,
+                stream_slice as *const _ as *const c_void,
                 offset as u32,
                 frame_len,
                 (stream_slice.flags() & STREAM_TOSERVER == 0).into(),
                 frame_type,
             )
         };
-        let id = unsafe { AppLayerFrameGetId(frame) };
-        if id > 0 {
-            Some(Self {
+        if !frame.is_null() {
+            let id = unsafe { (*frame).id };
+            let r = Self {
                 id,
                 direction: Direction::from(stream_slice.flags()),
-            })
+            };
+            if let Some(tx_id) = tx_id {
+                unsafe {
+                    SCAppLayerFrameSetTxIdById(flow, r.direction(), id, tx_id);
+                };
+            }
+            Some(r)
         } else {
             None
         }
@@ -90,7 +87,7 @@ impl Frame {
     #[cfg(test)]
     pub fn new(
         _flow: *const Flow, _stream_slice: &StreamSlice, _frame_start: &[u8], _frame_len: i64,
-        _frame_type: u8,
+        _frame_type: u8, _tx_id: Option<u64>,
     ) -> Option<Self> {
         None
     }
@@ -108,21 +105,28 @@ impl Frame {
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn set_len(&self, flow: *const Flow, len: i64) {
         unsafe {
-            AppLayerFrameSetLengthById(flow, self.direction(), self.id, len);
+            SCAppLayerFrameSetLengthById(flow, self.direction(), self.id, len);
         };
     }
 
+    #[cfg(not(test))]
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn set_tx(&self, flow: *const Flow, tx_id: u64) {
         unsafe {
-            AppLayerFrameSetTxIdById(flow, self.direction(), self.id, tx_id);
+            SCAppLayerFrameSetTxIdById(flow, self.direction(), self.id, tx_id);
         };
     }
+
+    /// A variation of `set_tx` for use when running Rust unit tests as
+    /// the C functions for building a frame are not available for
+    /// linkage.
+    #[cfg(test)]
+    pub fn set_tx(&self, _flow: *const Flow, _tx_id: u64) {}
 
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn add_event(&self, flow: *const Flow, event: u8) {
         unsafe {
-            AppLayerFrameAddEventById(flow, self.direction(), self.id, event);
+            SCAppLayerFrameAddEventById(flow, self.direction(), self.id, event);
         };
     }
 }

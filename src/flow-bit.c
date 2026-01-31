@@ -55,19 +55,25 @@ static FlowBit *FlowBitGet(Flow *f, uint32_t idx)
     return NULL;
 }
 
-/* add a flowbit to the flow */
-static void FlowBitAdd(Flow *f, uint32_t idx)
+/** \brief add a flowbit to the flow
+ *  \retval -1 error
+ *  \retval 0 not added, already set before
+ *  \retval 1 added */
+static int FlowBitAdd(Flow *f, uint32_t idx)
 {
     FlowBit *fb = FlowBitGet(f, idx);
     if (fb == NULL) {
         fb = SCMalloc(sizeof(FlowBit));
         if (unlikely(fb == NULL))
-            return;
+            return -1;
 
         fb->type = DETECT_FLOWBITS;
         fb->idx = idx;
         fb->next = NULL;
         GenericVarAppend(&f->flowvar, (GenericVar *)fb);
+        return 1;
+    } else {
+        return 0;
     }
 }
 
@@ -81,9 +87,13 @@ static void FlowBitRemove(Flow *f, uint32_t idx)
     FlowBitFree(fb);
 }
 
-void FlowBitSet(Flow *f, uint32_t idx)
+/** \brief add a flowbit to the flow
+ *  \retval -1 error
+ *  \retval 0 not added, already set before
+ *  \retval 1 added */
+int FlowBitSet(Flow *f, uint32_t idx)
 {
-    FlowBitAdd(f, idx);
+    return FlowBitAdd(f, idx);
 }
 
 void FlowBitUnset(Flow *f, uint32_t idx)
@@ -91,13 +101,18 @@ void FlowBitUnset(Flow *f, uint32_t idx)
     FlowBitRemove(f, idx);
 }
 
-void FlowBitToggle(Flow *f, uint32_t idx)
+/**
+ * \retval bool true if bit is set, false is unset
+ */
+bool FlowBitToggle(Flow *f, uint32_t idx)
 {
     FlowBit *fb = FlowBitGet(f, idx);
     if (fb != NULL) {
         FlowBitRemove(f, idx);
+        return false;
     } else {
         FlowBitAdd(f, idx);
+        return true;
     }
 }
 
@@ -146,7 +161,7 @@ static int FlowBitTest01 (void)
     FlowBit *fb = FlowBitGet(&f, 0);
     FAIL_IF_NULL(fb);
 
-    GenericVarFree(f.flowvar);
+    SCGenericVarFree(f.flowvar);
     PASS;
 }
 
@@ -158,7 +173,7 @@ static int FlowBitTest02 (void)
     FlowBit *fb = FlowBitGet(&f, 0);
     FAIL_IF_NOT_NULL(fb);
 
-    GenericVarFree(f.flowvar);
+    SCGenericVarFree(f.flowvar);
     PASS;
 }
 
@@ -177,7 +192,7 @@ static int FlowBitTest03 (void)
     fb = FlowBitGet(&f, 0);
     FAIL_IF_NOT_NULL(fb);
 
-    GenericVarFree(f.flowvar);
+    SCGenericVarFree(f.flowvar);
     PASS;
 }
 
@@ -194,7 +209,7 @@ static int FlowBitTest04 (void)
     FlowBit *fb = FlowBitGet(&f, 0);
     FAIL_IF_NULL(fb);
 
-    GenericVarFree(f.flowvar);
+    SCGenericVarFree(f.flowvar);
     PASS;
 }
 
@@ -211,7 +226,7 @@ static int FlowBitTest05 (void)
     FlowBit *fb = FlowBitGet(&f, 1);
     FAIL_IF_NULL(fb);
 
-    GenericVarFree(f.flowvar);
+    SCGenericVarFree(f.flowvar);
     PASS;
 }
 
@@ -228,7 +243,7 @@ static int FlowBitTest06 (void)
     FlowBit *fb = FlowBitGet(&f, 2);
     FAIL_IF_NULL(fb);
 
-    GenericVarFree(f.flowvar);
+    SCGenericVarFree(f.flowvar);
     PASS;
 }
 
@@ -245,7 +260,7 @@ static int FlowBitTest07 (void)
     FlowBit *fb = FlowBitGet(&f, 3);
     FAIL_IF_NULL(fb);
 
-    GenericVarFree(f.flowvar);
+    SCGenericVarFree(f.flowvar);
     PASS;
 }
 
@@ -267,7 +282,7 @@ static int FlowBitTest08 (void)
     fb = FlowBitGet(&f, 0);
     FAIL_IF_NOT_NULL(fb);
 
-    GenericVarFree(f.flowvar);
+    SCGenericVarFree(f.flowvar);
     PASS;
 }
 
@@ -289,7 +304,7 @@ static int FlowBitTest09 (void)
     fb = FlowBitGet(&f, 1);
     FAIL_IF_NOT_NULL(fb);
 
-    GenericVarFree(f.flowvar);
+    SCGenericVarFree(f.flowvar);
     PASS;
 }
 
@@ -311,7 +326,7 @@ static int FlowBitTest10 (void)
     fb = FlowBitGet(&f, 2);
     FAIL_IF_NOT_NULL(fb);
 
-    GenericVarFree(f.flowvar);
+    SCGenericVarFree(f.flowvar);
     PASS;
 }
 
@@ -333,7 +348,7 @@ static int FlowBitTest11 (void)
     fb = FlowBitGet(&f, 3);
     FAIL_IF_NOT_NULL(fb);
 
-    GenericVarFree(f.flowvar);
+    SCGenericVarFree(f.flowvar);
     PASS;
 }
 

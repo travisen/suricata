@@ -1,4 +1,4 @@
-const char configNoChecksum[] = "\
+const char *configNoChecksum = "\
 %YAML 1.1\n\
 ---\n\
 pcap-file:\n\
@@ -9,6 +9,8 @@ stream:\n\
 \n\
   checksum-validation: no\n\
   midstream: true\n\
+  reassembly:\n\
+    depth: 16 MiB\n\
 outputs:\n\
   - fast:\n\
       enabled: yes\n\
@@ -31,6 +33,7 @@ outputs:\n\
             http-body: yes\n\
             http-body-printable: yes\n\
             tagged-packets: yes\n\
+            verdict: yes\n\
         - anomaly:\n\
             enabled: yes\n\
             types:\n\
@@ -81,11 +84,19 @@ outputs:\n\
       force-filestore: yes\n\
 app-layer:\n\
   protocols:\n\
+    http:\n\
+      enabled: yes\n\
+      libhtp:\n\
+         default-config:\n\
+           response-body-limit: 4 MiB\n\
+           swf-decompression:\n\
+             enabled: yes\n\
+             type: both\n\
+             compress-depth: 2 MiB\n\
+             decompress-depth: 2 MiB\n\
     rdp:\n\
       enabled: yes\n\
     template:\n\
-      enabled: yes\n\
-    template-rust:\n\
       enabled: yes\n\
     modbus:\n\
       enabled: yes\n\
@@ -112,4 +123,10 @@ app-layer:\n\
       enabled: yes\n\
     quic:\n\
       enabled: yes\n\
+detect:\n\
+  inspection-recursion-limit: 0\n\
+datasets:\n\
+  maximums:\n\
+    single_hashsize: 65536\n\
+    total_hashsizes: 16777216\n\
 ";

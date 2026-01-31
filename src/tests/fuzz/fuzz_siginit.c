@@ -10,11 +10,15 @@
 #include "util-classification-config.h"
 #include "detect-engine.h"
 #include "detect-parse.h"
+#include "app-layer.h"
+#include "nallocinc.c"
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 
 static uint32_t cnt = 0;
 DetectEngineCtx *de_ctx = NULL;
+static int initialized = 0;
+SC_ATOMIC_EXTERN(unsigned int, engine_stage);
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
@@ -23,11 +27,20 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         setenv("SC_LOG_FILE", "/dev/null", 0);
         //global init
         InitGlobal();
-        run_mode = RUNMODE_UNITTEST;
+        GlobalsInitPreConfig();
+        SCRunmodeSet(RUNMODE_UNITTEST);
         MpmTableSetup();
         SpmTableSetup();
         EngineModeSetIDS();
+        SigTableInit();
+        AppLayerSetup();
         SigTableSetup();
+        if (initialized == 0) {
+            nalloc_init(NULL);
+            nalloc_restrict_file_prefix(3);
+            SC_ATOMIC_SET(engine_stage, SURICATA_RUNTIME);
+            initialized = 1;
+        }
     }
     if (cnt++ == 1024) {
         DetectEngineCtxFree(de_ctx);
@@ -46,6 +59,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         memcpy(buffer, data, size);
         //null terminate string
         buffer[size] = 0;
+        nalloc_start(data, size);
         Signature *s = SigInit(de_ctx, buffer);
         free(buffer);
         if (s && s->next) {
@@ -53,6 +67,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             s->next = NULL;
         }
         SigFree(de_ctx, s);
+        nalloc_end();
     }
 
     return 0;

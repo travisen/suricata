@@ -64,9 +64,6 @@
 
 #include "flow-util.h"
 
-/** convert enum to string */
-#define CASE_CODE(E)  case E: return #E
-
 static inline int StateIsValid(uint16_t alproto, void *alstate)
 {
     if (alstate != NULL) {
@@ -127,7 +124,7 @@ static void DeStateSignatureAppend(DetectEngineState *state,
             &state->dir_state[(direction & STREAM_TOSERVER) ? 0 : 1];
 
 #ifdef DEBUG_VALIDATION
-    BUG_ON(DeStateSearchState(state, direction, s->num));
+    BUG_ON(DeStateSearchState(state, direction, s->iid));
 #endif
     DeStateStore *store = dir_state->tail;
     if (store == NULL) {
@@ -149,7 +146,7 @@ static void DeStateSignatureAppend(DetectEngineState *state,
         SCReturn;
 
     SigIntId idx = dir_state->cnt % DE_STATE_CHUNK_SIZE;
-    store->store[idx].sid = s->num;
+    store->store[idx].sid = s->iid;
     store->store[idx].flags = inspect_flags;
     dir_state->cnt++;
     /* if current chunk is full, progress cur */
@@ -169,7 +166,7 @@ DetectEngineState *DetectEngineStateAlloc(void)
     return d;
 }
 
-void DetectEngineStateFree(DetectEngineState *state)
+void SCDetectEngineStateFree(DetectEngineState *state)
 {
     DeStateStore *store;
     DeStateStore *store_next;
@@ -184,15 +181,11 @@ void DetectEngineStateFree(DetectEngineState *state)
         }
     }
     SCFree(state);
-
-    return;
 }
 
 static void StoreFileNoMatchCnt(DetectEngineState *de_state, uint16_t file_no_match, uint8_t direction)
 {
     de_state->dir_state[(direction & STREAM_TOSERVER) ? 0 : 1].filestore_cnt += file_no_match;
-
-    return;
 }
 
 static bool StoreFilestoreSigsCantMatch(const SigGroupHead *sgh, const DetectEngineState *de_state, uint8_t direction)
@@ -226,11 +219,6 @@ void DetectRunStoreStateTx(
         const uint16_t file_no_match)
 {
     AppLayerTxData *tx_data = AppLayerParserGetTxData(f->proto, f->alproto, tx);
-    BUG_ON(tx_data == NULL);
-    if (tx_data == NULL) {
-        SCLogDebug("No TX data for %" PRIu64, tx_id);
-        return;
-    }
     if (tx_data->de_state == NULL) {
         tx_data->de_state = DetectEngineStateAlloc();
         if (tx_data->de_state == NULL)
@@ -238,6 +226,11 @@ void DetectRunStoreStateTx(
         SCLogDebug("destate created for %"PRIu64, tx_id);
     }
     DeStateSignatureAppend(tx_data->de_state, s, inspect_flags, flow_flags);
+    if (s->flags & SIG_FLAG_TXBOTHDIR) {
+        // add also in the other DetectEngineStateDirection
+        DeStateSignatureAppend(tx_data->de_state, s, inspect_flags,
+                flow_flags ^ (STREAM_TOSERVER | STREAM_TOCLIENT));
+    }
     StoreStateTxHandleFiles(sgh, f, tx_data->de_state, flow_flags, tx, tx_id, file_no_match);
 
     SCLogDebug("Stored for TX %"PRIu64, tx_id);
@@ -282,10 +275,7 @@ void DetectEngineStateResetTxs(Flow *f)
         void *inspect_tx = AppLayerParserGetTx(f->proto, f->alproto, alstate, inspect_tx_id);
         if (inspect_tx != NULL) {
             AppLayerTxData *txd = AppLayerParserGetTxData(f->proto, f->alproto, inspect_tx);
-            BUG_ON(txd == NULL);
-            if (txd) {
-                ResetTxState(txd->de_state);
-            }
+            ResetTxState(txd->de_state);
         }
     }
 }
@@ -317,38 +307,38 @@ static int DeStateTest02(void)
     Signature s;
     memset(&s, 0x00, sizeof(s));
 
-    s.num = 0;
+    s.iid = 0;
     DeStateSignatureAppend(state, &s, 0, direction);
-    s.num = 11;
+    s.iid = 11;
     DeStateSignatureAppend(state, &s, 0, direction);
-    s.num = 22;
+    s.iid = 22;
     DeStateSignatureAppend(state, &s, 0, direction);
-    s.num = 33;
+    s.iid = 33;
     DeStateSignatureAppend(state, &s, 0, direction);
-    s.num = 44;
+    s.iid = 44;
     DeStateSignatureAppend(state, &s, 0, direction);
-    s.num = 55;
+    s.iid = 55;
     DeStateSignatureAppend(state, &s, 0, direction);
-    s.num = 66;
+    s.iid = 66;
     DeStateSignatureAppend(state, &s, 0, direction);
-    s.num = 77;
+    s.iid = 77;
     DeStateSignatureAppend(state, &s, 0, direction);
-    s.num = 88;
+    s.iid = 88;
     DeStateSignatureAppend(state, &s, 0, direction);
-    s.num = 99;
+    s.iid = 99;
     DeStateSignatureAppend(state, &s, 0, direction);
-    s.num = 100;
+    s.iid = 100;
     DeStateSignatureAppend(state, &s, 0, direction);
-    s.num = 111;
+    s.iid = 111;
     DeStateSignatureAppend(state, &s, 0, direction);
-    s.num = 122;
+    s.iid = 122;
     DeStateSignatureAppend(state, &s, 0, direction);
-    s.num = 133;
+    s.iid = 133;
     DeStateSignatureAppend(state, &s, 0, direction);
     FAIL_IF_NOT(state->dir_state[direction & STREAM_TOSERVER ? 0 : 1].head ==
                 state->dir_state[direction & STREAM_TOSERVER ? 0 : 1].cur);
 
-    s.num = 144;
+    s.iid = 144;
     DeStateSignatureAppend(state, &s, 0, direction);
 
     FAIL_IF(state->dir_state[direction & STREAM_TOSERVER ? 0 : 1].head->store[14].sid != 144);
@@ -356,13 +346,13 @@ static int DeStateTest02(void)
             state->dir_state[direction & STREAM_TOSERVER ? 0 : 1].cur);
     FAIL_IF_NOT(state->dir_state[direction & STREAM_TOSERVER ? 0 : 1].cur == NULL);
 
-    s.num = 155;
+    s.iid = 155;
     DeStateSignatureAppend(state, &s, 0, direction);
 
     FAIL_IF_NOT(state->dir_state[direction & STREAM_TOSERVER ? 0 : 1].tail ==
                 state->dir_state[direction & STREAM_TOSERVER ? 0 : 1].cur);
 
-    s.num = 166;
+    s.iid = 166;
     DeStateSignatureAppend(state, &s, 0, direction);
 
     FAIL_IF(state->dir_state[direction & STREAM_TOSERVER ? 0 : 1].head == NULL);
@@ -378,46 +368,46 @@ static int DeStateTest02(void)
     FAIL_IF_NOT(state->dir_state[direction & STREAM_TOSERVER ? 0 : 1].head ==
                 state->dir_state[direction & STREAM_TOSERVER ? 0 : 1].cur);
 
-    s.num = 0;
+    s.iid = 0;
     DeStateSignatureAppend(state, &s, 0, direction);
-    s.num = 11;
+    s.iid = 11;
     DeStateSignatureAppend(state, &s, 0, direction);
-    s.num = 22;
+    s.iid = 22;
     DeStateSignatureAppend(state, &s, 0, direction);
-    s.num = 33;
+    s.iid = 33;
     DeStateSignatureAppend(state, &s, 0, direction);
-    s.num = 44;
+    s.iid = 44;
     DeStateSignatureAppend(state, &s, 0, direction);
-    s.num = 55;
+    s.iid = 55;
     DeStateSignatureAppend(state, &s, 0, direction);
-    s.num = 66;
+    s.iid = 66;
     DeStateSignatureAppend(state, &s, 0, direction);
-    s.num = 77;
+    s.iid = 77;
     DeStateSignatureAppend(state, &s, 0, direction);
-    s.num = 88;
+    s.iid = 88;
     DeStateSignatureAppend(state, &s, 0, direction);
-    s.num = 99;
+    s.iid = 99;
     DeStateSignatureAppend(state, &s, 0, direction);
-    s.num = 100;
+    s.iid = 100;
     DeStateSignatureAppend(state, &s, 0, direction);
-    s.num = 111;
+    s.iid = 111;
     DeStateSignatureAppend(state, &s, 0, direction);
-    s.num = 122;
+    s.iid = 122;
     DeStateSignatureAppend(state, &s, 0, direction);
-    s.num = 133;
+    s.iid = 133;
     DeStateSignatureAppend(state, &s, 0, direction);
     FAIL_IF_NOT(state->dir_state[direction & STREAM_TOSERVER ? 0 : 1].head ==
                 state->dir_state[direction & STREAM_TOSERVER ? 0 : 1].cur);
-    s.num = 144;
+    s.iid = 144;
     DeStateSignatureAppend(state, &s, 0, direction);
     FAIL_IF(state->dir_state[direction & STREAM_TOSERVER ? 0 : 1].head->store[14].sid != 144);
     FAIL_IF(state->dir_state[direction & STREAM_TOSERVER ? 0 : 1].head ==
             state->dir_state[direction & STREAM_TOSERVER ? 0 : 1].cur);
     FAIL_IF_NOT(state->dir_state[direction & STREAM_TOSERVER ? 0 : 1].tail ==
                 state->dir_state[direction & STREAM_TOSERVER ? 0 : 1].cur);
-    s.num = 155;
+    s.iid = 155;
     DeStateSignatureAppend(state, &s, 0, direction);
-    s.num = 166;
+    s.iid = 166;
     DeStateSignatureAppend(state, &s, 0, direction);
 
     FAIL_IF(state->dir_state[direction & STREAM_TOSERVER ? 0 : 1].head == NULL);
@@ -427,7 +417,7 @@ static int DeStateTest02(void)
     FAIL_IF(state->dir_state[direction & STREAM_TOSERVER ? 0 : 1].head->next->store[0].sid != 155);
     FAIL_IF(state->dir_state[direction & STREAM_TOSERVER ? 0 : 1].head->next->store[1].sid != 166);
 
-    DetectEngineStateFree(state);
+    SCDetectEngineStateFree(state);
 
     PASS;
 }
@@ -442,9 +432,9 @@ static int DeStateTest03(void)
 
     uint8_t direction = STREAM_TOSERVER;
 
-    s.num = 11;
+    s.iid = 11;
     DeStateSignatureAppend(state, &s, 0, direction);
-    s.num = 22;
+    s.iid = 22;
     DeStateSignatureAppend(state, &s, BIT_U32(DE_STATE_FLAG_BASE), direction);
 
     FAIL_IF(state->dir_state[direction & STREAM_TOSERVER ? 0 : 1].head == NULL);
@@ -453,7 +443,7 @@ static int DeStateTest03(void)
     FAIL_IF(state->dir_state[direction & STREAM_TOSERVER ? 0 : 1].head->store[1].sid != 22);
     FAIL_IF(!(state->dir_state[direction & STREAM_TOSERVER ? 0 : 1].head->store[1].flags & BIT_U32(DE_STATE_FLAG_BASE)));
 
-    DetectEngineStateFree(state);
+    SCDetectEngineStateFree(state);
     PASS;
 }
 
@@ -477,6 +467,7 @@ static int DeStateSigTest01(void)
     FAIL_IF_NULL(alp_tctx);
 
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
     memset(&f, 0, sizeof(f));
     memset(&ssn, 0, sizeof(ssn));
 
@@ -528,12 +519,13 @@ static int DeStateSigTest01(void)
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
     FAIL_IF(PacketAlertCheck(p, 1));
 
+    UTHFreePacket(p);
+    FLOW_DESTROY(&f);
     AppLayerParserThreadCtxFree(alp_tctx);
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
     StreamTcpFreeConfig(true);
-    FLOW_DESTROY(&f);
-    UTHFreePacket(p);
+    StatsThreadCleanup(&th_v.stats);
     PASS;
 }
 
@@ -563,6 +555,7 @@ static int DeStateSigTest02(void)
     FAIL_IF_NULL(alp_tctx);
 
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
     memset(&f, 0, sizeof(f));
     memset(&ssn, 0, sizeof(ssn));
 
@@ -643,12 +636,13 @@ static int DeStateSigTest02(void)
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
     FAIL_IF(!(PacketAlertCheck(p, 2)));
 
+    UTHFreePacket(p);
+    FLOW_DESTROY(&f);
     AppLayerParserThreadCtxFree(alp_tctx);
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
     StreamTcpFreeConfig(true);
-    FLOW_DESTROY(&f);
-    UTHFreePacket(p);
+    StatsThreadCleanup(&th_v.stats);
     PASS;
 }
 
@@ -674,6 +668,7 @@ static int DeStateSigTest03(void)
     FAIL_IF_NULL(alp_tctx);
 
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
     memset(&ssn, 0, sizeof(ssn));
 
     DetectEngineThreadCtx *det_ctx = NULL;
@@ -718,7 +713,7 @@ static int DeStateSigTest03(void)
     SigMatchSignatures(&th_v, de_ctx, det_ctx, p);
     FAIL_IF(!(PacketAlertCheck(p, 1)));
 
-    AppLayerGetFileState files = AppLayerParserGetTxFiles(p->flow, http_state, tx, STREAM_TOSERVER);
+    AppLayerGetFileState files = AppLayerParserGetTxFiles(p->flow, tx, STREAM_TOSERVER);
     FileContainer *fc = files.fc;
     FAIL_IF_NULL(fc);
 
@@ -727,12 +722,14 @@ static int DeStateSigTest03(void)
 
     FAIL_IF(!(file->flags & FILE_STORE));
 
-    AppLayerParserThreadCtxFree(alp_tctx);
+    UTHFreePacket(p);
     UTHFreeFlow(f);
 
+    AppLayerParserThreadCtxFree(alp_tctx);
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
     StreamTcpFreeConfig(true);
+    StatsThreadCleanup(&th_v.stats);
     PASS;
 }
 
@@ -756,6 +753,7 @@ static int DeStateSigTest04(void)
     FAIL_IF_NULL(alp_tctx);
 
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
     memset(&ssn, 0, sizeof(ssn));
 
     DetectEngineThreadCtx *det_ctx = NULL;
@@ -798,7 +796,7 @@ static int DeStateSigTest04(void)
     HtpTxUserData *tx_ud = htp_tx_get_user_data(tx);
     FAIL_IF_NULL(tx_ud);
 
-    AppLayerGetFileState files = AppLayerParserGetTxFiles(p->flow, http_state, tx, STREAM_TOSERVER);
+    AppLayerGetFileState files = AppLayerParserGetTxFiles(p->flow, tx, STREAM_TOSERVER);
     FileContainer *fc = files.fc;
     FAIL_IF_NULL(fc);
     File *file = fc->head;
@@ -806,11 +804,13 @@ static int DeStateSigTest04(void)
 
     FAIL_IF(file->flags & FILE_STORE);
 
-    AppLayerParserThreadCtxFree(alp_tctx);
+    UTHFreePacket(p);
     UTHFreeFlow(f);
+    AppLayerParserThreadCtxFree(alp_tctx);
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
     StreamTcpFreeConfig(true);
+    StatsThreadCleanup(&th_v.stats);
     PASS;
 }
 
@@ -835,6 +835,7 @@ static int DeStateSigTest05(void)
     FAIL_IF_NULL(alp_tctx);
 
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
     memset(&ssn, 0, sizeof(ssn));
 
     DetectEngineThreadCtx *det_ctx = NULL;
@@ -873,7 +874,7 @@ static int DeStateSigTest05(void)
     HtpTxUserData *tx_ud = htp_tx_get_user_data(tx);
     FAIL_IF_NULL(tx_ud);
 
-    AppLayerGetFileState files = AppLayerParserGetTxFiles(p->flow, http_state, tx, STREAM_TOSERVER);
+    AppLayerGetFileState files = AppLayerParserGetTxFiles(p->flow, tx, STREAM_TOSERVER);
     FileContainer *fc = files.fc;
     FAIL_IF_NULL(fc);
     File *file = fc->head;
@@ -888,11 +889,13 @@ static int DeStateSigTest05(void)
     FAIL_IF_NOT(http_state->state_data.file_flags & FLOWFILE_NO_STORE_TS);
     FAIL_IF(file->flags & FILE_NOSTORE);
 
-    AppLayerParserThreadCtxFree(alp_tctx);
+    UTHFreePacket(p);
     UTHFreeFlow(f);
+    AppLayerParserThreadCtxFree(alp_tctx);
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
     StreamTcpFreeConfig(true);
+    StatsThreadCleanup(&th_v.stats);
     PASS;
 }
 
@@ -917,6 +920,7 @@ static int DeStateSigTest06(void)
     FAIL_IF_NULL(alp_tctx);
 
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
     memset(&ssn, 0, sizeof(ssn));
 
     DetectEngineThreadCtx *det_ctx = NULL;
@@ -959,7 +963,7 @@ static int DeStateSigTest06(void)
     HtpTxUserData *tx_ud = htp_tx_get_user_data(tx);
     FAIL_IF_NULL(tx_ud);
 
-    AppLayerGetFileState files = AppLayerParserGetTxFiles(p->flow, http_state, tx, STREAM_TOSERVER);
+    AppLayerGetFileState files = AppLayerParserGetTxFiles(p->flow, tx, STREAM_TOSERVER);
     FileContainer *fc = files.fc;
     FAIL_IF_NULL(fc);
     File *file = fc->head;
@@ -969,11 +973,13 @@ static int DeStateSigTest06(void)
     FAIL_IF_NOT(tx_ud->tx_data.file_flags & FLOWFILE_NO_STORE_TS);
     FAIL_IF(file->flags & FILE_NOSTORE);
 
-    AppLayerParserThreadCtxFree(alp_tctx);
+    UTHFreePacket(p);
     UTHFreeFlow(f);
+    AppLayerParserThreadCtxFree(alp_tctx);
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
     StreamTcpFreeConfig(true);
+    StatsThreadCleanup(&th_v.stats);
     PASS;
 }
 
@@ -1000,6 +1006,7 @@ static int DeStateSigTest07(void)
     FAIL_IF_NULL(alp_tctx);
 
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
     memset(&ssn, 0, sizeof(ssn));
 
     DetectEngineThreadCtx *det_ctx = NULL;
@@ -1047,18 +1054,20 @@ static int DeStateSigTest07(void)
     HtpTxUserData *tx_ud = htp_tx_get_user_data(tx);
     FAIL_IF_NULL(tx_ud);
 
-    AppLayerGetFileState files = AppLayerParserGetTxFiles(p->flow, http_state, tx, STREAM_TOSERVER);
+    AppLayerGetFileState files = AppLayerParserGetTxFiles(p->flow, tx, STREAM_TOSERVER);
     FileContainer *fc = files.fc;
     FAIL_IF_NULL(fc);
     File *file = fc->head;
     FAIL_IF_NULL(file);
     FAIL_IF(file->flags & FILE_STORE);
 
-    AppLayerParserThreadCtxFree(alp_tctx);
+    UTHFreePacket(p);
     UTHFreeFlow(f);
+    AppLayerParserThreadCtxFree(alp_tctx);
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
     StreamTcpFreeConfig(true);
+    StatsThreadCleanup(&th_v.stats);
     PASS;
 }
 
@@ -1098,6 +1107,7 @@ static int DeStateSigTest08(void)
     FAIL_IF_NULL(alp_tctx);
 
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
     memset(&ssn, 0, sizeof(ssn));
 
     DetectEngineThreadCtx *det_ctx = NULL;
@@ -1146,7 +1156,7 @@ static int DeStateSigTest08(void)
     HtpTxUserData *tx_ud = htp_tx_get_user_data(tx);
     FAIL_IF_NULL(tx_ud);
 
-    AppLayerGetFileState files = AppLayerParserGetTxFiles(p->flow, http_state, tx, STREAM_TOSERVER);
+    AppLayerGetFileState files = AppLayerParserGetTxFiles(p->flow, tx, STREAM_TOSERVER);
     FileContainer *fc = files.fc;
     FAIL_IF_NULL(fc);
     File *file = fc->head;
@@ -1173,7 +1183,7 @@ static int DeStateSigTest08(void)
     tx_ud = htp_tx_get_user_data(tx);
     FAIL_IF_NULL(tx_ud);
 
-    files = AppLayerParserGetTxFiles(p->flow, http_state, tx, STREAM_TOSERVER);
+    files = AppLayerParserGetTxFiles(p->flow, tx, STREAM_TOSERVER);
     fc = files.fc;
     FAIL_IF_NULL(fc);
     file = fc->head;
@@ -1182,11 +1192,13 @@ static int DeStateSigTest08(void)
     FAIL_IF_NULL(file);
     FAIL_IF_NOT(file->flags & FILE_STORE);
 
-    AppLayerParserThreadCtxFree(alp_tctx);
+    UTHFreePacket(p);
     UTHFreeFlow(f);
+    AppLayerParserThreadCtxFree(alp_tctx);
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
     StreamTcpFreeConfig(true);
+    StatsThreadCleanup(&th_v.stats);
     PASS;
 }
 
@@ -1226,6 +1238,7 @@ static int DeStateSigTest09(void)
     FAIL_IF_NULL(alp_tctx);
 
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
     memset(&ssn, 0, sizeof(ssn));
 
     DetectEngineThreadCtx *det_ctx = NULL;
@@ -1274,7 +1287,7 @@ static int DeStateSigTest09(void)
     HtpTxUserData *tx_ud = htp_tx_get_user_data(tx);
     FAIL_IF_NULL(tx_ud);
 
-    AppLayerGetFileState files = AppLayerParserGetTxFiles(p->flow, http_state, tx, STREAM_TOSERVER);
+    AppLayerGetFileState files = AppLayerParserGetTxFiles(p->flow, tx, STREAM_TOSERVER);
     FileContainer *fc = files.fc;
     FAIL_IF_NULL(fc);
     File *file = fc->head;
@@ -1301,18 +1314,20 @@ static int DeStateSigTest09(void)
     tx_ud = htp_tx_get_user_data(tx);
     FAIL_IF_NULL(tx_ud);
 
-    files = AppLayerParserGetTxFiles(p->flow, http_state, tx, STREAM_TOSERVER);
+    files = AppLayerParserGetTxFiles(p->flow, tx, STREAM_TOSERVER);
     fc = files.fc;
     FAIL_IF_NULL(fc);
     file = fc->head;
     FAIL_IF_NULL(file);
     FAIL_IF_NOT(file->flags & FILE_STORE);
 
-    AppLayerParserThreadCtxFree(alp_tctx);
+    UTHFreePacket(p);
     UTHFreeFlow(f);
+    AppLayerParserThreadCtxFree(alp_tctx);
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
     StreamTcpFreeConfig(true);
+    StatsThreadCleanup(&th_v.stats);
     PASS;
 }
 
@@ -1352,6 +1367,7 @@ static int DeStateSigTest10(void)
     FAIL_IF_NULL(alp_tctx);
 
     memset(&th_v, 0, sizeof(th_v));
+    StatsThreadInit(&th_v.stats);
     memset(&ssn, 0, sizeof(ssn));
 
     DetectEngineThreadCtx *det_ctx = NULL;
@@ -1400,7 +1416,7 @@ static int DeStateSigTest10(void)
     HtpTxUserData *tx_ud = htp_tx_get_user_data(tx);
     FAIL_IF_NULL(tx_ud);
 
-    AppLayerGetFileState files = AppLayerParserGetTxFiles(p->flow, http_state, tx, STREAM_TOSERVER);
+    AppLayerGetFileState files = AppLayerParserGetTxFiles(p->flow, tx, STREAM_TOSERVER);
     FileContainer *fc = files.fc;
     FAIL_IF_NULL(fc);
     File *file = fc->head;
@@ -1427,18 +1443,20 @@ static int DeStateSigTest10(void)
     tx_ud = htp_tx_get_user_data(tx);
     FAIL_IF_NULL(tx_ud);
 
-    files = AppLayerParserGetTxFiles(p->flow, http_state, tx, STREAM_TOSERVER);
+    files = AppLayerParserGetTxFiles(p->flow, tx, STREAM_TOSERVER);
     fc = files.fc;
     FAIL_IF_NULL(fc);
     file = fc->head;
     FAIL_IF_NULL(file);
     FAIL_IF_NOT(file->flags & FILE_STORE);
 
-    AppLayerParserThreadCtxFree(alp_tctx);
+    UTHFreePacket(p);
     UTHFreeFlow(f);
+    AppLayerParserThreadCtxFree(alp_tctx);
     DetectEngineThreadCtxDeinit(&th_v, (void *)det_ctx);
     DetectEngineCtxFree(de_ctx);
     StreamTcpFreeConfig(true);
+    StatsThreadCleanup(&th_v.stats);
     PASS;
 }
 
@@ -1461,8 +1479,6 @@ void DeStateRegisterTests(void)
     UtRegisterTest("DeStateSigTest09", DeStateSigTest09);
     UtRegisterTest("DeStateSigTest10", DeStateSigTest10);
 #endif
-
-    return;
 }
 
 /**

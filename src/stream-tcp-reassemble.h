@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2010 Open Information Security Foundation
+/* Copyright (C) 2007-2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -22,12 +22,13 @@
  * \author Gurvinder Singh <gurvindersinghdahiya@gmail.com>
  */
 
-#ifndef __STREAM_TCP_REASSEMBLE_H__
-#define __STREAM_TCP_REASSEMBLE_H__
+#ifndef SURICATA_STREAM_TCP_REASSEMBLE_H
+#define SURICATA_STREAM_TCP_REASSEMBLE_H
 
 #include "suricata.h"
 #include "flow.h"
 #include "stream-tcp-private.h"
+#include "util-exception-policy.h"
 
 /** Supported OS list and default OS policy is BSD */
 enum
@@ -63,23 +64,28 @@ typedef struct TcpReassemblyThreadCtx_ {
     int segment_thread_pool_id;
 
     /** TCP segments which are not being reassembled due to memcap was reached */
-    uint16_t counter_tcp_segment_memcap;
+    StatsCounterId counter_tcp_segment_memcap;
+    /** times exception policy for stream reassembly memcap was applied **/
+    ExceptionPolicyCounters counter_tcp_reas_eps;
 
-    uint16_t counter_tcp_segment_from_cache;
-    uint16_t counter_tcp_segment_from_pool;
+    StatsCounterId counter_tcp_segment_from_cache;
+    StatsCounterId counter_tcp_segment_from_pool;
 
     /** number of streams that stop reassembly because their depth is reached */
-    uint16_t counter_tcp_stream_depth;
+    StatsCounterId counter_tcp_stream_depth;
     /** count number of streams with a unrecoverable stream gap (missing pkts) */
-    uint16_t counter_tcp_reass_gap;
+    StatsCounterId counter_tcp_reass_gap;
 
     /** count packet data overlaps */
-    uint16_t counter_tcp_reass_overlap;
+    StatsCounterId counter_tcp_reass_overlap;
     /** count overlaps with different data */
-    uint16_t counter_tcp_reass_overlap_diff_data;
+    StatsCounterId counter_tcp_reass_overlap_diff_data;
 
-    uint16_t counter_tcp_reass_data_normal_fail;
-    uint16_t counter_tcp_reass_data_overlap_fail;
+    StatsCounterId counter_tcp_reass_data_normal_fail;
+    StatsCounterId counter_tcp_reass_data_overlap_fail;
+
+    /** count OOB bytes */
+    StatsCounterId counter_tcp_urgent_oob;
 } TcpReassemblyThreadCtx;
 
 #define OS_POLICY_DEFAULT   OS_POLICY_BSD
@@ -107,19 +113,18 @@ void StreamTcpSetOSPolicy(TcpStream *, Packet *);
 
 int StreamTcpReassembleHandleSegmentHandleData(ThreadVars *tv, TcpReassemblyThreadCtx *ra_ctx,
         TcpSession *ssn, TcpStream *stream, Packet *p);
-int StreamTcpReassembleInsertSegment(ThreadVars *, TcpReassemblyThreadCtx *, TcpStream *, TcpSegment *, Packet *, uint32_t pkt_seq, uint8_t *pkt_data, uint16_t pkt_datalen);
+int StreamTcpReassembleInsertSegment(ThreadVars *, TcpReassemblyThreadCtx *, TcpStream *,
+        TcpSegment *, Packet *, uint8_t *pkt_data, uint16_t pkt_datalen);
 TcpSegment *StreamTcpGetSegment(ThreadVars *, TcpReassemblyThreadCtx *);
 
 void StreamTcpReturnStreamSegments(TcpStream *);
 void StreamTcpSegmentReturntoPool(TcpSegment *);
 
-void StreamTcpReassembleTriggerRawReassembly(TcpSession *, int direction);
+void StreamTcpReassembleTriggerRawInspection(TcpSession *, int direction);
 
 void StreamTcpPruneSession(Flow *, uint8_t);
-int StreamTcpReassembleDepthReached(Packet *p);
+bool StreamTcpReassembleDepthReached(Packet *p);
 
-void StreamTcpReassembleIncrMemuse(uint64_t size);
-void StreamTcpReassembleDecrMemuse(uint64_t size);
 int StreamTcpReassembleSetMemcap(uint64_t size);
 uint64_t StreamTcpReassembleGetMemcap(void);
 int StreamTcpReassembleCheckMemcap(uint64_t size);
@@ -127,10 +132,6 @@ uint64_t StreamTcpReassembleMemuseGlobalCounter(void);
 
 void StreamTcpDisableAppLayer(Flow *f);
 int StreamTcpAppLayerIsDisabled(Flow *f);
-
-#ifdef UNITTESTS
-int StreamTcpCheckStreamContents(uint8_t *, uint16_t , TcpStream *);
-#endif
 
 bool StreamReassembleRawHasDataReady(TcpSession *ssn, Packet *p);
 void StreamTcpReassemblySetMinInspectDepth(TcpSession *ssn, int direction, uint32_t depth);
@@ -156,5 +157,4 @@ static inline bool STREAM_LASTACK_GT_BASESEQ(const TcpStream *stream)
 
 uint32_t StreamDataAvailableForProtoDetect(TcpStream *stream);
 
-#endif /* __STREAM_TCP_REASSEMBLE_H__ */
-
+#endif /* SURICATA_STREAM_TCP_REASSEMBLE_H */

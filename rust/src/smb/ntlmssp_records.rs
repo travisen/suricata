@@ -1,4 +1,4 @@
-/* Copyright (C) 2017-2022 Open Information Security Foundation
+/* Copyright (C) 2017-2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -15,13 +15,14 @@
  * 02110-1301, USA.
  */
 
-use crate::common::nom7::take_until_and_consume;
-use nom7::bytes::streaming::take;
-use nom7::combinator::{cond, rest, verify};
-use nom7::error::{make_error, ErrorKind};
-use nom7::number::streaming::{le_u16, le_u32, le_u8};
-use nom7::Err;
-use nom7::IResult;
+use crate::common::nom8::take_until_and_consume;
+use nom8::bytes::streaming::take;
+use nom8::combinator::{cond, rest, verify};
+use nom8::error::{make_error, ErrorKind};
+use nom8::number::streaming::{le_u16, le_u32, le_u8};
+use nom8::Parser;
+use nom8::Err;
+use nom8::IResult;
 use std::fmt;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -43,11 +44,11 @@ impl fmt::Display for NTLMSSPVersion {
 }
 
 fn parse_ntlm_auth_version(i: &[u8]) -> IResult<&[u8], NTLMSSPVersion> {
-    let (i, ver_major) = le_u8(i)?;
-    let (i, ver_minor) = le_u8(i)?;
-    let (i, ver_build) = le_u16(i)?;
-    let (i, _) = take(3_usize)(i)?;
-    let (i, ver_ntlm_rev) = le_u8(i)?;
+    let (i, ver_major) = le_u8.parse(i)?;
+    let (i, ver_minor) = le_u8.parse(i)?;
+    let (i, ver_build) = le_u16.parse(i)?;
+    let (i, _) = take(3_usize).parse(i)?;
+    let (i, ver_ntlm_rev) = le_u8.parse(i)?;
     let version = NTLMSSPVersion {
         ver_major,
         ver_minor,
@@ -73,7 +74,7 @@ pub struct NTLMSSPNegotiateFlags {
 }
 
 fn parse_ntlm_auth_nego_flags(i: &[u8]) -> IResult<&[u8], NTLMSSPNegotiateFlags> {
-    let (i, raw) = le_u32(i)?;
+    let (i, raw) = le_u32.parse(i)?;
     return Ok((
         i,
         NTLMSSPNegotiateFlags {
@@ -96,36 +97,48 @@ fn extract_ntlm_substring(i: &[u8], offset: u32, length: u16) -> IResult<&[u8], 
     return Ok((i, &i[start..end]));
 }
 
-pub fn parse_ntlm_auth_record(i: &[u8]) -> IResult<&[u8], NTLMSSPAuthRecord> {
+pub fn parse_ntlm_auth_record(i: &[u8]) -> IResult<&[u8], NTLMSSPAuthRecord<'_>> {
     let orig_i = i;
     let record_len = i.len() + NTLMSSP_IDTYPE_LEN; // identifier (8) and type (4) are cut before we are called
 
-    let (i, _lm_blob_len) = verify(le_u16, |&v| (v as usize) < record_len)(i)?;
-    let (i, _lm_blob_maxlen) = le_u16(i)?;
-    let (i, _lm_blob_offset) = verify(le_u32, |&v| (v as usize) < record_len)(i)?;
+    // track start of the data offset
+    let (i, _lm_blob_len) = verify(le_u16, |&v| (v as usize) < record_len).parse(i)?;
+    let (i, _lm_blob_maxlen) = le_u16.parse(i)?;
+    let (i, lm_blob_offset) = verify(le_u32, |&v| (v as usize) < record_len).parse(i)?;
+    let mut data_start = lm_blob_offset;
 
-    let (i, _ntlmresp_blob_len) = verify(le_u16, |&v| (v as usize) < record_len)(i)?;
-    let (i, _ntlmresp_blob_maxlen) = le_u16(i)?;
-    let (i, _ntlmresp_blob_offset) = verify(le_u32, |&v| (v as usize) < record_len)(i)?;
+    let (i, _ntlmresp_blob_len) = verify(le_u16, |&v| (v as usize) < record_len).parse(i)?;
+    let (i, _ntlmresp_blob_maxlen) = le_u16.parse(i)?;
+    let (i, ntlmresp_blob_offset) = verify(le_u32, |&v| (v as usize) < record_len).parse(i)?;
+    data_start = std::cmp::min(data_start, ntlmresp_blob_offset);
 
-    let (i, domain_blob_len) = verify(le_u16, |&v| (v as usize) < record_len)(i)?;
-    let (i, _domain_blob_maxlen) = le_u16(i)?;
-    let (i, domain_blob_offset) = verify(le_u32, |&v| (v as usize) < record_len)(i)?;
+    let (i, domain_blob_len) = verify(le_u16, |&v| (v as usize) < record_len).parse(i)?;
+    let (i, _domain_blob_maxlen) = le_u16.parse(i)?;
+    let (i, domain_blob_offset) = verify(le_u32, |&v| (v as usize) < record_len).parse(i)?;
+    data_start = std::cmp::min(data_start, domain_blob_offset);
 
-    let (i, user_blob_len) = verify(le_u16, |&v| (v as usize) < record_len)(i)?;
-    let (i, _user_blob_maxlen) = le_u16(i)?;
-    let (i, user_blob_offset) = verify(le_u32, |&v| (v as usize) < record_len)(i)?;
+    let (i, user_blob_len) = verify(le_u16, |&v| (v as usize) < record_len).parse(i)?;
+    let (i, _user_blob_maxlen) = le_u16.parse(i)?;
+    let (i, user_blob_offset) = verify(le_u32, |&v| (v as usize) < record_len).parse(i)?;
+    data_start = std::cmp::min(data_start, user_blob_offset);
 
-    let (i, host_blob_len) = verify(le_u16, |&v| (v as usize) < record_len)(i)?;
-    let (i, _host_blob_maxlen) = le_u16(i)?;
-    let (i, host_blob_offset) = verify(le_u32, |&v| (v as usize) < record_len)(i)?;
+    let (i, host_blob_len) = verify(le_u16, |&v| (v as usize) < record_len).parse(i)?;
+    let (i, _host_blob_maxlen) = le_u16.parse(i)?;
+    let (i, host_blob_offset) = verify(le_u32, |&v| (v as usize) < record_len).parse(i)?;
+    data_start = std::cmp::min(data_start, host_blob_offset);
 
-    let (i, _ssnkey_blob_len) = verify(le_u16, |&v| (v as usize) < record_len)(i)?;
-    let (i, _ssnkey_blob_maxlen) = le_u16(i)?;
-    let (i, _ssnkey_blob_offset) = verify(le_u32, |&v| (v as usize) < record_len)(i)?;
+    let (i, _ssnkey_blob_len) = verify(le_u16, |&v| (v as usize) < record_len).parse(i)?;
+    let (i, _ssnkey_blob_maxlen) = le_u16.parse(i)?;
+    let (i, ssnkey_blob_offset) = verify(le_u32, |&v| (v as usize) < record_len).parse(i)?;
+    data_start = std::cmp::min(data_start, ssnkey_blob_offset);
 
     let (i, nego_flags) = parse_ntlm_auth_nego_flags(i)?;
-    let (_, version) = cond(nego_flags.version, parse_ntlm_auth_version)(i)?;
+
+    // Check if we have space for the version before the "data" starts.
+    let consumed = orig_i.len() - i.len() + NTLMSSP_IDTYPE_LEN;
+    let has_space_for_version = data_start as usize >= consumed + 8 && nego_flags.version;
+
+    let (_, version) = cond(has_space_for_version, parse_ntlm_auth_version).parse(i)?;
 
     // Caller does not care about remaining input...
     let (_, domain_blob) = extract_ntlm_substring(orig_i, domain_blob_offset, domain_blob_len)?;
@@ -157,10 +170,10 @@ pub struct NTLMSSPRecord<'a> {
     pub data: &'a [u8],
 }
 
-pub fn parse_ntlmssp(i: &[u8]) -> IResult<&[u8], NTLMSSPRecord> {
-    let (i, _) = take_until_and_consume(b"NTLMSSP\x00")(i)?;
-    let (i, msg_type) = le_u32(i)?;
-    let (i, data) = rest(i)?;
+pub fn parse_ntlmssp(i: &[u8]) -> IResult<&[u8], NTLMSSPRecord<'_>> {
+    let (i, _) = take_until_and_consume(b"NTLMSSP\x00").parse(i)?;
+    let (i, msg_type) = le_u32.parse(i)?;
+    let (i, data) = rest.parse(i)?;
     let record = NTLMSSPRecord { msg_type, data };
     Ok((i, record))
 }
@@ -168,7 +181,7 @@ pub fn parse_ntlmssp(i: &[u8]) -> IResult<&[u8], NTLMSSPRecord> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nom7::Err;
+    use nom8::Err;
     #[test]
     fn test_parse_auth_nego_flags() {
         // ntlmssp.negotiateflags 1

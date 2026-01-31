@@ -21,13 +21,9 @@
  * \author Clément Galland <clement.galland@epita.fr>
  */
 
-#ifndef __APP_LAYER_TFTP_H__
-#define __APP_LAYER_TFTP_H__
+#ifndef SURICATA_APP_LAYER_TFTP_H
+#define SURICATA_APP_LAYER_TFTP_H
 
 void RegisterTFTPParsers(void);
 
-/** Opaque Rust types. */
-typedef struct TFTPState_ TFTPState;
-typedef struct TFTPTransaction_  TFTPTransaction;
-
-#endif /* __APP_LAYER_TFTP_H__ */
+#endif /* SURICATA_APP_LAYER_TFTP_H */

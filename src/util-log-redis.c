@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2021 Open Information Security Foundation
+/* Copyright (C) 2007-2024 Open Information Security Foundation
  *
  * You can copy, redistribute or modify this Program under the terms of
  * the GNU General Public License version 2 as published by the Free
@@ -34,14 +34,20 @@
 #include <event2/thread.h>
 #endif /* HAVE_LIBEVENT_PTHREADS */
 
-static const char * redis_lpush_cmd = "LPUSH";
-static const char * redis_rpush_cmd = "RPUSH";
-static const char * redis_publish_cmd = "PUBLISH";
-static const char * redis_default_key = "suricata";
-static const char * redis_default_server = "127.0.0.1";
+static const char *redis_lpush_cmd = "LPUSH";
+static const char *redis_rpush_cmd = "RPUSH";
+static const char *redis_publish_cmd = "PUBLISH";
+static const char *redis_xadd_cmd = "XADD";
+static const char *redis_default_key = "suricata";
+static const char *redis_default_server = "127.0.0.1";
+static const char *redis_default_format = "%s %s %s";
+static const char *redis_stream_format = "%s %s * eve %s";
+static const char *redis_stream_format_maxlen_tmpl = "%s %s MAXLEN %c %d * eve %s";
 
 static int SCConfLogReopenSyncRedis(LogFileCtx *log_ctx);
 static void SCLogFileCloseRedis(LogFileCtx *log_ctx);
+
+#define REDIS_MAX_STREAM_LENGTH_DEFAULT 100000
 
 /**
  * \brief SCLogRedisInit() - Initializes global stuff before threads
@@ -268,12 +274,8 @@ static int SCLogRedisWriteAsync(LogFileCtx *file_ctx, const char *string, size_t
         return -1;
     }
 
-    redisAsyncCommand(ctx->async,
-            SCRedisAsyncCommandCallback,
-            file_ctx,
-            "%s %s %s",
-            file_ctx->redis_setup.command,
-            file_ctx->redis_setup.key,
+    redisAsyncCommand(ctx->async, SCRedisAsyncCommandCallback, file_ctx,
+            file_ctx->redis_setup.format, file_ctx->redis_setup.command, file_ctx->redis_setup.key,
             string);
 
     event_base_loop(ctx->ev_base, EVLOOP_NONBLOCK);
@@ -345,10 +347,8 @@ static int SCLogRedisWriteSync(LogFileCtx *file_ctx, const char *string)
 
     /* synchronous mode */
     if (file_ctx->redis_setup.batch_size) {
-        redisAppendCommand(redis, "%s %s %s",
-                file_ctx->redis_setup.command,
-                file_ctx->redis_setup.key,
-                string);
+        redisAppendCommand(redis, file_ctx->redis_setup.format, file_ctx->redis_setup.command,
+                file_ctx->redis_setup.key, string);
         time_t now = time(NULL);
         if ((ctx->batch_count == file_ctx->redis_setup.batch_size) || (ctx->last_push < now)) {
             redisReply *reply;
@@ -374,9 +374,8 @@ static int SCLogRedisWriteSync(LogFileCtx *file_ctx, const char *string)
                             redis = ctx->sync;
                             if (redis) {
                                 SCLogInfo("Reconnected to redis server");
-                                redisAppendCommand(redis, "%s %s %s",
-                                        file_ctx->redis_setup.command,
-                                        file_ctx->redis_setup.key,
+                                redisAppendCommand(redis, file_ctx->redis_setup.format,
+                                        file_ctx->redis_setup.command, file_ctx->redis_setup.key,
                                         string);
                                 ctx->batch_count++;
                                 return 0;
@@ -395,10 +394,8 @@ static int SCLogRedisWriteSync(LogFileCtx *file_ctx, const char *string)
             ctx->batch_count++;
         }
     } else {
-        redisReply *reply = redisCommand(redis, "%s %s %s",
-                file_ctx->redis_setup.command,
-                file_ctx->redis_setup.key,
-                string);
+        redisReply *reply = redisCommand(redis, file_ctx->redis_setup.format,
+                file_ctx->redis_setup.command, file_ctx->redis_setup.key, string);
         /* We may lose the reply if disconnection happens*/
         if (reply) {
             switch (reply->type) {
@@ -408,6 +405,10 @@ static int SCLogRedisWriteSync(LogFileCtx *file_ctx, const char *string)
                     break;
                 case REDIS_REPLY_INTEGER:
                     SCLogDebug("Redis integer %lld", reply->integer);
+                    ret = 0;
+                    break;
+                case REDIS_REPLY_STRING:
+                    SCLogDebug("Redis string %s", reply->str);
                     ret = 0;
                     break;
                 default:
@@ -456,7 +457,7 @@ int LogFileWriteRedis(void *lf_ctx, const char *string, size_t string_len)
  *  \param log_ctx Log file context allocated by caller
  *  \retval 0 on success
  */
-int SCConfLogOpenRedis(ConfNode *redis_node, void *lf_ctx)
+int SCConfLogOpenRedis(SCConfNode *redis_node, void *lf_ctx)
 {
     LogFileCtx *log_ctx = lf_ctx;
 
@@ -470,13 +471,13 @@ int SCConfLogOpenRedis(ConfNode *redis_node, void *lf_ctx)
     int is_async = 0;
 
     if (redis_node) {
-        log_ctx->redis_setup.server = ConfNodeLookupChildValue(redis_node, "server");
-        log_ctx->redis_setup.key =  ConfNodeLookupChildValue(redis_node, "key");
+        log_ctx->redis_setup.server = SCConfNodeLookupChildValue(redis_node, "server");
+        log_ctx->redis_setup.key = SCConfNodeLookupChildValue(redis_node, "key");
 
-        redis_port =  ConfNodeLookupChildValue(redis_node, "port");
-        redis_mode =  ConfNodeLookupChildValue(redis_node, "mode");
+        redis_port = SCConfNodeLookupChildValue(redis_node, "port");
+        redis_mode = SCConfNodeLookupChildValue(redis_node, "mode");
 
-        (void)ConfGetChildValueBool(redis_node, "async", &is_async);
+        (void)SCConfGetChildValueBool(redis_node, "async", &is_async);
     }
     if (!log_ctx->redis_setup.server) {
         log_ctx->redis_setup.server = redis_default_server;
@@ -500,14 +501,14 @@ int SCConfLogOpenRedis(ConfNode *redis_node, void *lf_ctx)
     log_ctx->redis_setup.is_async = is_async;
     log_ctx->redis_setup.batch_size = 0;
     if (redis_node) {
-        ConfNode *pipelining = ConfNodeLookupChild(redis_node, "pipelining");
+        SCConfNode *pipelining = SCConfNodeLookupChild(redis_node, "pipelining");
         if (pipelining) {
             int enabled = 0;
             int ret;
             intmax_t val;
-            ret = ConfGetChildValueBool(pipelining, "enabled", &enabled);
+            ret = SCConfGetChildValueBool(pipelining, "enabled", &enabled);
             if (ret && enabled) {
-                ret = ConfGetChildValueInt(pipelining, "batch-size", &val);
+                ret = SCConfGetChildValueInt(pipelining, "batch-size", &val);
                 if (ret) {
                     log_ctx->redis_setup.batch_size = val;
                 } else {
@@ -519,14 +520,35 @@ int SCConfLogOpenRedis(ConfNode *redis_node, void *lf_ctx)
         log_ctx->redis_setup.batch_size = 0;
     }
 
+    log_ctx->redis_setup.format = redis_default_format;
     if (!strcmp(redis_mode, "list") || !strcmp(redis_mode,"lpush")) {
         log_ctx->redis_setup.command = redis_lpush_cmd;
     } else if(!strcmp(redis_mode, "rpush")){
         log_ctx->redis_setup.command = redis_rpush_cmd;
     } else if(!strcmp(redis_mode,"channel") || !strcmp(redis_mode,"publish")) {
         log_ctx->redis_setup.command = redis_publish_cmd;
+    } else if (!strcmp(redis_mode, "stream") || !strcmp(redis_mode, "xadd")) {
+        int exact;
+        intmax_t maxlen;
+        log_ctx->redis_setup.command = redis_xadd_cmd;
+        log_ctx->redis_setup.format = redis_stream_format;
+        if (SCConfGetChildValueBool(redis_node, "stream-trim-exact", &exact) == 0) {
+            exact = 0;
+        }
+        if (SCConfGetChildValueInt(redis_node, "stream-maxlen", &maxlen) == 0) {
+            maxlen = REDIS_MAX_STREAM_LENGTH_DEFAULT;
+        }
+        if (maxlen > 0) {
+            /* we do not need a lot of space here since we only build another
+            format string, whose length is limited by the length of the
+            maxlen integer formatted as a string */
+            log_ctx->redis_setup.stream_format = SCCalloc(100, sizeof(char));
+            snprintf(log_ctx->redis_setup.stream_format, 100, redis_stream_format_maxlen_tmpl, "%s",
+                    "%s", exact ? '=' : '~', maxlen, "%s");
+            log_ctx->redis_setup.format = log_ctx->redis_setup.stream_format;
+        }
     } else {
-        FatalError("Invalid redis mode");
+        FatalError("Invalid redis mode: %s", redis_mode);
     }
 
     /* store server params for reconnection */

@@ -21,8 +21,8 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __DECODE_ETHERNET_H__
-#define __DECODE_ETHERNET_H__
+#ifndef SURICATA_DECODE_ETHERNET_H
+#define SURICATA_DECODE_ETHERNET_H
 
 #define ETHERNET_HEADER_LEN           14
 
@@ -48,6 +48,7 @@
 #define ETHERNET_TYPE_ERSPAN          0x88BE
 #define ETHERNET_TYPE_DCE             0x8903 /* Data center ethernet,
                                               * Cisco Fabric Path */
+#define ETHERNET_TYPE_ETAG  0x893F           /* 802.1BR */
 #define ETHERNET_TYPE_NSH 0x894F
 #define ETHERNET_TYPE_VNTAG 0x8926 /* 802.1Qbh */
 
@@ -59,5 +60,4 @@ typedef struct EthernetHdr_ {
 
 void DecodeEthernetRegisterTests(void);
 
-#endif /* __DECODE_ETHERNET_H__ */
-
+#endif /* SURICATA_DECODE_ETHERNET_H */

@@ -32,6 +32,7 @@
 
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-state.h"
 
@@ -78,15 +79,15 @@ int DetectDatarepBufferMatch(DetectEngineThreadCtx *det_ctx,
 
     switch (sd->op) {
         case DATAREP_OP_GT:
-            if (r.rep.value > sd->rep.value)
+            if (r.rep > sd->rep)
                 return 1;
             break;
         case DATAREP_OP_LT:
-            if (r.rep.value < sd->rep.value)
+            if (r.rep < sd->rep)
                 return 1;
             break;
         case DATAREP_OP_EQ:
-            if (r.rep.value == sd->rep.value)
+            if (r.rep == sd->rep)
                 return 1;
             break;
     }
@@ -238,7 +239,6 @@ static void GetDirName(const char *in, char *out, size_t outs)
     char *dir = dirname(tmp);
     BUG_ON(dir == NULL);
     strlcpy(out, dir, outs);
-    return;
 }
 
 static int SetupLoadPath(const DetectEngineCtx *de_ctx,
@@ -259,7 +259,7 @@ static int SetupLoadPath(const DetectEngineCtx *de_ctx,
 
     SCLogDebug("rule_file %s dir %s", de_ctx->rule_file, dir);
     char path[PATH_MAX];
-    if (snprintf(path, sizeof(path), "%s/%s", dir, load) >= (int)sizeof(path)) // TODO windows path
+    if (PathMerge(path, sizeof(path), dir, load) < 0)
         return -1;
 
     if (SCPathExists(path)) {
@@ -344,7 +344,7 @@ static int DetectDatarepSetup (DetectEngineCtx *de_ctx, Signature *s, const char
 
     cd->set = set;
     cd->op = op;
-    cd->rep.value = value;
+    cd->rep = value;
 
     SCLogDebug("cmd %s, name %s",
         cmd_str, strlen(name) ? name : "(none)");
@@ -352,7 +352,7 @@ static int DetectDatarepSetup (DetectEngineCtx *de_ctx, Signature *s, const char
     /* Okay so far so good, lets get this into a SigMatch
      * and put it in the Signature. */
 
-    if (SigMatchAppendSMToList(de_ctx, s, DETECT_DATAREP, (SigMatchCtx *)cd, list) == NULL) {
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_DATAREP, (SigMatchCtx *)cd, list) == NULL) {
         goto error;
     }
     return 0;

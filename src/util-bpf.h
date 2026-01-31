@@ -21,13 +21,13 @@
  * \author Eric Leblond <eric@regit.org>
  */
 
-#ifndef __UTIL_BPF_H__
-#define __UTIL_BPF_H__
+#ifndef SURICATA_UTIL_BPF_H
+#define SURICATA_UTIL_BPF_H
 
 #include "conf.h"
 
 void ConfSetBPFFilter(
-        ConfNode *if_root, ConfNode *if_default, const char *iface, const char **bpf_filter);
+        SCConfNode *if_root, SCConfNode *if_default, const char *iface, const char **bpf_filter);
 
 int SCBPFCompile(int snaplen_arg, int linktype_arg, struct bpf_program *program,
                  const char *buf, int optimize, uint32_t mask,
@@ -35,4 +35,4 @@ int SCBPFCompile(int snaplen_arg, int linktype_arg, struct bpf_program *program,
 
 void SCBPFFree(struct bpf_program *program);
 
-#endif /* __UTIL_BPF_H__ */
+#endif /* SURICATA_UTIL_BPF_H */

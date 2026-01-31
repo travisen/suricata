@@ -17,13 +17,13 @@
 
 //! Nom parsers for RPC & NFSv3
 
-use std::cmp;
 use crate::nfs::nfs_records::*;
 use nom7::bytes::streaming::take;
 use nom7::combinator::{complete, cond, rest, verify};
 use nom7::multi::{length_data, many0};
 use nom7::number::streaming::{be_u32, be_u64};
 use nom7::IResult;
+use std::cmp;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Nfs3Handle<'a> {
@@ -31,7 +31,7 @@ pub struct Nfs3Handle<'a> {
     pub value: &'a [u8],
 }
 
-pub fn parse_nfs3_handle(i: &[u8]) -> IResult<&[u8], Nfs3Handle> {
+pub fn parse_nfs3_handle(i: &[u8]) -> IResult<&[u8], Nfs3Handle<'_>> {
     let (i, len) = be_u32(i)?;
     let (i, value) = take(len as usize)(i)?;
     let handle = Nfs3Handle { len, value };
@@ -44,7 +44,7 @@ pub struct Nfs3ReplyCreate<'a> {
     pub handle: Option<Nfs3Handle<'a>>,
 }
 
-pub fn parse_nfs3_response_create(i: &[u8]) -> IResult<&[u8], Nfs3ReplyCreate> {
+pub fn parse_nfs3_response_create(i: &[u8]) -> IResult<&[u8], Nfs3ReplyCreate<'_>> {
     let (i, status) = be_u32(i)?;
     let (i, handle_has_value) = verify(be_u32, |&v| v <= 1)(i)?;
     let (i, handle) = cond(handle_has_value == 1, parse_nfs3_handle)(i)?;
@@ -58,7 +58,7 @@ pub struct Nfs3ReplyLookup<'a> {
     pub handle: Nfs3Handle<'a>,
 }
 
-pub fn parse_nfs3_response_lookup(i: &[u8]) -> IResult<&[u8], Nfs3ReplyLookup> {
+pub fn parse_nfs3_response_lookup(i: &[u8]) -> IResult<&[u8], Nfs3ReplyLookup<'_>> {
     let (i, status) = be_u32(i)?;
     let (i, handle) = parse_nfs3_handle(i)?;
     let reply = Nfs3ReplyLookup { status, handle };
@@ -74,7 +74,7 @@ pub struct Nfs3RequestCreate<'a> {
     pub name_vec: Vec<u8>,
 }
 
-pub fn parse_nfs3_request_create(i: &[u8]) -> IResult<&[u8], Nfs3RequestCreate> {
+pub fn parse_nfs3_request_create(i: &[u8]) -> IResult<&[u8], Nfs3RequestCreate<'_>> {
     let (i, handle) = parse_nfs3_handle(i)?;
     let (i, name_len) = be_u32(i)?;
     let (i, name) = take(name_len as usize)(i)?;
@@ -98,7 +98,7 @@ pub struct Nfs3RequestRemove<'a> {
     pub name_vec: Vec<u8>,
 }
 
-pub fn parse_nfs3_request_remove(i: &[u8]) -> IResult<&[u8], Nfs3RequestRemove> {
+pub fn parse_nfs3_request_remove(i: &[u8]) -> IResult<&[u8], Nfs3RequestRemove<'_>> {
     let (i, handle) = parse_nfs3_handle(i)?;
     let (i, name_len) = be_u32(i)?;
     let (i, name) = take(name_len as usize)(i)?;
@@ -117,7 +117,7 @@ pub struct Nfs3RequestRmdir<'a> {
     pub name_vec: Vec<u8>,
 }
 
-pub fn parse_nfs3_request_rmdir(i: &[u8]) -> IResult<&[u8], Nfs3RequestRmdir> {
+pub fn parse_nfs3_request_rmdir(i: &[u8]) -> IResult<&[u8], Nfs3RequestRmdir<'_>> {
     let (i, handle) = parse_nfs3_handle(i)?;
     let (i, name_len) = be_u32(i)?;
     let (i, name) = take(name_len as usize)(i)?;
@@ -135,7 +135,7 @@ pub struct Nfs3RequestMkdir<'a> {
     pub name_vec: Vec<u8>,
 }
 
-pub fn parse_nfs3_request_mkdir(i: &[u8]) -> IResult<&[u8], Nfs3RequestMkdir> {
+pub fn parse_nfs3_request_mkdir(i: &[u8]) -> IResult<&[u8], Nfs3RequestMkdir<'_>> {
     let (i, handle) = parse_nfs3_handle(i)?;
     let (i, name_len) = be_u32(i)?;
     let (i, name) = take(name_len as usize)(i)?;
@@ -156,7 +156,7 @@ pub struct Nfs3RequestRename<'a> {
     pub to_name_vec: Vec<u8>,
 }
 
-pub fn parse_nfs3_request_rename(i: &[u8]) -> IResult<&[u8], Nfs3RequestRename> {
+pub fn parse_nfs3_request_rename(i: &[u8]) -> IResult<&[u8], Nfs3RequestRename<'_>> {
     let (i, from_handle) = parse_nfs3_handle(i)?;
     let (i, from_name_len) = be_u32(i)?;
     let (i, from_name) = take(from_name_len as usize)(i)?;
@@ -180,7 +180,7 @@ pub struct Nfs3RequestGetAttr<'a> {
     pub handle: Nfs3Handle<'a>,
 }
 
-pub fn parse_nfs3_request_getattr(i: &[u8]) -> IResult<&[u8], Nfs3RequestGetAttr> {
+pub fn parse_nfs3_request_getattr(i: &[u8]) -> IResult<&[u8], Nfs3RequestGetAttr<'_>> {
     let (i, handle) = parse_nfs3_handle(i)?;
     Ok((i, Nfs3RequestGetAttr { handle }))
 }
@@ -191,7 +191,7 @@ pub struct Nfs3RequestAccess<'a> {
     pub check_access: u32,
 }
 
-pub fn parse_nfs3_request_access(i: &[u8]) -> IResult<&[u8], Nfs3RequestAccess> {
+pub fn parse_nfs3_request_access(i: &[u8]) -> IResult<&[u8], Nfs3RequestAccess<'_>> {
     let (i, handle) = parse_nfs3_handle(i)?;
     let (i, check_access) = be_u32(i)?;
     let req = Nfs3RequestAccess {
@@ -206,7 +206,7 @@ pub struct Nfs3RequestCommit<'a> {
     pub handle: Nfs3Handle<'a>,
 }
 
-pub fn parse_nfs3_request_commit(i: &[u8]) -> IResult<&[u8], Nfs3RequestCommit> {
+pub fn parse_nfs3_request_commit(i: &[u8]) -> IResult<&[u8], Nfs3RequestCommit<'_>> {
     let (i, handle) = parse_nfs3_handle(i)?;
     let (i, _offset) = be_u64(i)?;
     let (i, _count) = be_u32(i)?;
@@ -219,7 +219,7 @@ pub struct Nfs3RequestRead<'a> {
     pub offset: u64,
 }
 
-pub fn parse_nfs3_request_read(i: &[u8]) -> IResult<&[u8], Nfs3RequestRead> {
+pub fn parse_nfs3_request_read(i: &[u8]) -> IResult<&[u8], Nfs3RequestRead<'_>> {
     let (i, handle) = parse_nfs3_handle(i)?;
     let (i, offset) = be_u64(i)?;
     let (i, _count) = be_u32(i)?;
@@ -232,7 +232,7 @@ pub struct Nfs3RequestLookup<'a> {
     pub name_vec: Vec<u8>,
 }
 
-pub fn parse_nfs3_request_lookup(i: &[u8]) -> IResult<&[u8], Nfs3RequestLookup> {
+pub fn parse_nfs3_request_lookup(i: &[u8]) -> IResult<&[u8], Nfs3RequestLookup<'_>> {
     let (i, handle) = parse_nfs3_handle(i)?;
     let (i, name_contents) = length_data(be_u32)(i)?;
     let (i, _name_padding) = rest(i)?;
@@ -251,7 +251,7 @@ pub struct Nfs3ResponseReaddirplusEntryC<'a> {
 
 pub fn parse_nfs3_response_readdirplus_entry(
     i: &[u8],
-) -> IResult<&[u8], Nfs3ResponseReaddirplusEntryC> {
+) -> IResult<&[u8], Nfs3ResponseReaddirplusEntryC<'_>> {
     let (i, _file_id) = be_u64(i)?;
     let (i, name_len) = be_u32(i)?;
     let (i, name_contents) = take(name_len as usize)(i)?;
@@ -275,7 +275,7 @@ pub struct Nfs3ResponseReaddirplusEntry<'a> {
 
 pub fn parse_nfs3_response_readdirplus_entry_cond(
     i: &[u8],
-) -> IResult<&[u8], Nfs3ResponseReaddirplusEntry> {
+) -> IResult<&[u8], Nfs3ResponseReaddirplusEntry<'_>> {
     let (i, value_follows) = verify(be_u32, |&v| v <= 1)(i)?;
     let (i, entry) = cond(value_follows == 1, parse_nfs3_response_readdirplus_entry)(i)?;
     Ok((i, Nfs3ResponseReaddirplusEntry { entry }))
@@ -287,7 +287,7 @@ pub struct Nfs3ResponseReaddirplus<'a> {
     pub data: &'a [u8],
 }
 
-pub fn parse_nfs3_response_readdirplus(i: &[u8]) -> IResult<&[u8], Nfs3ResponseReaddirplus> {
+pub fn parse_nfs3_response_readdirplus(i: &[u8]) -> IResult<&[u8], Nfs3ResponseReaddirplus<'_>> {
     let (i, status) = be_u32(i)?;
     let (i, dir_attr_follows) = verify(be_u32, |&v| v <= 1)(i)?;
     let (i, _dir_attr) = cond(dir_attr_follows == 1, take(84_usize))(i)?;
@@ -299,10 +299,9 @@ pub fn parse_nfs3_response_readdirplus(i: &[u8]) -> IResult<&[u8], Nfs3ResponseR
 
 pub(crate) fn many0_nfs3_response_readdirplus_entries(
     input: &[u8],
-) -> IResult<&[u8], Vec<Nfs3ResponseReaddirplusEntry>> {
+) -> IResult<&[u8], Vec<Nfs3ResponseReaddirplusEntry<'_>>> {
     many0(complete(parse_nfs3_response_readdirplus_entry_cond))(input)
 }
-
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Nfs3RequestReaddirplus<'a> {
@@ -313,7 +312,7 @@ pub struct Nfs3RequestReaddirplus<'a> {
     pub maxcount: u32,
 }
 
-pub fn parse_nfs3_request_readdirplus(i: &[u8]) -> IResult<&[u8], Nfs3RequestReaddirplus> {
+pub fn parse_nfs3_request_readdirplus(i: &[u8]) -> IResult<&[u8], Nfs3RequestReaddirplus<'_>> {
     let (i, handle) = parse_nfs3_handle(i)?;
     let (i, cookie) = be_u64(i)?;
     let (i, verifier) = take(8_usize)(i)?;
@@ -358,13 +357,17 @@ fn parse_nfs3_data_partial(i: &[u8], file_len: usize, fill_bytes: usize) -> IRes
 /// 1. we have the complete RPC data
 /// 2. we have incomplete data but enough for all file data (partial fill bytes)
 /// 3. we have incomplete file data
-pub fn parse_nfs3_request_write(i: &[u8], complete: bool) -> IResult<&[u8], Nfs3RequestWrite> {
+pub fn parse_nfs3_request_write(i: &[u8], complete: bool) -> IResult<&[u8], Nfs3RequestWrite<'_>> {
     let (i, handle) = parse_nfs3_handle(i)?;
     let (i, offset) = be_u64(i)?;
     let (i, count) = be_u32(i)?;
     let (i, stable) = verify(be_u32, |&v| v <= 2)(i)?;
     let (i, file_len) = verify(be_u32, |&v| v <= count)(i)?;
-    let fill_bytes = if file_len % 4 != 0 { 4 - file_len % 4 } else { 0 };
+    let fill_bytes = if file_len % 4 != 0 {
+        4 - file_len % 4
+    } else {
+        0
+    };
     // Handle the various file data parsing logics
     let (i, file_data) = if complete {
         parse_nfs3_data_complete(i, file_len as usize, fill_bytes as usize)?
@@ -384,14 +387,18 @@ pub fn parse_nfs3_request_write(i: &[u8], complete: bool) -> IResult<&[u8], Nfs3
     Ok((i, req))
 }
 
-pub fn parse_nfs3_reply_read(i: &[u8], complete: bool) -> IResult<&[u8], NfsReplyRead> {
+pub fn parse_nfs3_reply_read(i: &[u8], complete: bool) -> IResult<&[u8], NfsReplyRead<'_>> {
     let (i, status) = be_u32(i)?;
     let (i, attr_follows) = verify(be_u32, |&v| v <= 1)(i)?;
     let (i, attr_blob) = take(84_usize)(i)?; // fixed size?
     let (i, count) = be_u32(i)?;
     let (i, eof) = verify(be_u32, |&v| v <= 1)(i)?;
     let (i, data_len) = verify(be_u32, |&v| v <= count)(i)?;
-    let fill_bytes = if data_len % 4 != 0 { 4 - data_len % 4 } else { 0 };
+    let fill_bytes = if data_len % 4 != 0 {
+        4 - data_len % 4
+    } else {
+        0
+    };
     // Handle the various file data parsing logics
     let (i, data) = if complete {
         parse_nfs3_data_complete(i, data_len as usize, fill_bytes as usize)?
@@ -625,7 +632,6 @@ mod tests {
 
     #[test]
     fn test_nfs3_request_access() {
-
         #[rustfmt::skip]
         let buf: &[u8] = &[
             0x00, 0x00, 0x00, 0x20, /*handle_len: (32)*/
@@ -646,7 +652,6 @@ mod tests {
 
     #[test]
     fn test_nfs3_request_commit() {
-
         // packet_bytes -- used [READ Call] message digest
         #[rustfmt::skip]
         let buf: &[u8] = &[
@@ -668,7 +673,6 @@ mod tests {
 
     #[test]
     fn test_nfs3_request_read() {
-
         #[rustfmt::skip]
         let buf: &[u8] = &[
             0x00, 0x00, 0x00, 0x20, /*handle_len: (32)*/
@@ -690,7 +694,6 @@ mod tests {
 
     #[test]
     fn test_nfs3_request_lookup() {
-
         #[rustfmt::skip]
         let buf: &[u8] = &[
         // [handle]
@@ -715,7 +718,6 @@ mod tests {
 
     #[test]
     fn test_nfs3_response_readdirplus() {
-
         #[rustfmt::skip]
         let buf: &[u8] = &[
             0x00, 0x00, 0x00, 0x00, /*status*/
@@ -793,13 +795,22 @@ mod tests {
 
         let (r, entries) = many0_nfs3_response_readdirplus_entries(data_buf).unwrap();
         assert_eq!(r.len(), 4);
-        assert_eq!(entries[0], Nfs3ResponseReaddirplusEntry { entry: Some(entry0) });
-        assert_eq!(entries[1], Nfs3ResponseReaddirplusEntry { entry: Some(entry1) });
+        assert_eq!(
+            entries[0],
+            Nfs3ResponseReaddirplusEntry {
+                entry: Some(entry0)
+            }
+        );
+        assert_eq!(
+            entries[1],
+            Nfs3ResponseReaddirplusEntry {
+                entry: Some(entry1)
+            }
+        );
     }
 
     #[test]
     fn test_nfs3_response_readdirplus_entry() {
-
         #[rustfmt::skip]
         let buf: &[u8] = &[
             0x00, 0x00, 0x00, 0x01, /*value_follows*/
@@ -831,17 +842,20 @@ mod tests {
 
         let (_, response) = parse_nfs3_response_readdirplus_entry_cond(buf).unwrap();
         match response {
-            Nfs3ResponseReaddirplusEntry { entry: Some(entry_c) } => {
+            Nfs3ResponseReaddirplusEntry {
+                entry: Some(entry_c),
+            } => {
                 assert_eq!(entry_c.name_vec, ".".as_bytes());
                 assert_eq!(entry_c.handle, Some(entry_handle));
             }
-            _ => { panic!("Failure"); }
+            _ => {
+                panic!("Failure");
+            }
         }
     }
 
     #[test]
     fn test_nfs3_request_readdirplus() {
-
         #[rustfmt::skip]
         let buf: &[u8] = &[
             0x00, 0x00, 0x00, 0x24, /*handle_len*/
@@ -872,7 +886,6 @@ mod tests {
 
     #[test]
     fn test_nfs3_request_write() {
-
         #[rustfmt::skip]
         let buf: &[u8] = &[
         // [handle]
@@ -906,7 +919,6 @@ mod tests {
 
     #[test]
     fn test_nfs3_reply_read() {
-
         #[rustfmt::skip]
         let buf: &[u8] = &[
             0x00, 0x00, 0x00, 0x00, /*Status: NFS3_OK (0)*/

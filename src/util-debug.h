@@ -21,24 +21,11 @@
  * \author Anoop Saldanha <anoopsaldanha@gmail.com>
  */
 
-#ifndef __UTIL_DEBUG_H__
-#define __UTIL_DEBUG_H__
+#ifndef SURICATA_UTIL_DEBUG_H
+#define SURICATA_UTIL_DEBUG_H
 
-#include "suricata-common.h"
-
-#include "threads.h"
 #include "util-error.h"
-#include "util-debug-filters.h"
-
-/**
- * \brief ENV vars that can be used to set the properties for the logging module
- */
-#define SC_LOG_ENV_LOG_LEVEL        "SC_LOG_LEVEL"
-#define SC_LOG_ENV_LOG_OP_IFACE     "SC_LOG_OP_IFACE"
-#define SC_LOG_ENV_LOG_FILE         "SC_LOG_FILE"
-#define SC_LOG_ENV_LOG_FACILITY     "SC_LOG_FACILITY"
-#define SC_LOG_ENV_LOG_FORMAT       "SC_LOG_FORMAT"
-#define SC_LOG_ENV_LOG_OP_FILTER    "SC_LOG_OP_FILTER"
+#include "util-enum.h"
 
 /**
  * \brief The various log levels
@@ -57,6 +44,27 @@ typedef enum {
     SC_LOG_DEBUG,
     SC_LOG_LEVEL_MAX,
 } SCLogLevel;
+
+extern const char *SCLogLevel2Name(const SCLogLevel lvl);
+
+SCError SCLogMessage(const SCLogLevel, const char *, const unsigned int, const char *, const char *,
+        const char *message);
+
+#ifndef SURICATA_BINDGEN_H
+#include "suricata-common.h"
+
+#include "threads.h"
+#include "util-debug-filters.h"
+
+/**
+ * \brief ENV vars that can be used to set the properties for the logging module
+ */
+#define SC_LOG_ENV_LOG_LEVEL     "SC_LOG_LEVEL"
+#define SC_LOG_ENV_LOG_OP_IFACE  "SC_LOG_OP_IFACE"
+#define SC_LOG_ENV_LOG_FILE      "SC_LOG_FILE"
+#define SC_LOG_ENV_LOG_FACILITY  "SC_LOG_FACILITY"
+#define SC_LOG_ENV_LOG_FORMAT    "SC_LOG_FORMAT"
+#define SC_LOG_ENV_LOG_OP_FILTER "SC_LOG_OP_FILTER"
 
 /**
  * \brief The various output interfaces supported
@@ -80,8 +88,8 @@ typedef enum {
 #define SC_LOG_DEF_LOG_FORMAT_REL_CONFIG "[%i] %d: %S: %M"
 #define SC_LOG_DEF_LOG_FORMAT_DEBUG      "%d: %S: %M [%n:%f:%l]"
 
-/* The maximum length of the log message */
-#define SC_LOG_MAX_LOG_MSG_LEN 2048
+/* The maximum length of the log message: we add max rule size and other info */
+#define SC_LOG_MAX_LOG_MSG_LEN 8192 + PATH_MAX + 512
 
 /* The maximum length of the log format */
 #define SC_LOG_MAX_LOG_FORMAT_LEN 128
@@ -227,7 +235,12 @@ void SCLogErr(int x, const char *file, const char *func, const int line, const c
 
 #define SCLogConfig(...)                                                                           \
     SCLog(SC_LOG_CONFIG, __FILE__, __FUNCTION__, __LINE__, _sc_module, __VA_ARGS__)
+#define SCLogConfigRaw(file, func, line, ...)                                                      \
+    SCLog(SC_LOG_CONFIG, (file), (func), (line), _sc_module, __VA_ARGS__)
+
 #define SCLogPerf(...) SCLog(SC_LOG_PERF, __FILE__, __FUNCTION__, __LINE__, _sc_module, __VA_ARGS__)
+#define SCLogPerfRaw(file, func, line, ...)                                                        \
+    SCLog(SC_LOG_PERF, (file), (func), (line), _sc_module, __VA_ARGS__)
 
 /**
  * \brief Macro used to log NOTICE messages.
@@ -302,6 +315,8 @@ void SCLogErr(int x, const char *file, const char *func, const int line, const c
  */
 #define SCLogDebug(...)                                                                            \
     SCLog(SC_LOG_DEBUG, __FILE__, __FUNCTION__, __LINE__, _sc_module, __VA_ARGS__)
+#define SCLogDebugRaw(file, func, line, ...)                                                       \
+    SCLog(SC_LOG_DEBUG, (file), (func), (line), _sc_module, __VA_ARGS__)
 
 /**
  * \brief Macro used to log debug messages on function entry.  Comes under the
@@ -512,7 +527,7 @@ void SCLogErr(int x, const char *file, const char *func, const int line, const c
     do {                                                                                           \
         SC_ATOMIC_EXTERN(unsigned int, engine_stage);                                              \
         int init_errors_fatal = 0;                                                                 \
-        (void)ConfGetBool("engine.init-failure-fatal", &init_errors_fatal);                        \
+        (void)SCConfGetBool("engine.init-failure-fatal", &init_errors_fatal);                      \
         if (init_errors_fatal && (SC_ATOMIC_GET(engine_stage) == SURICATA_INIT)) {                 \
             SCLogError(__VA_ARGS__);                                                               \
             exit(EXIT_FAILURE);                                                                    \
@@ -534,9 +549,6 @@ void SCLogInitLogModule(SCLogInitData *);
 
 void SCLogDeInitLogModule(void);
 
-SCError SCLogMessage(const SCLogLevel, const char *, const unsigned int, const char *, const char *,
-        const char *message);
-
 SCLogOPBuffer *SCLogAllocLogOPBuffer(void);
 
 int SCLogDebugEnabled(void);
@@ -544,7 +556,10 @@ int SCLogDebugEnabled(void);
 void SCLogRegisterTests(void);
 
 void SCLogLoadConfig(int daemon, int verbose, uint32_t userid, uint32_t groupid);
+#endif // #ifndef SURICATA_BINDGEN_H
+
+void SCFatalErrorOnInitStatic(const char *);
 
 SCLogLevel SCLogGetLogLevel(void);
 
-#endif /* __UTIL_DEBUG_H__ */
+#endif /* SURICATA_UTIL_DEBUG_H */

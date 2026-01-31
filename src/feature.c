@@ -42,9 +42,9 @@ static uint32_t FeatureHashFunc(HashListTable *ht, void *data,
 {
     FeatureEntryType *f = (FeatureEntryType *)data;
     uint32_t hash = 0;
-    int len = strlen(f->feature);
+    size_t len = strlen(f->feature);
 
-    for (int i = 0; i < len; i++)
+    for (size_t i = 0; i < len; i++)
         hash += u8_tolower((unsigned char)f->feature[i]);
 
     return (hash % ht->array_size);
@@ -55,8 +55,6 @@ static char FeatureHashCompareFunc(void *data1, uint16_t datalen1,
 {
     FeatureEntryType *f1 = (FeatureEntryType *)data1;
     FeatureEntryType *f2 = (FeatureEntryType *)data2;
-    int len1 = 0;
-    int len2 = 0;
 
     if (f1 == NULL || f2 == NULL)
         return 0;
@@ -64,10 +62,7 @@ static char FeatureHashCompareFunc(void *data1, uint16_t datalen1,
     if (f1->feature == NULL || f2->feature == NULL)
         return 0;
 
-    len1 = strlen(f1->feature);
-    len2 = strlen(f2->feature);
-
-    return (len1 == len2 && memcmp(f1->feature, f2->feature, len1) == 0);
+    return strcmp(f1->feature, f2->feature) == 0;
 }
 
 static void FeatureHashFreeFunc(void *data)
@@ -123,7 +118,7 @@ void ProvidesFeature(const char *feature_name)
     SCMutexUnlock(&feature_table_mutex);
 }
 
-bool RequiresFeature(const char *feature_name)
+bool SCRequiresFeature(const char *feature_name)
 {
     FeatureEntryType f = { feature_name };
 

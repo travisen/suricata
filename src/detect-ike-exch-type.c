@@ -49,13 +49,14 @@ static int DetectIkeExchTypeMatch(DetectEngineThreadCtx *, Flow *, uint8_t, void
  */
 void DetectIkeExchTypeRegister(void)
 {
-    sigmatch_table[DETECT_AL_IKE_EXCH_TYPE].name = "ike.exchtype";
-    sigmatch_table[DETECT_AL_IKE_EXCH_TYPE].desc = "match IKE exchange type";
-    sigmatch_table[DETECT_AL_IKE_EXCH_TYPE].url = "/rules/ike-keywords.html#ike-exchtype";
-    sigmatch_table[DETECT_AL_IKE_EXCH_TYPE].Match = NULL;
-    sigmatch_table[DETECT_AL_IKE_EXCH_TYPE].AppLayerTxMatch = DetectIkeExchTypeMatch;
-    sigmatch_table[DETECT_AL_IKE_EXCH_TYPE].Setup = DetectIkeExchTypeSetup;
-    sigmatch_table[DETECT_AL_IKE_EXCH_TYPE].Free = DetectIkeExchTypeFree;
+    sigmatch_table[DETECT_IKE_EXCH_TYPE].name = "ike.exchtype";
+    sigmatch_table[DETECT_IKE_EXCH_TYPE].desc = "match IKE exchange type";
+    sigmatch_table[DETECT_IKE_EXCH_TYPE].url = "/rules/ike-keywords.html#ike-exchtype";
+    sigmatch_table[DETECT_IKE_EXCH_TYPE].Match = NULL;
+    sigmatch_table[DETECT_IKE_EXCH_TYPE].AppLayerTxMatch = DetectIkeExchTypeMatch;
+    sigmatch_table[DETECT_IKE_EXCH_TYPE].Setup = DetectIkeExchTypeSetup;
+    sigmatch_table[DETECT_IKE_EXCH_TYPE].Free = DetectIkeExchTypeFree;
+    sigmatch_table[DETECT_IKE_EXCH_TYPE].flags = SIGMATCH_INFO_UINT8;
 
     DetectAppLayerInspectEngineRegister("ike.exchtype", ALPROTO_IKE, SIG_FLAG_TOSERVER, 1,
             DetectEngineInspectGenericList, NULL);
@@ -87,7 +88,7 @@ static int DetectIkeExchTypeMatch(DetectEngineThreadCtx *det_ctx, Flow *f, uint8
     SCEnter();
 
     uint8_t exch_type;
-    if (!rs_ike_state_get_exch_type(txv, &exch_type))
+    if (!SCIkeStateGetExchType(txv, &exch_type))
         SCReturnInt(0);
 
     const DetectU8Data *du8 = (const DetectU8Data *)ctx;
@@ -106,7 +107,7 @@ static int DetectIkeExchTypeMatch(DetectEngineThreadCtx *det_ctx, Flow *f, uint8
  */
 static int DetectIkeExchTypeSetup(DetectEngineCtx *de_ctx, Signature *s, const char *rawstr)
 {
-    if (DetectSignatureSetAppProto(s, ALPROTO_IKE) != 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_IKE) != 0)
         return -1;
 
     DetectU8Data *ike_exch_type = DetectU8Parse(rawstr);
@@ -116,7 +117,7 @@ static int DetectIkeExchTypeSetup(DetectEngineCtx *de_ctx, Signature *s, const c
     /* okay so far so good, lets get this into a SigMatch
      * and put it in the Signature. */
 
-    if (SigMatchAppendSMToList(de_ctx, s, DETECT_AL_IKE_EXCH_TYPE, (SigMatchCtx *)ike_exch_type,
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_IKE_EXCH_TYPE, (SigMatchCtx *)ike_exch_type,
                 g_ike_exch_type_buffer_id) == NULL) {
         goto error;
     }
@@ -135,5 +136,5 @@ error:
  */
 static void DetectIkeExchTypeFree(DetectEngineCtx *de_ctx, void *ptr)
 {
-    rs_detect_u8_free(ptr);
+    SCDetectU8Free(ptr);
 }

@@ -37,6 +37,7 @@
 #include "detect.h"
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-state.h"
 #include "detect-engine-prefilter.h"
@@ -68,47 +69,44 @@ static int g_keyword_thread_id = 0;
 static HttpHeaderThreadDataConfig g_td_config = { BUFFER_SIZE_STEP };
 
 static uint8_t *GetBufferForTX(
-        htp_tx_t *tx, DetectEngineThreadCtx *det_ctx, Flow *f, uint8_t flags, uint32_t *buffer_len)
+        htp_tx_t *tx, DetectEngineThreadCtx *det_ctx, uint8_t flags, uint32_t *buffer_len)
 {
     *buffer_len = 0;
 
     HttpHeaderThreadData *hdr_td = NULL;
-    HttpHeaderBuffer *buf =
-            HttpHeaderGetBufferSpace(det_ctx, f, flags, g_keyword_thread_id, &hdr_td);
+    HttpHeaderBuffer *buf = HttpHeaderGetBufferSpace(det_ctx, flags, g_keyword_thread_id, &hdr_td);
     if (unlikely(buf == NULL)) {
         return NULL;
     }
 
-    htp_table_t *headers;
+    const htp_headers_t *headers;
     if (flags & STREAM_TOSERVER) {
         if (AppLayerParserGetStateProgress(IPPROTO_TCP, ALPROTO_HTTP1, tx, flags) <=
-                HTP_REQUEST_HEADERS)
+                HTP_REQUEST_PROGRESS_HEADERS)
             return NULL;
-        headers = tx->request_headers;
+        headers = htp_tx_request_headers(tx);
     } else {
         if (AppLayerParserGetStateProgress(IPPROTO_TCP, ALPROTO_HTTP1, tx, flags) <=
-                HTP_RESPONSE_HEADERS)
+                HTP_RESPONSE_PROGRESS_HEADERS)
             return NULL;
-        headers = tx->response_headers;
+        headers = htp_tx_response_headers(tx);
     }
     if (headers == NULL)
         return NULL;
 
     size_t i = 0;
-    size_t no_of_headers = htp_table_size(headers);
+    size_t no_of_headers = htp_headers_size(headers);
     for (; i < no_of_headers; i++) {
-        htp_header_t *h = htp_table_get_index(headers, i, NULL);
-        size_t size1 = bstr_size(h->name);
-        size_t size2 = bstr_size(h->value);
+        const htp_header_t *h = htp_headers_get_index(headers, i);
+        size_t size1 = htp_header_name_len(h);
+        size_t size2 = htp_header_value_len(h);
 
         if (flags & STREAM_TOSERVER) {
-            if (size1 == 6 &&
-                SCMemcmpLowercase("cookie", bstr_ptr(h->name), 6) == 0) {
+            if (size1 == 6 && SCMemcmpLowercase("cookie", htp_header_name_ptr(h), 6) == 0) {
                 continue;
             }
         } else {
-            if (size1 == 10 &&
-                SCMemcmpLowercase("set-cookie", bstr_ptr(h->name), 10) == 0) {
+            if (size1 == 10 && SCMemcmpLowercase("set-cookie", htp_header_name_ptr(h), 10) == 0) {
                 continue;
             }
         }
@@ -124,12 +122,12 @@ static uint8_t *GetBufferForTX(
             }
         }
 
-        memcpy(buf->buffer + buf->len, bstr_ptr(h->name), bstr_size(h->name));
-        buf->len += bstr_size(h->name);
+        memcpy(buf->buffer + buf->len, htp_header_name_ptr(h), htp_header_name_len(h));
+        buf->len += htp_header_name_len(h);
         buf->buffer[buf->len++] = ':';
         buf->buffer[buf->len++] = ' ';
-        memcpy(buf->buffer + buf->len, bstr_ptr(h->value), bstr_size(h->value));
-        buf->len += bstr_size(h->value);
+        memcpy(buf->buffer + buf->len, htp_header_value_ptr(h), htp_header_value_len(h));
+        buf->len += htp_header_value_len(h);
         buf->buffer[buf->len++] = '\r';
         buf->buffer[buf->len++] = '\n';
 #if 0 // looks like this breaks existing rules
@@ -153,72 +151,30 @@ static InspectionBuffer *GetBuffer2ForTX(DetectEngineThreadCtx *det_ctx,
         uint32_t b_len = 0;
         const uint8_t *b = NULL;
 
-        if (rs_http2_tx_get_headers(txv, flow_flags, &b, &b_len) != 1)
+        if (SCHttp2TxGetHeaders(txv, flow_flags, &b, &b_len) != 1)
             return NULL;
         if (b == NULL || b_len == 0)
             return NULL;
 
-        InspectionBufferSetup(det_ctx, list_id, buffer, b, b_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(det_ctx, list_id, buffer, b, b_len, transforms);
     }
 
     return buffer;
 }
 
-/** \internal
- *  \brief custom inspect function to utilize the cached headers
- */
-static uint8_t DetectEngineInspectBufferHttpHeader(DetectEngineCtx *de_ctx,
-        DetectEngineThreadCtx *det_ctx, const DetectEngineAppInspectionEngine *engine,
-        const Signature *s, Flow *f, uint8_t flags, void *alstate, void *txv, uint64_t tx_id)
+static InspectionBuffer *GetData1(DetectEngineThreadCtx *det_ctx,
+        const DetectEngineTransforms *transforms, Flow *_f, const uint8_t flags, void *txv,
+        const int list_id)
 {
-    SCEnter();
-
-    const int list_id = engine->sm_list;
     InspectionBuffer *buffer = InspectionBufferGet(det_ctx, list_id);
     if (buffer->inspect == NULL) {
-        SCLogDebug("setting up inspect buffer %d", list_id);
-
-        /* if prefilter didn't already run, we need to consider transformations */
-        const DetectEngineTransforms *transforms = NULL;
-        if (!engine->mpm) {
-            transforms = engine->v2.transforms;
-        }
-
-        uint32_t rawdata_len = 0;
-        uint8_t *rawdata = GetBufferForTX(txv, det_ctx, f, flags, &rawdata_len);
-        if (rawdata_len == 0) {
-            SCLogDebug("no data");
-            goto end;
-        }
-        /* setup buffer and apply transforms */
-        InspectionBufferSetup(det_ctx, list_id, buffer, rawdata, rawdata_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        uint32_t data_len = 0;
+        uint8_t *data = GetBufferForTX(txv, det_ctx, flags, &data_len);
+        InspectionBufferSetupAndApplyTransforms(
+                det_ctx, list_id, buffer, data, data_len, transforms);
     }
 
-    const uint32_t data_len = buffer->inspect_len;
-    const uint8_t *data = buffer->inspect;
-    const uint64_t offset = buffer->inspect_offset;
-
-    /* Inspect all the uricontents fetched on each
-     * transaction at the app layer */
-    const bool match = DetectEngineContentInspection(de_ctx, det_ctx, s, engine->smd, NULL, f,
-            (uint8_t *)data, data_len, offset, DETECT_CI_FLAGS_SINGLE,
-            DETECT_ENGINE_CONTENT_INSPECTION_MODE_STATE);
-    if (match) {
-        return DETECT_ENGINE_INSPECT_SIG_MATCH;
-    }
-end:
-    if (flags & STREAM_TOSERVER) {
-        if (AppLayerParserGetStateProgress(IPPROTO_TCP, ALPROTO_HTTP1, txv, flags) >
-                HTP_REQUEST_HEADERS)
-            return DETECT_ENGINE_INSPECT_SIG_CANT_MATCH;
-    } else {
-        if (AppLayerParserGetStateProgress(IPPROTO_TCP, ALPROTO_HTTP1, txv, flags) >
-                HTP_RESPONSE_HEADERS)
-            return DETECT_ENGINE_INSPECT_SIG_CANT_MATCH;
-    }
-    return DETECT_ENGINE_INSPECT_SIG_NO_MATCH;
+    return buffer;
 }
 
 typedef struct PrefilterMpmHttpHeaderCtx {
@@ -248,13 +204,13 @@ static void PrefilterMpmHttpHeader(DetectEngineThreadCtx *det_ctx, const void *p
     InspectionBuffer *buffer = InspectionBufferGet(det_ctx, list_id);
     if (buffer->inspect == NULL) {
         uint32_t rawdata_len = 0;
-        uint8_t *rawdata = GetBufferForTX(txv, det_ctx, f, flags, &rawdata_len);
+        uint8_t *rawdata = GetBufferForTX(txv, det_ctx, flags, &rawdata_len);
         if (rawdata_len == 0)
             return;
 
         /* setup buffer and apply transforms */
-        InspectionBufferSetup(det_ctx, list_id, buffer, rawdata, rawdata_len);
-        InspectionBufferApplyTransforms(buffer, ctx->transforms);
+        InspectionBufferSetupAndApplyTransforms(
+                det_ctx, list_id, buffer, rawdata, rawdata_len, ctx->transforms);
     }
 
     const uint32_t data_len = buffer->inspect_len;
@@ -278,9 +234,8 @@ static void PrefilterMpmHttpTrailer(DetectEngineThreadCtx *det_ctx, const void *
     htp_tx_t *tx = txv;
     const HtpTxUserData *htud = (const HtpTxUserData *)htp_tx_get_user_data(tx);
     /* if the request wasn't flagged as having a trailer, we skip */
-    if (htud && (
-            ((flags & STREAM_TOSERVER) && !htud->request_has_trailers) ||
-            ((flags & STREAM_TOCLIENT) && !htud->response_has_trailers))) {
+    if (((flags & STREAM_TOSERVER) && !htud->request_has_trailers) ||
+            ((flags & STREAM_TOCLIENT) && !htud->response_has_trailers)) {
         SCReturn;
     }
     PrefilterMpmHttpHeader(det_ctx, pectx, p, f, txv, idx, _txd, flags);
@@ -305,9 +260,8 @@ static int PrefilterMpmHttpHeaderRequestRegister(DetectEngineCtx *de_ctx, SigGro
     pectx->mpm_ctx = mpm_ctx;
     pectx->transforms = &mpm_reg->transforms;
 
-    int r = PrefilterAppendTxEngine(de_ctx, sgh, PrefilterMpmHttpHeader,
-            mpm_reg->app_v2.alproto, HTP_REQUEST_HEADERS,
-            pectx, PrefilterMpmHttpHeaderFree, mpm_reg->pname);
+    int r = PrefilterAppendTxEngine(de_ctx, sgh, PrefilterMpmHttpHeader, mpm_reg->app_v2.alproto,
+            HTP_REQUEST_PROGRESS_HEADERS, pectx, PrefilterMpmHttpHeaderFree, mpm_reg->pname);
     if (r != 0) {
         SCFree(pectx);
         return r;
@@ -321,9 +275,8 @@ static int PrefilterMpmHttpHeaderRequestRegister(DetectEngineCtx *de_ctx, SigGro
     pectx->mpm_ctx = mpm_ctx;
     pectx->transforms = &mpm_reg->transforms;
 
-    r = PrefilterAppendTxEngine(de_ctx, sgh, PrefilterMpmHttpTrailer,
-            mpm_reg->app_v2.alproto, HTP_REQUEST_TRAILER,
-            pectx, PrefilterMpmHttpHeaderFree, mpm_reg->pname);
+    r = PrefilterAppendTxEngine(de_ctx, sgh, PrefilterMpmHttpTrailer, mpm_reg->app_v2.alproto,
+            HTP_REQUEST_PROGRESS_TRAILER, pectx, PrefilterMpmHttpHeaderFree, mpm_reg->pname);
     if (r != 0) {
         SCFree(pectx);
     }
@@ -343,9 +296,8 @@ static int PrefilterMpmHttpHeaderResponseRegister(DetectEngineCtx *de_ctx, SigGr
     pectx->mpm_ctx = mpm_ctx;
     pectx->transforms = &mpm_reg->transforms;
 
-    int r = PrefilterAppendTxEngine(de_ctx, sgh, PrefilterMpmHttpHeader,
-            mpm_reg->app_v2.alproto, HTP_RESPONSE_HEADERS,
-            pectx, PrefilterMpmHttpHeaderFree, mpm_reg->pname);
+    int r = PrefilterAppendTxEngine(de_ctx, sgh, PrefilterMpmHttpHeader, mpm_reg->app_v2.alproto,
+            HTP_RESPONSE_PROGRESS_HEADERS, pectx, PrefilterMpmHttpHeaderFree, mpm_reg->pname);
     if (r != 0) {
         SCFree(pectx);
         return r;
@@ -359,9 +311,8 @@ static int PrefilterMpmHttpHeaderResponseRegister(DetectEngineCtx *de_ctx, SigGr
     pectx->mpm_ctx = mpm_ctx;
     pectx->transforms = &mpm_reg->transforms;
 
-    r = PrefilterAppendTxEngine(de_ctx, sgh, PrefilterMpmHttpTrailer,
-            mpm_reg->app_v2.alproto, HTP_RESPONSE_TRAILER,
-            pectx, PrefilterMpmHttpHeaderFree, mpm_reg->pname);
+    r = PrefilterAppendTxEngine(de_ctx, sgh, PrefilterMpmHttpTrailer, mpm_reg->app_v2.alproto,
+            HTP_RESPONSE_PROGRESS_TRAILER, pectx, PrefilterMpmHttpHeaderFree, mpm_reg->pname);
     if (r != 0) {
         SCFree(pectx);
     }
@@ -384,7 +335,7 @@ static int PrefilterMpmHttpHeaderResponseRegister(DetectEngineCtx *de_ctx, SigGr
 static int DetectHttpHeaderSetup(DetectEngineCtx *de_ctx, Signature *s, const char *arg)
 {
     return DetectEngineContentModifierBufferSetup(
-            de_ctx, s, arg, DETECT_AL_HTTP_HEADER, g_http_header_buffer_id, ALPROTO_HTTP1);
+            de_ctx, s, arg, DETECT_HTTP_HEADER_CM, g_http_header_buffer_id, ALPROTO_HTTP1);
 }
 
 /**
@@ -398,9 +349,9 @@ static int DetectHttpHeaderSetup(DetectEngineCtx *de_ctx, Signature *s, const ch
  */
 static int DetectHttpHeaderSetupSticky(DetectEngineCtx *de_ctx, Signature *s, const char *str)
 {
-    if (DetectBufferSetActiveList(de_ctx, s, g_http_header_buffer_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_http_header_buffer_id) < 0)
         return -1;
-    if (DetectSignatureSetAppProto(s, ALPROTO_HTTP) < 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_HTTP) < 0)
         return -1;
     return 0;
 }
@@ -411,16 +362,18 @@ static int DetectHttpHeaderSetupSticky(DetectEngineCtx *de_ctx, Signature *s, co
 void DetectHttpHeaderRegister(void)
 {
     /* http_header content modifier */
-    sigmatch_table[DETECT_AL_HTTP_HEADER].name = "http_header";
-    sigmatch_table[DETECT_AL_HTTP_HEADER].desc = "content modifier to match only on the HTTP header-buffer";
-    sigmatch_table[DETECT_AL_HTTP_HEADER].url = "/rules/http-keywords.html#http-header-and-http-raw-header";
-    sigmatch_table[DETECT_AL_HTTP_HEADER].Setup = DetectHttpHeaderSetup;
+    sigmatch_table[DETECT_HTTP_HEADER_CM].name = "http_header";
+    sigmatch_table[DETECT_HTTP_HEADER_CM].desc =
+            "content modifier to match only on the HTTP header-buffer";
+    sigmatch_table[DETECT_HTTP_HEADER_CM].url =
+            "/rules/http-keywords.html#http-header-and-http-raw-header";
+    sigmatch_table[DETECT_HTTP_HEADER_CM].Setup = DetectHttpHeaderSetup;
 #ifdef UNITTESTS
-    sigmatch_table[DETECT_AL_HTTP_HEADER].RegisterTests = DetectHttpHeaderRegisterTests;
+    sigmatch_table[DETECT_HTTP_HEADER_CM].RegisterTests = DetectHttpHeaderRegisterTests;
 #endif
-    sigmatch_table[DETECT_AL_HTTP_HEADER].flags |= SIGMATCH_NOOPT ;
-    sigmatch_table[DETECT_AL_HTTP_HEADER].flags |= SIGMATCH_INFO_CONTENT_MODIFIER;
-    sigmatch_table[DETECT_AL_HTTP_HEADER].alternative = DETECT_HTTP_HEADER;
+    sigmatch_table[DETECT_HTTP_HEADER_CM].flags |= SIGMATCH_NOOPT;
+    sigmatch_table[DETECT_HTTP_HEADER_CM].flags |= SIGMATCH_INFO_CONTENT_MODIFIER;
+    sigmatch_table[DETECT_HTTP_HEADER_CM].alternative = DETECT_HTTP_HEADER;
 
     /* http.header sticky buffer */
     sigmatch_table[DETECT_HTTP_HEADER].name = "http.header";
@@ -431,13 +384,13 @@ void DetectHttpHeaderRegister(void)
     sigmatch_table[DETECT_HTTP_HEADER].flags |= SIGMATCH_INFO_STICKY_BUFFER;
 
     DetectAppLayerInspectEngineRegister("http_header", ALPROTO_HTTP1, SIG_FLAG_TOSERVER,
-            HTP_REQUEST_HEADERS, DetectEngineInspectBufferHttpHeader, NULL);
+            HTP_REQUEST_PROGRESS_HEADERS, DetectEngineInspectBufferGeneric, GetData1);
     DetectAppLayerMpmRegister("http_header", SIG_FLAG_TOSERVER, 2,
             PrefilterMpmHttpHeaderRequestRegister, NULL, ALPROTO_HTTP1,
             0); /* not used, registered twice: HEADERS/TRAILER */
 
     DetectAppLayerInspectEngineRegister("http_header", ALPROTO_HTTP1, SIG_FLAG_TOCLIENT,
-            HTP_RESPONSE_HEADERS, DetectEngineInspectBufferHttpHeader, NULL);
+            HTP_RESPONSE_PROGRESS_HEADERS, DetectEngineInspectBufferGeneric, GetData1);
     DetectAppLayerMpmRegister("http_header", SIG_FLAG_TOCLIENT, 2,
             PrefilterMpmHttpHeaderResponseRegister, NULL, ALPROTO_HTTP1,
             0); /* not used, registered twice: HEADERS/TRAILER */
@@ -466,116 +419,9 @@ static int g_http_response_header_buffer_id = 0;
 static int g_request_header_thread_id = 0;
 static int g_response_header_thread_id = 0;
 
-static InspectionBuffer *GetHttp2HeaderData(DetectEngineThreadCtx *det_ctx, const uint8_t flags,
-        const DetectEngineTransforms *transforms, Flow *_f, const struct MpmListIdDataArgs *cbdata,
-        int list_id)
-{
-    SCEnter();
-
-    InspectionBuffer *buffer =
-            InspectionBufferMultipleForListGet(det_ctx, list_id, cbdata->local_id);
-    if (buffer == NULL)
-        return NULL;
-    if (buffer->initialized)
-        return buffer;
-
-    uint32_t b_len = 0;
-    const uint8_t *b = NULL;
-
-    if (rs_http2_tx_get_header(cbdata->txv, flags, cbdata->local_id, &b, &b_len) != 1) {
-        InspectionBufferSetupMultiEmpty(buffer);
-        return NULL;
-    }
-    if (b == NULL || b_len == 0) {
-        InspectionBufferSetupMultiEmpty(buffer);
-        return NULL;
-    }
-
-    InspectionBufferSetupMulti(buffer, transforms, b, b_len);
-
-    SCReturnPtr(buffer, "InspectionBuffer");
-}
-
-static void PrefilterTxHttp2Header(DetectEngineThreadCtx *det_ctx, const void *pectx, Packet *p,
-        Flow *f, void *txv, const uint64_t idx, const AppLayerTxData *_txd, const uint8_t flags)
-{
-    SCEnter();
-
-    const PrefilterMpmListId *ctx = (const PrefilterMpmListId *)pectx;
-    const MpmCtx *mpm_ctx = ctx->mpm_ctx;
-    const int list_id = ctx->list_id;
-
-    uint32_t local_id = 0;
-
-    while (1) {
-        // loop until we get a NULL
-
-        struct MpmListIdDataArgs cbdata = { local_id, txv };
-        InspectionBuffer *buffer =
-                GetHttp2HeaderData(det_ctx, flags, ctx->transforms, f, &cbdata, list_id);
-        if (buffer == NULL)
-            break;
-
-        if (buffer->inspect_len >= mpm_ctx->minlen) {
-            (void)mpm_table[mpm_ctx->mpm_type].Search(
-                    mpm_ctx, &det_ctx->mtc, &det_ctx->pmq, buffer->inspect, buffer->inspect_len);
-            PREFILTER_PROFILING_ADD_BYTES(det_ctx, buffer->inspect_len);
-        }
-
-        local_id++;
-    }
-}
-
-static uint8_t DetectEngineInspectHttp2Header(DetectEngineCtx *de_ctx,
-        DetectEngineThreadCtx *det_ctx, const DetectEngineAppInspectionEngine *engine,
-        const Signature *s, Flow *f, uint8_t flags, void *alstate, void *txv, uint64_t tx_id)
-{
-    uint32_t local_id = 0;
-
-    const DetectEngineTransforms *transforms = NULL;
-    if (!engine->mpm) {
-        transforms = engine->v2.transforms;
-    }
-
-    while (1) {
-        struct MpmListIdDataArgs cbdata = {
-            local_id,
-            txv,
-        };
-        InspectionBuffer *buffer =
-                GetHttp2HeaderData(det_ctx, flags, transforms, f, &cbdata, engine->sm_list);
-        if (buffer == NULL || buffer->inspect == NULL)
-            break;
-
-        const bool match = DetectEngineContentInspection(de_ctx, det_ctx, s, engine->smd, NULL, f,
-                buffer->inspect, buffer->inspect_len, buffer->inspect_offset,
-                DETECT_CI_FLAGS_SINGLE, DETECT_ENGINE_CONTENT_INSPECTION_MODE_STATE);
-        if (match) {
-            return DETECT_ENGINE_INSPECT_SIG_MATCH;
-        }
-        local_id++;
-    }
-
-    return DETECT_ENGINE_INSPECT_SIG_NO_MATCH;
-}
-
-static int PrefilterMpmHttp2HeaderRegister(DetectEngineCtx *de_ctx, SigGroupHead *sgh,
-        MpmCtx *mpm_ctx, const DetectBufferMpmRegistry *mpm_reg, int list_id)
-{
-    PrefilterMpmListId *pectx = SCCalloc(1, sizeof(*pectx));
-    if (pectx == NULL)
-        return -1;
-    pectx->list_id = list_id;
-    pectx->mpm_ctx = mpm_ctx;
-    pectx->transforms = &mpm_reg->transforms;
-
-    return PrefilterAppendTxEngine(de_ctx, sgh, PrefilterTxHttp2Header, mpm_reg->app_v2.alproto,
-            mpm_reg->app_v2.tx_min_progress, pectx, PrefilterMpmHttpHeaderFree, mpm_reg->name);
-}
-
 typedef struct HttpMultiBufItem {
     uint8_t *buffer;
-    size_t len;
+    uint32_t len;
 } HttpMultiBufItem;
 
 typedef struct HttpMultiBufHeaderThreadData {
@@ -590,6 +436,13 @@ typedef struct HttpMultiBufHeaderThreadData {
 static void *HttpMultiBufHeaderThreadDataInit(void *data)
 {
     HttpMultiBufHeaderThreadData *td = SCCalloc(1, sizeof(*td));
+
+    /* This return value check to satisfy our Cocci malloc checks. */
+    if (td == NULL) {
+        SCLogError("failed to allocate %" PRIuMAX " bytes: %s", (uintmax_t)sizeof(*td),
+                strerror(errno));
+        return NULL;
+    }
     return td;
 }
 
@@ -603,18 +456,10 @@ static void HttpMultiBufHeaderThreadDataFree(void *data)
     SCFree(td);
 }
 
-static InspectionBuffer *GetHttp1HeaderData(DetectEngineThreadCtx *det_ctx, const uint8_t flags,
-        const DetectEngineTransforms *transforms, Flow *f, const struct MpmListIdDataArgs *cbdata,
-        int list_id)
+static bool GetHttp1HeaderData(DetectEngineThreadCtx *det_ctx, const void *txv, const uint8_t flags,
+        uint32_t local_id, const uint8_t **buf, uint32_t *buf_len)
 {
     SCEnter();
-
-    InspectionBuffer *buffer =
-            InspectionBufferMultipleForListGet(det_ctx, list_id, cbdata->local_id);
-    if (buffer == NULL)
-        return NULL;
-    if (buffer->initialized)
-        return buffer;
 
     int kw_thread_id;
     if (flags & STREAM_TOSERVER) {
@@ -625,18 +470,18 @@ static InspectionBuffer *GetHttp1HeaderData(DetectEngineThreadCtx *det_ctx, cons
     HttpMultiBufHeaderThreadData *hdr_td =
             DetectThreadCtxGetGlobalKeywordThreadCtx(det_ctx, kw_thread_id);
     if (unlikely(hdr_td == NULL)) {
-        return NULL;
+        return false;
     }
 
-    htp_tx_t *tx = (htp_tx_t *)cbdata->txv;
-    htp_table_t *headers;
+    htp_tx_t *tx = (htp_tx_t *)txv;
+    const htp_headers_t *headers;
     if (flags & STREAM_TOSERVER) {
-        headers = tx->request_headers;
+        headers = htp_tx_request_headers(tx);
     } else {
-        headers = tx->response_headers;
+        headers = htp_tx_response_headers(tx);
     }
-    size_t no_of_headers = htp_table_size(headers);
-    if (cbdata->local_id == 0) {
+    size_t no_of_headers = htp_headers_size(headers);
+    if (local_id == 0) {
         // We initialize a big buffer on first item
         // Then, we will just use parts of it
         hdr_td->len = 0;
@@ -652,21 +497,22 @@ static InspectionBuffer *GetHttp1HeaderData(DetectEngineThreadCtx *det_ctx, cons
             hdr_td->cap = no_of_headers;
         }
         for (size_t i = 0; i < no_of_headers; i++) {
-            htp_header_t *h = htp_table_get_index(headers, i, NULL);
-            size_t size1 = bstr_size(h->name);
-            size_t size2 = bstr_size(h->value);
-            size_t size = size1 + size2 + 2;
+            const htp_header_t *h = htp_headers_get_index(headers, i);
+            uint32_t size1 = (uint32_t)htp_header_name_len(h);
+            uint32_t size2 = (uint32_t)htp_header_value_len(h);
+            uint32_t size = size1 + size2 + 2;
             if (hdr_td->items[i].len < size) {
                 // Use realloc, as this pointer is not freed until HttpMultiBufHeaderThreadDataFree
-                hdr_td->items[i].buffer = SCRealloc(hdr_td->items[i].buffer, size);
-                if (unlikely(hdr_td->items[i].buffer == NULL)) {
+                void *tmp = SCRealloc(hdr_td->items[i].buffer, size);
+                if (unlikely(tmp == NULL)) {
                     return NULL;
                 }
+                hdr_td->items[i].buffer = tmp;
             }
-            memcpy(hdr_td->items[i].buffer, bstr_ptr(h->name), size1);
+            memcpy(hdr_td->items[i].buffer, htp_header_name_ptr(h), size1);
             hdr_td->items[i].buffer[size1] = ':';
             hdr_td->items[i].buffer[size1 + 1] = ' ';
-            memcpy(hdr_td->items[i].buffer + size1 + 2, bstr_ptr(h->value), size2);
+            memcpy(hdr_td->items[i].buffer + size1 + 2, htp_header_value_ptr(h), size2);
             hdr_td->items[i].len = size;
         }
         hdr_td->len = no_of_headers;
@@ -674,99 +520,21 @@ static InspectionBuffer *GetHttp1HeaderData(DetectEngineThreadCtx *det_ctx, cons
 
     // cbdata->local_id is the index of the requested header buffer
     // hdr_td->len is the number of header buffers
-    if (cbdata->local_id < hdr_td->len) {
+    if (local_id < hdr_td->len) {
         // we have one valid header buffer
-        InspectionBufferSetupMulti(buffer, transforms, hdr_td->items[cbdata->local_id].buffer,
-                hdr_td->items[cbdata->local_id].len);
-        SCReturnPtr(buffer, "InspectionBuffer");
+        *buf = hdr_td->items[local_id].buffer;
+        *buf_len = hdr_td->items[local_id].len;
+        return true;
     } // else there are no more header buffer to get
-    InspectionBufferSetupMultiEmpty(buffer);
-    return NULL;
-}
-
-static void PrefilterTxHttp1Header(DetectEngineThreadCtx *det_ctx, const void *pectx, Packet *p,
-        Flow *f, void *txv, const uint64_t idx, const AppLayerTxData *_txd, const uint8_t flags)
-{
-    SCEnter();
-
-    const PrefilterMpmListId *ctx = (const PrefilterMpmListId *)pectx;
-    const MpmCtx *mpm_ctx = ctx->mpm_ctx;
-    const int list_id = ctx->list_id;
-
-    uint32_t local_id = 0;
-
-    while (1) {
-        // loop until we get a NULL
-
-        struct MpmListIdDataArgs cbdata = { local_id, txv };
-        InspectionBuffer *buffer =
-                GetHttp1HeaderData(det_ctx, flags, ctx->transforms, f, &cbdata, list_id);
-        if (buffer == NULL)
-            break;
-
-        if (buffer->inspect_len >= mpm_ctx->minlen) {
-            (void)mpm_table[mpm_ctx->mpm_type].Search(
-                    mpm_ctx, &det_ctx->mtc, &det_ctx->pmq, buffer->inspect, buffer->inspect_len);
-            PREFILTER_PROFILING_ADD_BYTES(det_ctx, buffer->inspect_len);
-        }
-
-        local_id++;
-    }
-}
-
-static int PrefilterMpmHttp1HeaderRegister(DetectEngineCtx *de_ctx, SigGroupHead *sgh,
-        MpmCtx *mpm_ctx, const DetectBufferMpmRegistry *mpm_reg, int list_id)
-{
-    PrefilterMpmListId *pectx = SCCalloc(1, sizeof(*pectx));
-    if (pectx == NULL)
-        return -1;
-    pectx->list_id = list_id;
-    pectx->mpm_ctx = mpm_ctx;
-    pectx->transforms = &mpm_reg->transforms;
-
-    return PrefilterAppendTxEngine(de_ctx, sgh, PrefilterTxHttp1Header, mpm_reg->app_v2.alproto,
-            mpm_reg->app_v2.tx_min_progress, pectx, PrefilterMpmHttpHeaderFree, mpm_reg->name);
-}
-
-static uint8_t DetectEngineInspectHttp1Header(DetectEngineCtx *de_ctx,
-        DetectEngineThreadCtx *det_ctx, const DetectEngineAppInspectionEngine *engine,
-        const Signature *s, Flow *f, uint8_t flags, void *alstate, void *txv, uint64_t tx_id)
-{
-    uint32_t local_id = 0;
-
-    const DetectEngineTransforms *transforms = NULL;
-    if (!engine->mpm) {
-        transforms = engine->v2.transforms;
-    }
-
-    while (1) {
-        struct MpmListIdDataArgs cbdata = {
-            local_id,
-            txv,
-        };
-        InspectionBuffer *buffer =
-                GetHttp1HeaderData(det_ctx, flags, transforms, f, &cbdata, engine->sm_list);
-        if (buffer == NULL || buffer->inspect == NULL)
-            break;
-
-        const bool match = DetectEngineContentInspection(de_ctx, det_ctx, s, engine->smd, NULL, f,
-                (uint8_t *)buffer->inspect, buffer->inspect_len, buffer->inspect_offset,
-                DETECT_CI_FLAGS_SINGLE, DETECT_ENGINE_CONTENT_INSPECTION_MODE_STATE);
-        if (match) {
-            return DETECT_ENGINE_INSPECT_SIG_MATCH;
-        }
-        local_id++;
-    }
-
-    return DETECT_ENGINE_INSPECT_SIG_NO_MATCH;
+    return false;
 }
 
 static int DetectHTTPRequestHeaderSetup(DetectEngineCtx *de_ctx, Signature *s, const char *arg)
 {
-    if (DetectBufferSetActiveList(de_ctx, s, g_http_request_header_buffer_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_http_request_header_buffer_id) < 0)
         return -1;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_HTTP) != 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_HTTP) != 0)
         return -1;
 
     return 0;
@@ -780,16 +548,12 @@ void DetectHttpRequestHeaderRegister(void)
     sigmatch_table[DETECT_HTTP_REQUEST_HEADER].url = "/rules/http-keywords.html#request_header";
     sigmatch_table[DETECT_HTTP_REQUEST_HEADER].Setup = DetectHTTPRequestHeaderSetup;
     sigmatch_table[DETECT_HTTP_REQUEST_HEADER].flags |=
-            SIGMATCH_NOOPT | SIGMATCH_INFO_STICKY_BUFFER;
+            SIGMATCH_NOOPT | SIGMATCH_INFO_STICKY_BUFFER | SIGMATCH_INFO_MULTI_BUFFER;
 
-    DetectAppLayerMpmRegister("http_request_header", SIG_FLAG_TOSERVER, 2,
-            PrefilterMpmHttp2HeaderRegister, NULL, ALPROTO_HTTP2, HTTP2StateOpen);
-    DetectAppLayerInspectEngineRegister("http_request_header", ALPROTO_HTTP2, SIG_FLAG_TOSERVER,
-            HTTP2StateOpen, DetectEngineInspectHttp2Header, NULL);
-    DetectAppLayerMpmRegister("http_request_header", SIG_FLAG_TOSERVER, 2,
-            PrefilterMpmHttp1HeaderRegister, NULL, ALPROTO_HTTP1, 0);
-    DetectAppLayerInspectEngineRegister("http_request_header", ALPROTO_HTTP1, SIG_FLAG_TOSERVER,
-            HTP_REQUEST_HEADERS, DetectEngineInspectHttp1Header, NULL);
+    DetectAppLayerMultiRegister("http_request_header", ALPROTO_HTTP2, SIG_FLAG_TOSERVER,
+            HTTP2StateOpen, SCHttp2TxGetHeader, 2);
+    DetectAppLayerMultiRegister("http_request_header", ALPROTO_HTTP1, SIG_FLAG_TOSERVER,
+            HTP_REQUEST_PROGRESS_HEADERS, GetHttp1HeaderData, 2);
 
     DetectBufferTypeSetDescriptionByName("http_request_header", "HTTP header name and value");
     g_http_request_header_buffer_id = DetectBufferTypeGetByName("http_request_header");
@@ -800,10 +564,10 @@ void DetectHttpRequestHeaderRegister(void)
 
 static int DetectHTTPResponseHeaderSetup(DetectEngineCtx *de_ctx, Signature *s, const char *arg)
 {
-    if (DetectBufferSetActiveList(de_ctx, s, g_http_response_header_buffer_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_http_response_header_buffer_id) < 0)
         return -1;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_HTTP) != 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_HTTP) != 0)
         return -1;
 
     return 0;
@@ -817,16 +581,12 @@ void DetectHttpResponseHeaderRegister(void)
     sigmatch_table[DETECT_HTTP_RESPONSE_HEADER].url = "/rules/http2-keywords.html#response_header";
     sigmatch_table[DETECT_HTTP_RESPONSE_HEADER].Setup = DetectHTTPResponseHeaderSetup;
     sigmatch_table[DETECT_HTTP_RESPONSE_HEADER].flags |=
-            SIGMATCH_NOOPT | SIGMATCH_INFO_STICKY_BUFFER;
+            SIGMATCH_NOOPT | SIGMATCH_INFO_STICKY_BUFFER | SIGMATCH_INFO_MULTI_BUFFER;
 
-    DetectAppLayerMpmRegister("http_response_header", SIG_FLAG_TOCLIENT, 2,
-            PrefilterMpmHttp2HeaderRegister, NULL, ALPROTO_HTTP2, HTTP2StateOpen);
-    DetectAppLayerInspectEngineRegister("http_response_header", ALPROTO_HTTP2, SIG_FLAG_TOCLIENT,
-            HTTP2StateOpen, DetectEngineInspectHttp2Header, NULL);
-    DetectAppLayerMpmRegister("http_response_header", SIG_FLAG_TOCLIENT, 2,
-            PrefilterMpmHttp1HeaderRegister, NULL, ALPROTO_HTTP1, 0);
-    DetectAppLayerInspectEngineRegister("http_response_header", ALPROTO_HTTP1, SIG_FLAG_TOCLIENT,
-            HTP_RESPONSE_HEADERS, DetectEngineInspectHttp1Header, NULL);
+    DetectAppLayerMultiRegister("http_response_header", ALPROTO_HTTP2, SIG_FLAG_TOCLIENT,
+            HTTP2StateOpen, SCHttp2TxGetHeader, 2);
+    DetectAppLayerMultiRegister("http_response_header", ALPROTO_HTTP1, SIG_FLAG_TOCLIENT,
+            HTP_RESPONSE_PROGRESS_HEADERS, GetHttp1HeaderData, 2);
 
     DetectBufferTypeSetDescriptionByName("http_response_header", "HTTP header name and value");
     g_http_response_header_buffer_id = DetectBufferTypeGetByName("http_response_header");

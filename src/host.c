@@ -97,11 +97,6 @@ uint64_t HostGetMemuse(void)
     return memuse;
 }
 
-uint32_t HostSpareQueueGetSize(void)
-{
-    return HostQueueLen(&host_spare_q);
-}
-
 void HostMoveToSpare(Host *h)
 {
     HostEnqueue(&host_spare_q, h);
@@ -197,7 +192,7 @@ void HostInitConfig(bool quiet)
     uint32_t configval = 0;
 
     /** set config values for memcap, prealloc and hash_size */
-    if ((ConfGet("host.memcap", &conf_val)) == 1) {
+    if ((SCConfGet("host.memcap", &conf_val)) == 1) {
         uint64_t host_memcap = 0;
         if (ParseSizeStringU64(conf_val, &host_memcap) < 0) {
             SCLogError("Error parsing host.memcap "
@@ -208,14 +203,14 @@ void HostInitConfig(bool quiet)
             SC_ATOMIC_SET(host_config.memcap, host_memcap);
         }
     }
-    if ((ConfGet("host.hash-size", &conf_val)) == 1) {
+    if ((SCConfGet("host.hash-size", &conf_val)) == 1) {
         if (StringParseUint32(&configval, 10, strlen(conf_val),
                                     conf_val) > 0) {
             host_config.hash_size = configval;
         }
     }
 
-    if ((ConfGet("host.prealloc", &conf_val)) == 1) {
+    if ((SCConfGet("host.prealloc", &conf_val)) == 1) {
         if (StringParseUint32(&configval, 10, strlen(conf_val),
                                     conf_val) > 0) {
             host_config.prealloc = configval;
@@ -282,8 +277,6 @@ void HostInitConfig(bool quiet)
         SCLogConfig("host memory usage: %"PRIu64" bytes, maximum: %"PRIu64,
                 SC_ATOMIC_GET(host_memuse), SC_ATOMIC_GET(host_config.memcap));
     }
-
-    return;
 }
 
 /** \brief print some host stats
@@ -294,9 +287,8 @@ void HostPrintStats (void)
     SCLogPerf("hostbits added: %" PRIu32 ", removed: %" PRIu32 ", max memory usage: %" PRIu32 "",
         hostbits_added, hostbits_removed, hostbits_memuse_max);
 #endif /* HOSTBITS_STATS */
-    SCLogPerf("host memory usage: %"PRIu64" bytes, maximum: %"PRIu64,
-            SC_ATOMIC_GET(host_memuse), SC_ATOMIC_GET(host_config.memcap));
-    return;
+    SCLogPerf("host memory usage: %" PRIu64 " bytes, maximum: %" PRIu64, SC_ATOMIC_GET(host_memuse),
+            SC_ATOMIC_GET(host_config.memcap));
 }
 
 /** \brief shutdown the flow engine
@@ -330,7 +322,6 @@ void HostShutdown(void)
     }
     (void) SC_ATOMIC_SUB(host_memuse, host_config.hash_size * sizeof(HostHashRow));
     HostQueueDestroy(&host_spare_q);
-    return;
 }
 
 /** \brief Cleanup the host engine
@@ -371,8 +362,6 @@ void HostCleanup(void)
             HRLOCK_UNLOCK(hb);
         }
     }
-
-    return;
 }
 
 /* calculate the hash key for this packet
@@ -729,4 +718,3 @@ void HostRegisterUnittests(void)
 {
     RegisterHostStorageTests();
 }
-

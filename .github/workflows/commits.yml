@@ -5,6 +5,10 @@ on:
 
 permissions: read-all
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   DEBIAN_FRONTEND: "noninteractive"
 
@@ -16,7 +20,7 @@ jobs:
     container: ubuntu:20.04
     steps:
       - name: Caching ~/.cargo
-        uses: actions/cache@v3.3.1
+        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb
         with:
           path: ~/.cargo
           key: commit-check-cargo
@@ -48,7 +52,6 @@ jobs:
                 libjansson-dev \
                 libevent-dev \
                 libevent-pthreads-2.1-7 \
-                libjansson-dev \
                 libpython2.7 \
                 libssl-dev \
                 make \
@@ -71,13 +74,12 @@ jobs:
           cd $HOME/.cargo/bin
           curl -OL https://github.com/eqrion/cbindgen/releases/download/v0.24.3/cbindgen
           chmod 755 cbindgen
-      - uses: actions/checkout@v3.3.0
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
         with:
           fetch-depth: 0
       # The action above is supposed to do this for us, but it doesn't appear to stick.
       - run: /usr/bin/git config --global --add safe.directory /__w/suricata/suricata
       - run: git fetch
-      - run: git clone https://github.com/OISF/libhtp -b 0.5.x
       - name: Building all commits
         run: |
           echo "Building commits from ${GITHUB_BASE_REF}."
@@ -85,7 +87,7 @@ jobs:
               git checkout $rev
               echo "Building rev ${rev}" | tee -a build_log.txt
               ./autogen.sh >> build_log.txt 2>&1
-              CC="sccache gcc" ./configure --enable-unittests >> build_log.txt 2>&1
+              CC="sccache gcc" ./configure --enable-warnings --enable-unittests --disable-lua >> build_log.txt 2>&1
               if ! make -j2 >> build_log.txt 2>&1; then
                   echo "::error ::Failed to build rev ${rev}"
                   tail -n 50 build_log.txt
@@ -94,7 +96,7 @@ jobs:
               make -ik distclean > /dev/null
           done
       - run: sccache -s
-      - uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         name: Uploading build log
         if: always()
         with:

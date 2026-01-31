@@ -23,8 +23,8 @@
  *
  */
 
-#ifndef __APP_LAYER_SSL_H__
-#define __APP_LAYER_SSL_H__
+#ifndef SURICATA_APP_LAYER_SSL_H
+#define SURICATA_APP_LAYER_SSL_H
 
 #include "util-ja3.h"
 #include "rust.h"
@@ -56,6 +56,7 @@ enum {
     TLS_DECODER_EVENT_INVALID_SNI_TYPE,
     TLS_DECODER_EVENT_INVALID_SNI_LENGTH,
     TLS_DECODER_EVENT_TOO_MANY_RECORDS_IN_PACKET,
+    TLS_DECODER_EVENT_INVALID_ALERT,
     /* Certificates decoding messages */
     TLS_DECODER_EVENT_INVALID_CERTIFICATE,
     TLS_DECODER_EVENT_CERTIFICATE_INVALID_LENGTH,
@@ -73,11 +74,21 @@ enum {
     TLS_DECODER_EVENT_INVALID_SSL_RECORD,
 };
 
-enum {
-    TLS_STATE_IN_PROGRESS = 0,
-    TLS_STATE_CERT_READY = 1,
-    TLS_HANDSHAKE_DONE = 2,
-    TLS_STATE_FINISHED = 3
+enum TlsStateClient {
+    TLS_STATE_CLIENT_IN_PROGRESS = 0,
+    TLS_STATE_CLIENT_HELLO_DONE,
+    TLS_STATE_CLIENT_CERT_DONE,
+    TLS_STATE_CLIENT_HANDSHAKE_DONE,
+    TLS_STATE_CLIENT_FINISHED,
+};
+
+enum TlsStateServer {
+    TLS_STATE_SERVER_IN_PROGRESS = 0,
+    TLS_STATE_SERVER_HELLO,
+    TLS_STATE_SERVER_CERT_DONE,
+    TLS_STATE_SERVER_HELLO_DONE,
+    TLS_STATE_SERVER_HANDSHAKE_DONE,
+    TLS_STATE_SERVER_FINISHED,
 };
 
 /* Flag to indicate that server will now on send encrypted msgs */
@@ -101,16 +112,10 @@ enum {
 #define SSL_AL_FLAG_STATE_SERVER_KEYX           BIT_U32(12)
 #define SSL_AL_FLAG_STATE_UNKNOWN               BIT_U32(13)
 
-/* flag to indicate that session is finished */
-#define SSL_AL_FLAG_STATE_FINISHED              BIT_U32(14)
-
 /* flags specific to HeartBeat state */
 #define SSL_AL_FLAG_HB_INFLIGHT                 BIT_U32(15)
 #define SSL_AL_FLAG_HB_CLIENT_INIT              BIT_U32(16)
 #define SSL_AL_FLAG_HB_SERVER_INIT              BIT_U32(17)
-
-/* flag to indicate that handshake is done */
-#define SSL_AL_FLAG_HANDSHAKE_DONE              BIT_U32(18)
 
 /* Session resumed without a full handshake */
 #define SSL_AL_FLAG_SESSION_RESUMED             BIT_U32(20)
@@ -141,6 +146,8 @@ enum {
 #define SSL_EXTENSION_SNI                       0x0000
 #define SSL_EXTENSION_ELLIPTIC_CURVES           0x000a
 #define SSL_EXTENSION_EC_POINT_FORMATS          0x000b
+#define SSL_EXTENSION_SIGNATURE_ALGORITHMS      0x000d
+#define SSL_EXTENSION_ALPN                      0x0010
 #define SSL_EXTENSION_SESSION_TICKET            0x0023
 #define SSL_EXTENSION_EARLY_DATA                0x002a
 #define SSL_EXTENSION_SUPPORTED_VERSIONS        0x002b
@@ -148,75 +155,8 @@ enum {
 /* SNI types */
 #define SSL_SNI_TYPE_HOST_NAME                  0
 
-/* Max string length of the TLS version string */
-#define SSL_VERSION_MAX_STRLEN 20
-
 /* TLS random bytes for the sticky buffer */
 #define TLS_RANDOM_LEN 32
-
-/* SSL versions.  We'll use a unified format for all, with the top byte
- * holding the major version and the lower byte the minor version */
-enum {
-    TLS_VERSION_UNKNOWN = 0x0000,
-    SSL_VERSION_2 = 0x0200,
-    SSL_VERSION_3 = 0x0300,
-    TLS_VERSION_10 = 0x0301,
-    TLS_VERSION_11 = 0x0302,
-    TLS_VERSION_12 = 0x0303,
-    TLS_VERSION_13 = 0x0304,
-    TLS_VERSION_13_DRAFT28 = 0x7f1c,
-    TLS_VERSION_13_DRAFT27 = 0x7f1b,
-    TLS_VERSION_13_DRAFT26 = 0x7f1a,
-    TLS_VERSION_13_DRAFT25 = 0x7f19,
-    TLS_VERSION_13_DRAFT24 = 0x7f18,
-    TLS_VERSION_13_DRAFT23 = 0x7f17,
-    TLS_VERSION_13_DRAFT22 = 0x7f16,
-    TLS_VERSION_13_DRAFT21 = 0x7f15,
-    TLS_VERSION_13_DRAFT20 = 0x7f14,
-    TLS_VERSION_13_DRAFT19 = 0x7f13,
-    TLS_VERSION_13_DRAFT18 = 0x7f12,
-    TLS_VERSION_13_DRAFT17 = 0x7f11,
-    TLS_VERSION_13_DRAFT16 = 0x7f10,
-    TLS_VERSION_13_PRE_DRAFT16 = 0x7f01,
-    TLS_VERSION_13_DRAFT20_FB = 0xfb14,
-    TLS_VERSION_13_DRAFT21_FB = 0xfb15,
-    TLS_VERSION_13_DRAFT22_FB = 0xfb16,
-    TLS_VERSION_13_DRAFT23_FB = 0xfb17,
-    TLS_VERSION_13_DRAFT26_FB = 0xfb1a,
-};
-
-static inline bool TLSVersionValid(const uint16_t version)
-{
-    switch (version) {
-        case TLS_VERSION_13:
-        case TLS_VERSION_12:
-        case TLS_VERSION_11:
-        case TLS_VERSION_10:
-        case SSL_VERSION_3:
-
-        case TLS_VERSION_13_DRAFT28:
-        case TLS_VERSION_13_DRAFT27:
-        case TLS_VERSION_13_DRAFT26:
-        case TLS_VERSION_13_DRAFT25:
-        case TLS_VERSION_13_DRAFT24:
-        case TLS_VERSION_13_DRAFT23:
-        case TLS_VERSION_13_DRAFT22:
-        case TLS_VERSION_13_DRAFT21:
-        case TLS_VERSION_13_DRAFT20:
-        case TLS_VERSION_13_DRAFT19:
-        case TLS_VERSION_13_DRAFT18:
-        case TLS_VERSION_13_DRAFT17:
-        case TLS_VERSION_13_DRAFT16:
-        case TLS_VERSION_13_PRE_DRAFT16:
-        case TLS_VERSION_13_DRAFT20_FB:
-        case TLS_VERSION_13_DRAFT21_FB:
-        case TLS_VERSION_13_DRAFT22_FB:
-        case TLS_VERSION_13_DRAFT23_FB:
-        case TLS_VERSION_13_DRAFT26_FB:
-            return true;
-    }
-    return false;
-}
 
 typedef struct SSLCertsChain_ {
     uint8_t *cert_data;
@@ -224,6 +164,10 @@ typedef struct SSLCertsChain_ {
     TAILQ_ENTRY(SSLCertsChain_) next;
 } SSLCertsChain;
 
+typedef struct SSLSubjectAltName_ {
+    uint8_t *san;
+    uint32_t san_len;
+} SSLSubjectAltName;
 
 typedef struct SSLStateConnp_ {
     /* record length */
@@ -245,15 +189,21 @@ typedef struct SSLStateConnp_ {
     uint16_t session_id_length;
 
     uint8_t random[TLS_RANDOM_LEN];
-    char *cert0_subject;
-    char *cert0_issuerdn;
-    char *cert0_serial;
+    uint8_t *cert0_subject;
+    uint32_t cert0_subject_len;
+    uint8_t *cert0_issuerdn;
+    uint32_t cert0_issuerdn_len;
+    uint8_t *cert0_serial;
+    uint32_t cert0_serial_len;
     int64_t cert0_not_before;
     int64_t cert0_not_after;
     char *cert0_fingerprint;
 
+    SSLSubjectAltName *cert0_sans;
+    uint16_t cert0_sans_num;
     /* ssl server name indication extension */
-    char *sni;
+    uint8_t *sni;
+    uint16_t sni_len;
 
     char *session_id;
 
@@ -266,6 +216,8 @@ typedef struct SSLStateConnp_ {
 
     JA3Buffer *ja3_str;
     char *ja3_hash;
+
+    HandshakeParams *hs;
 
     /* handshake tls fragmentation buffer. Handshake messages can be fragmented over multiple
      * TLS records. */
@@ -299,13 +251,17 @@ typedef struct SSLState_ {
 
     SSLStateConnp *curr_connp;
 
+    enum TlsStateClient client_state;
+    enum TlsStateServer server_state;
+
     SSLStateConnp client_connp;
     SSLStateConnp server_connp;
 } SSLState;
 
 void RegisterSSLParsers(void);
-void SSLVersionToString(uint16_t, char *);
 void SSLEnableJA3(void);
 bool SSLJA3IsEnabled(void);
+void SSLEnableJA4(void);
+bool SSLJA4IsEnabled(void);
 
-#endif /* __APP_LAYER_SSL_H__ */
+#endif /* SURICATA_APP_LAYER_SSL_H */

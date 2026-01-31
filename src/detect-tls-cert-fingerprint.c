@@ -30,6 +30,7 @@
 
 #include "detect-parse.h"
 #include "detect-engine.h"
+#include "detect-engine-buffer.h"
 #include "detect-engine-mpm.h"
 #include "detect-engine-prefilter.h"
 #include "detect-content.h"
@@ -57,13 +58,10 @@ static int DetectTlsFingerprintSetup(DetectEngineCtx *, Signature *, const char 
 static void DetectTlsFingerprintRegisterTests(void);
 #endif
 static InspectionBuffer *GetData(DetectEngineThreadCtx *det_ctx,
-        const DetectEngineTransforms *transforms,
-        Flow *f, const uint8_t flow_flags,
-        void *txv, const int list_id);
-static void DetectTlsFingerprintSetupCallback(const DetectEngineCtx *de_ctx,
-        Signature *s);
-static bool DetectTlsFingerprintValidateCallback(const Signature *s,
-        const char **sigerror);
+        const DetectEngineTransforms *transforms, Flow *f, const uint8_t flow_flags, void *txv,
+        const int list_id);
+static bool DetectTlsFingerprintValidateCallback(
+        const Signature *s, const char **sigerror, const DetectBufferType *dbt);
 static int g_tls_cert_fingerprint_buffer_id = 0;
 
 /**
@@ -71,35 +69,35 @@ static int g_tls_cert_fingerprint_buffer_id = 0;
  */
 void DetectTlsFingerprintRegister(void)
 {
-    sigmatch_table[DETECT_AL_TLS_CERT_FINGERPRINT].name = "tls.cert_fingerprint";
-    sigmatch_table[DETECT_AL_TLS_CERT_FINGERPRINT].alias = "tls_cert_fingerprint";
-    sigmatch_table[DETECT_AL_TLS_CERT_FINGERPRINT].desc =
+    sigmatch_table[DETECT_TLS_CERT_FINGERPRINT].name = "tls.cert_fingerprint";
+    sigmatch_table[DETECT_TLS_CERT_FINGERPRINT].alias = "tls_cert_fingerprint";
+    sigmatch_table[DETECT_TLS_CERT_FINGERPRINT].desc =
             "sticky buffer to match the TLS cert fingerprint buffer";
-    sigmatch_table[DETECT_AL_TLS_CERT_FINGERPRINT].url = "/rules/tls-keywords.html#tls-cert-fingerprint";
-    sigmatch_table[DETECT_AL_TLS_CERT_FINGERPRINT].Setup = DetectTlsFingerprintSetup;
+    sigmatch_table[DETECT_TLS_CERT_FINGERPRINT].url =
+            "/rules/tls-keywords.html#tls-cert-fingerprint";
+    sigmatch_table[DETECT_TLS_CERT_FINGERPRINT].Setup = DetectTlsFingerprintSetup;
 #ifdef UNITTESTS
-    sigmatch_table[DETECT_AL_TLS_CERT_FINGERPRINT].RegisterTests = DetectTlsFingerprintRegisterTests;
+    sigmatch_table[DETECT_TLS_CERT_FINGERPRINT].RegisterTests = DetectTlsFingerprintRegisterTests;
 #endif
-    sigmatch_table[DETECT_AL_TLS_CERT_FINGERPRINT].flags |= SIGMATCH_NOOPT;
-    sigmatch_table[DETECT_AL_TLS_CERT_FINGERPRINT].flags |= SIGMATCH_INFO_STICKY_BUFFER;
+    sigmatch_table[DETECT_TLS_CERT_FINGERPRINT].flags |= SIGMATCH_NOOPT;
+    sigmatch_table[DETECT_TLS_CERT_FINGERPRINT].flags |= SIGMATCH_INFO_STICKY_BUFFER;
 
     DetectAppLayerInspectEngineRegister("tls.cert_fingerprint", ALPROTO_TLS, SIG_FLAG_TOCLIENT,
-            TLS_STATE_CERT_READY, DetectEngineInspectBufferGeneric, GetData);
+            TLS_STATE_SERVER_CERT_DONE, DetectEngineInspectBufferGeneric, GetData);
 
     DetectAppLayerMpmRegister("tls.cert_fingerprint", SIG_FLAG_TOCLIENT, 2,
-            PrefilterGenericMpmRegister, GetData, ALPROTO_TLS, TLS_STATE_CERT_READY);
+            PrefilterGenericMpmRegister, GetData, ALPROTO_TLS, TLS_STATE_SERVER_CERT_DONE);
 
     DetectAppLayerInspectEngineRegister("tls.cert_fingerprint", ALPROTO_TLS, SIG_FLAG_TOSERVER,
-            TLS_STATE_CERT_READY, DetectEngineInspectBufferGeneric, GetData);
+            TLS_STATE_CLIENT_CERT_DONE, DetectEngineInspectBufferGeneric, GetData);
 
     DetectAppLayerMpmRegister("tls.cert_fingerprint", SIG_FLAG_TOSERVER, 2,
-            PrefilterGenericMpmRegister, GetData, ALPROTO_TLS, TLS_STATE_CERT_READY);
+            PrefilterGenericMpmRegister, GetData, ALPROTO_TLS, TLS_STATE_CLIENT_CERT_DONE);
 
     DetectBufferTypeSetDescriptionByName("tls.cert_fingerprint",
             "TLS certificate fingerprint");
 
-    DetectBufferTypeRegisterSetupCallback("tls.cert_fingerprint",
-            DetectTlsFingerprintSetupCallback);
+    DetectBufferTypeRegisterSetupCallback("tls.cert_fingerprint", DetectLowerSetupCallback);
 
     DetectBufferTypeRegisterValidateCallback("tls.cert_fingerprint",
             DetectTlsFingerprintValidateCallback);
@@ -120,10 +118,10 @@ void DetectTlsFingerprintRegister(void)
 static int DetectTlsFingerprintSetup(DetectEngineCtx *de_ctx, Signature *s,
                                      const char *str)
 {
-    if (DetectBufferSetActiveList(de_ctx, s, g_tls_cert_fingerprint_buffer_id) < 0)
+    if (SCDetectBufferSetActiveList(de_ctx, s, g_tls_cert_fingerprint_buffer_id) < 0)
         return -1;
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_TLS) < 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_TLS) < 0)
         return -1;
 
     return 0;
@@ -148,21 +146,21 @@ static InspectionBuffer *GetData(DetectEngineThreadCtx *det_ctx,
             return NULL;
         }
 
-        const uint32_t data_len = strlen(connp->cert0_fingerprint);
+        const uint32_t data_len = (uint32_t)strlen(connp->cert0_fingerprint);
         const uint8_t *data = (uint8_t *)connp->cert0_fingerprint;
 
-        InspectionBufferSetup(det_ctx, list_id, buffer, data, data_len);
-        InspectionBufferApplyTransforms(buffer, transforms);
+        InspectionBufferSetupAndApplyTransforms(
+                det_ctx, list_id, buffer, data, data_len, transforms);
     }
 
     return buffer;
 }
 
-static bool DetectTlsFingerprintValidateCallback(const Signature *s,
-                                                  const char **sigerror)
+static bool DetectTlsFingerprintValidateCallback(
+        const Signature *s, const char **sigerror, const DetectBufferType *dbt)
 {
     for (uint32_t x = 0; x < s->init_data->buffer_index; x++) {
-        if (s->init_data->buffers[x].id != (uint32_t)g_tls_cert_fingerprint_buffer_id)
+        if (s->init_data->buffers[x].id != (uint32_t)dbt->id)
             continue;
         const SigMatch *sm = s->init_data->buffers[x].head;
         for (; sm != NULL; sm = sm->next) {
@@ -204,38 +202,6 @@ static bool DetectTlsFingerprintValidateCallback(const Signature *s,
         }
     }
     return true;
-}
-
-static void DetectTlsFingerprintSetupCallback(const DetectEngineCtx *de_ctx,
-                                              Signature *s)
-{
-    for (uint32_t x = 0; x < s->init_data->buffer_index; x++) {
-        if (s->init_data->buffers[x].id != (uint32_t)g_tls_cert_fingerprint_buffer_id)
-            continue;
-        SigMatch *sm = s->init_data->buffers[x].head;
-        for (; sm != NULL; sm = sm->next) {
-            if (sm->type != DETECT_CONTENT)
-                continue;
-
-            DetectContentData *cd = (DetectContentData *)sm->ctx;
-
-            bool changed = false;
-            uint32_t u;
-            for (u = 0; u < cd->content_len; u++) {
-                if (isupper(cd->content[u])) {
-                    cd->content[u] = u8_tolower(cd->content[u]);
-                    changed = true;
-                }
-            }
-
-            /* recreate the context if changes were made */
-            if (changed) {
-                SpmDestroyCtx(cd->spm_ctx);
-                cd->spm_ctx =
-                        SpmInitCtx(cd->content, cd->content_len, 1, de_ctx->spm_global_thread_ctx);
-            }
-        }
-    }
 }
 
 #ifdef UNITTESTS

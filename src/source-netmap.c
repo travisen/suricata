@@ -42,6 +42,7 @@
 #include "util-privs.h"
 #include "util-validate.h"
 #include "util-datalink.h"
+#include "util-device-private.h"
 
 #include "source-netmap.h"
 
@@ -153,8 +154,8 @@ typedef struct NetmapThreadVars_
     uint64_t pkts;
     uint64_t bytes;
     uint64_t drops;
-    uint16_t capture_kernel_packets;
-    uint16_t capture_kernel_drops;
+    StatsCounterId capture_kernel_packets;
+    StatsCounterId capture_kernel_drops;
 } NetmapThreadVars;
 
 typedef TAILQ_HEAD(NetmapDeviceList_, NetmapDevice_) NetmapDeviceList;
@@ -453,6 +454,7 @@ retry:
             }
         }
 
+        SCMutexUnlock(&netmap_devlist_lock);
         NetmapCloseAll();
         FatalError("opening devname %s failed: %s", devname, strerror(errno));
     }
@@ -484,8 +486,8 @@ error:
  */
 static inline void NetmapDumpCounters(NetmapThreadVars *ntv)
 {
-    StatsAddUI64(ntv->tv, ntv->capture_kernel_packets, ntv->pkts);
-    StatsAddUI64(ntv->tv, ntv->capture_kernel_drops, ntv->drops);
+    StatsCounterAddI64(&ntv->tv->stats, ntv->capture_kernel_packets, ntv->pkts);
+    StatsCounterAddI64(&ntv->tv->stats, ntv->capture_kernel_drops, ntv->drops);
     (void) SC_ATOMIC_ADD(ntv->livedev->drop, ntv->drops);
     (void) SC_ATOMIC_ADD(ntv->livedev->pkts, ntv->pkts);
     ntv->drops = 0;
@@ -548,10 +550,8 @@ static TmEcode ReceiveNetmapThreadInit(ThreadVars *tv, const void *initdata, voi
     }
 
     /* basic counters */
-    ntv->capture_kernel_packets = StatsRegisterCounter("capture.kernel_packets",
-            ntv->tv);
-    ntv->capture_kernel_drops = StatsRegisterCounter("capture.kernel_drops",
-            ntv->tv);
+    ntv->capture_kernel_packets = StatsRegisterCounter("capture.kernel_packets", &ntv->tv->stats);
+    ntv->capture_kernel_drops = StatsRegisterCounter("capture.kernel_drops", &ntv->tv->stats);
 
     if (aconf->in.bpf_filter) {
         SCLogConfig("%s: using BPF '%s'", ntv->ifsrc->ifname, aconf->in.bpf_filter);
@@ -823,7 +823,7 @@ static TmEcode ReceiveNetmapLoop(ThreadVars *tv, void *data, void *slot)
             /* no events, timeout */
             /* sync counters */
             NetmapDumpCounters(ntv);
-            StatsSyncCountersIfSignalled(tv);
+            StatsSyncCountersIfSignalled(&tv->stats);
 
             /* poll timed out, lets handle the timeout */
             TmThreadsCaptureHandleTimeout(tv, NULL);
@@ -846,11 +846,11 @@ static TmEcode ReceiveNetmapLoop(ThreadVars *tv, void *data, void *slot)
         }
 
         NetmapDumpCounters(ntv);
-        StatsSyncCountersIfSignalled(tv);
+        StatsSyncCountersIfSignalled(&tv->stats);
     }
 
     NetmapDumpCounters(ntv);
-    StatsSyncCountersIfSignalled(tv);
+    StatsSyncCountersIfSignalled(&tv->stats);
     SCReturnInt(TM_ECODE_OK);
 }
 
@@ -865,10 +865,10 @@ static void ReceiveNetmapThreadExitStats(ThreadVars *tv, void *data)
     NetmapThreadVars *ntv = (NetmapThreadVars *)data;
 
     NetmapDumpCounters(ntv);
-    SCLogPerf("%s: (%s) packets %" PRIu64 ", dropped %" PRIu64 ", bytes %" PRIu64 "",
+    SCLogPerf("%s: (%s) packets %" PRIi64 ", dropped %" PRIi64 ", bytes %" PRIu64 "",
             ntv->ifsrc->ifname, tv->name,
-            StatsGetLocalCounterValue(tv, ntv->capture_kernel_packets),
-            StatsGetLocalCounterValue(tv, ntv->capture_kernel_drops), ntv->bytes);
+            StatsCounterGetLocalValue(&tv->stats, ntv->capture_kernel_packets),
+            StatsCounterGetLocalValue(&tv->stats, ntv->capture_kernel_drops), ntv->bytes);
 }
 
 /**

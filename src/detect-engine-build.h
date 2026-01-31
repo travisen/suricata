@@ -15,8 +15,8 @@
  * 02110-1301, USA.
  */
 
-#ifndef __DETECT_ENGINE_BUILD_H__
-#define __DETECT_ENGINE_BUILD_H__
+#ifndef SURICATA_DETECT_ENGINE_BUILD_H
+#define SURICATA_DETECT_ENGINE_BUILD_H
 
 void PacketCreateMask(Packet *p, SignatureMask *mask, AppProto alproto,
         bool app_decoder_events);
@@ -26,7 +26,6 @@ int SignatureIsFilemagicInspecting(const Signature *);
 int SignatureIsFileMd5Inspecting(const Signature *);
 int SignatureIsFileSha1Inspecting(const Signature *s);
 int SignatureIsFileSha256Inspecting(const Signature *s);
-int SignatureIsFilesizeInspecting(const Signature *);
 void SignatureSetType(DetectEngineCtx *de_ctx, Signature *s);
 
 int SigPrepareStage1(DetectEngineCtx *de_ctx);
@@ -40,4 +39,4 @@ void SigCleanSignatures(DetectEngineCtx *);
 int SigGroupBuild(DetectEngineCtx *);
 int SigGroupCleanup (DetectEngineCtx *de_ctx);
 
-#endif /* __DETECT_ENGINE_BUILD_H__ */
+#endif /* SURICATA_DETECT_ENGINE_BUILD_H */

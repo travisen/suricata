@@ -18,88 +18,130 @@
 //! This module handles file container operations (open, append, close).
 
 use std::ptr;
-use std::os::raw::{c_void};
 
 use crate::core::*;
 
-// Defined in util-file.h
-extern {
-    pub fn FileFlowFlagsToFlags(flow_file_flags: u16, flags: u8) -> u16;
+pub use suricata_sys::sys::FileContainer;
+#[cfg(not(test))]
+use suricata_sys::sys::{
+    FileAppendDataById, FileAppendGAPById, FileCloseFileById, FileContainerRecycle,
+    FileOpenFileWithId,
+};
+
+#[cfg(test)]
+#[allow(non_snake_case)]
+pub(super) unsafe fn FileContainerRecycle(_fc: &mut FileContainer, _sbcfg: &StreamingBufferConfig) {
+}
+#[cfg(test)]
+#[allow(non_snake_case)]
+pub(super) unsafe fn FileAppendGAPById(
+    _fc: &mut FileContainer, _sbcfg: &StreamingBufferConfig, _track_id: u32, _data: *const u8,
+    _data_len: u32,
+) -> i32 {
+    0
+}
+#[cfg(test)]
+#[allow(non_snake_case)]
+pub(super) unsafe fn FileAppendDataById(
+    _fc: &mut FileContainer, _sbcfg: &StreamingBufferConfig, _track_id: u32, _data: *const u8,
+    _data_len: u32,
+) -> i32 {
+    0
+}
+#[cfg(test)]
+#[allow(non_snake_case)]
+pub(super) unsafe fn FileCloseFileById(
+    _fc: &mut FileContainer, _sbcfg: &StreamingBufferConfig, _track_id: u32, _data: *const u8,
+    _data_len: u32, _flags: u16,
+) -> i32 {
+    0
+}
+#[cfg(test)]
+#[allow(non_snake_case)]
+pub(super) unsafe fn FileOpenFileWithId(
+    _fc: &mut FileContainer, _sbcfg: &StreamingBufferConfig, _track_id: u32, _name: *const u8,
+    _name_len: u16, _data: *const u8, _data_len: u32, _flags: u16,
+) -> i32 {
+    0
 }
 
-#[repr(C)]
-#[derive(Debug)]
-pub struct FileContainer {
-    head: * mut c_void,
-    tail: * mut c_void,
+pub trait FileContainerWrapper {
+    fn free(&mut self, cfg: &'static SuricataFileContext);
+    fn file_open(
+        &mut self, cfg: &'static SuricataFileContext, track_id: u32, name: &[u8], flags: u16,
+    ) -> i32;
+    fn file_append(
+        &mut self, cfg: &'static SuricataFileContext, track_id: &u32, data: &[u8], is_gap: bool,
+    ) -> i32;
+    fn file_close(&mut self, cfg: &'static SuricataFileContext, track_id: &u32, flags: u16) -> i32;
 }
 
-impl Default for FileContainer {
-    fn default() -> Self { Self {
-        head: ptr::null_mut(),
-        tail: ptr::null_mut(),
-    }}
-}
-
-impl FileContainer {
-    pub fn free(&mut self, cfg: &'static SuricataFileContext) {
+impl FileContainerWrapper for FileContainer {
+    fn free(&mut self, cfg: &'static SuricataFileContext) {
         SCLogDebug!("freeing self");
-        if let Some(c) = unsafe {SC} {
-            (c.FileContainerRecycle)(self, cfg.files_sbcfg);
+        unsafe {
+            FileContainerRecycle(self, cfg.files_sbcfg);
         }
     }
 
-    pub fn file_open(&mut self, cfg: &'static SuricataFileContext, track_id: u32, name: &[u8], flags: u16) -> i32 {
-        match unsafe {SC} {
-            None => panic!("BUG no suricata_config"),
-            Some(c) => {
-                SCLogDebug!("FILE {:p} OPEN flags {:04X}", &self, flags);
+    fn file_open(
+        &mut self, cfg: &'static SuricataFileContext, track_id: u32, name: &[u8], flags: u16,
+    ) -> i32 {
+        SCLogDebug!("FILE {:p} OPEN flags {:04X}", &self, flags);
 
-                let res = (c.FileOpenFile)(self, cfg.files_sbcfg, track_id,
-                        name.as_ptr(), name.len() as u16,
-                        ptr::null(), 0u32, flags);
-                res
-            }
+        unsafe {
+            FileOpenFileWithId(
+                self,
+                cfg.files_sbcfg,
+                track_id,
+                name.as_ptr(),
+                name.len() as u16,
+                ptr::null(),
+                0u32,
+                flags,
+            )
         }
     }
 
-    pub fn file_append(&mut self, cfg: &'static SuricataFileContext, track_id: &u32, data: &[u8], is_gap: bool) -> i32 {
+    fn file_append(
+        &mut self, cfg: &'static SuricataFileContext, track_id: &u32, data: &[u8], is_gap: bool,
+    ) -> i32 {
         SCLogDebug!("FILECONTAINER: append {}", data.len());
         if data.is_empty() {
-            return 0
+            return 0;
         }
-        match unsafe {SC} {
-            None => panic!("BUG no suricata_config"),
-            Some(c) => {
-                let res = match is_gap {
-                    false => {
-                        SCLogDebug!("appending file data");
-                        let r = (c.FileAppendData)(self, cfg.files_sbcfg, *track_id,
-                                data.as_ptr(), data.len() as u32);
-                        r
-                    },
-                    true => {
-                        SCLogDebug!("appending GAP");
-                        let r = (c.FileAppendGAP)(self, cfg.files_sbcfg, *track_id,
-                                data.as_ptr(), data.len() as u32);
-                        r
-                    },
-                };
-                res
+        let res = match is_gap {
+            false => {
+                SCLogDebug!("appending file data");
+                unsafe {
+                    FileAppendDataById(
+                        self,
+                        cfg.files_sbcfg,
+                        *track_id,
+                        data.as_ptr(),
+                        data.len() as u32,
+                    )
+                }
             }
-        }
+            true => {
+                SCLogDebug!("appending GAP");
+                unsafe {
+                    FileAppendGAPById(
+                        self,
+                        cfg.files_sbcfg,
+                        *track_id,
+                        data.as_ptr(),
+                        data.len() as u32,
+                    )
+                }
+            }
+        };
+        res
     }
 
-    pub fn file_close(&mut self, cfg: &'static SuricataFileContext, track_id: &u32, flags: u16) -> i32 {
+    fn file_close(&mut self, cfg: &'static SuricataFileContext, track_id: &u32, flags: u16) -> i32 {
         SCLogDebug!("FILECONTAINER: CLOSEing");
 
-        match unsafe {SC} {
-            None => panic!("BUG no suricata_config"),
-            Some(c) => {
-                let res = (c.FileCloseFile)(self, cfg.files_sbcfg, *track_id, ptr::null(), 0u32, flags);
-                res
-            }
-        }
-
+        unsafe { FileCloseFileById(self, cfg.files_sbcfg, *track_id, ptr::null(), 0u32, flags) }
     }
 }

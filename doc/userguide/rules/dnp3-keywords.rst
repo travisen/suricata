@@ -12,6 +12,8 @@ This keyword will match on the application function code found in DNP3
 request and responses.  It can be specified as the integer value or
 the symbolic name of the function code.
 
+dnp3_func uses an :ref:`unsigned 8-bits integer <rules-integer-keywords>`.
+
 Syntax
 ~~~~~~
 
@@ -68,12 +70,14 @@ dnp3_ind
 This keyword matches on the DNP3 internal indicator flags in the
 response application header.
 
+dnp3_ind uses an :ref:`unsigned 16-bits integer <rules-integer-keywords>` with bitmasks.
+
 Syntax
 ~~~~~~
 
 ::
 
-  dnp3_ind:<flag>{,<flag>...}
+  dnp3_ind:[*+-=]<flag>{,<flag>...}
 
 
 Where flag is the name of the internal indicator:
@@ -96,8 +100,7 @@ Where flag is the name of the internal indicator:
 * reserved_1
 
 This keyword will match of any of the flags listed are set. To match
-on multiple flags (AND type match), use dnp3_ind for each flag that
-must be set.
+on multiple flags use prefix ``+``.
 
 Examples
 ~~~~~~~~

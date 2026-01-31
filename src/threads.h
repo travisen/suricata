@@ -24,8 +24,8 @@
  * Threading functions defined as macros
  */
 
-#ifndef __THREADS_H__
-#define __THREADS_H__
+#ifndef SURICATA_THREADS_H
+#define SURICATA_THREADS_H
 
 #include "suricata-common.h"
 
@@ -118,6 +118,7 @@ enum {
 #define SCMutexInit(mut, mutattr ) pthread_mutex_init(mut, mutattr)
 #define SCMutexLock(mut) pthread_mutex_lock(mut)
 #define SCMutexTrylock(mut) pthread_mutex_trylock(mut)
+#define SCMutexIsLocked(mut)           (SCMutexTrylock(mut) == EBUSY)
 #define SCMutexUnlock(mut) pthread_mutex_unlock(mut)
 #define SCMutexDestroy pthread_mutex_destroy
 #define SCMUTEX_INITIALIZER PTHREAD_MUTEX_INITIALIZER
@@ -252,12 +253,13 @@ enum {
 })
 
 #else
-#define SCGetThreadIdLong(...) ({ \
-   pid_t tmpthid; \
-   tmpthid = syscall(SYS_gettid); \
-   unsigned long _scgetthread_tid = (unsigned long)tmpthid; \
-   _scgetthread_tid; \
-})
+#define SCGetThreadIdLong(...)                                                                     \
+    ({                                                                                             \
+        pid_t tmpthid;                                                                             \
+        tmpthid = (pid_t)syscall(SYS_gettid);                                                      \
+        unsigned long _scgetthread_tid = (unsigned long)tmpthid;                                   \
+        _scgetthread_tid;                                                                          \
+    })
 #endif /* OS FREEBSD */
 
 extern thread_local char t_thread_name[THREAD_NAME_LEN + 1];
@@ -308,5 +310,4 @@ extern thread_local char t_thread_name[THREAD_NAME_LEN + 1];
 
 void ThreadMacrosRegisterTests(void);
 
-#endif /* __THREADS_H__ */
-
+#endif /* SURICATA_THREADS_H */

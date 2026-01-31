@@ -61,8 +61,13 @@
  * \author Victor Julien <victor@inliniac.net>
  */
 
-#ifndef __SURICATA_H__
-#define __SURICATA_H__
+#ifndef SURICATA_SURICATA_H
+#define SURICATA_SURICATA_H
+
+#ifdef __cplusplus
+extern "C"
+{
+#endif
 
 #include "suricata-common.h"
 
@@ -101,12 +106,17 @@ enum {
 enum EngineMode {
     ENGINE_MODE_UNKNOWN,
     ENGINE_MODE_IDS,
+    /* order matters, we need to be able to do IPS is true for >= ENGINE_MODE_IPS */
     ENGINE_MODE_IPS,
+    ENGINE_MODE_FIREWALL,
 };
 
+/* superset of IPS mode */
+void EngineModeSetFirewall(void);
 void EngineModeSetIPS(void);
 void EngineModeSetIDS(void);
 int EngineModeIsUnknown(void);
+bool EngineModeIsFirewall(void);
 int EngineModeIsIPS(void);
 int EngineModeIsIDS(void);
 
@@ -121,14 +131,18 @@ enum {
 #include "runmodes.h"
 
 typedef struct SCInstance_ {
-    enum RunModes run_mode;
-    enum RunModes aux_run_mode;
+    enum SCRunModes run_mode;
+    enum SCRunModes aux_run_mode;
 
     char pcap_dev[128];
     char *sig_file;
     bool sig_file_exclusive;
     char *pid_filename;
     char *regex_arg;
+    char *firewall_rule_file;
+    bool firewall_rule_file_exclusive;
+    /* is firewall mode enabled */
+    bool is_firewall;
 
     char *keyword_info;
     char *runmode_custom_mode;
@@ -146,12 +160,15 @@ typedef struct SCInstance_ {
     bool set_datadir;
     bool unix_socket_enabled;
 
+    bool install_signal_handlers; /**< Install default signal handlers */
+
     int delayed_detect;
     int disabled_detect;
     int daemon;
     int offline;
     int verbose;
     int checksum_validation;
+    int output_flush_interval;
 
     struct timeval start_time;
 
@@ -173,6 +190,7 @@ extern volatile uint8_t suricata_ctl_flags;
 extern int g_disable_randomness;
 extern uint16_t g_vlan_mask;
 extern uint16_t g_livedev_mask;
+extern uint8_t g_recurlvl_mask;
 
 /* Flag to disable hashing (almost) globally. */
 extern bool g_disable_hashing;
@@ -185,23 +203,53 @@ int RunmodeIsUnittests(void);
 #else
 #define RunmodeIsUnittests() 0
 #endif
-int RunmodeGetCurrent(void);
+
+/**
+ * \brief Get the current run mode.
+ */
+SCRunMode SCRunmodeGet(void);
+
+/**
+ * \brief Set the current run mode.
+ *
+ * Mainly exposed outside of suricata.c as a unit-test helper.
+ */
+void SCRunmodeSet(SCRunMode run_mode);
+
+/**
+ * \brief Enable default signal handlers.
+ */
+void SCEnableDefaultSignalHandlers(void);
 
 int SuriHasSigFile(void);
 
-extern int run_mode;
-
-int SuricataMain(int argc, char **argv);
+void SuricataPreInit(const char *progname);
+void SuricataInit(void);
+void SuricataPostInit(void);
+void SuricataMainLoop(void);
+void SuricataShutdown(void);
 int InitGlobal(void);
+void GlobalsDestroy(void);
 int PostConfLoadedSetup(SCInstance *suri);
 void PostConfLoadedDetectSetup(SCInstance *suri);
+int SCFinalizeRunMode(void);
+TmEcode SCParseCommandLine(int argc, char **argv);
+int SCStartInternalRunMode(int argc, char **argv);
+TmEcode SCLoadYamlConfig(void);
 
 void PreRunInit(const int runmode);
 void PreRunPostPrivsDropInit(const int runmode);
 void PostRunDeinit(const int runmode, struct timeval *start_time);
 void RegisterAllModules(void);
 
+#ifdef OS_WIN32
+int WindowsInitService(int argc, char **argv);
+#endif
+
 const char *GetProgramVersion(void);
 
-#endif /* __SURICATA_H__ */
+#ifdef __cplusplus
+}
+#endif
 
+#endif /* SURICATA_SURICATA_H */

@@ -128,7 +128,7 @@ static void DecodeGeneveConfigPorts(const char *pstr)
 void DecodeGeneveConfig(void)
 {
     int enabled = 0;
-    if (ConfGetBool("decoder.geneve.enabled", &enabled) == 1) {
+    if (SCConfGetBool("decoder.geneve.enabled", &enabled) == 1) {
         if (enabled) {
             g_geneve_enabled = true;
         } else {
@@ -137,7 +137,7 @@ void DecodeGeneveConfig(void)
     }
 
     if (g_geneve_enabled) {
-        ConfNode *node = ConfGetNode("decoder.geneve.ports");
+        SCConfNode *node = SCConfGetNode("decoder.geneve.ports");
         if (node && node->val) {
             DecodeGeneveConfigPorts(node->val);
         } else {
@@ -222,7 +222,7 @@ int DecodeGeneve(ThreadVars *tv, DecodeThreadVars *dtv, Packet *p, const uint8_t
 #endif
 
     /* Increment stats counter for Geneve packets */
-    StatsIncr(tv, dtv->counter_geneve);
+    StatsCounterIncr(&tv->stats, dtv->counter_geneve);
 
     /* Determine first protocol encapsulated after Geneve header */
     eth_type = SCNtohs(geneve_hdr->eth_type);
@@ -305,11 +305,11 @@ static int DecodeGeneveTest01(void)
     FlowInitConfig(FLOW_QUIET);
     DecodeUDP(&tv, &dtv, p, raw_geneve, sizeof(raw_geneve));
 
-    FAIL_IF(p->udph == NULL);
+    FAIL_IF_NOT(PacketIsUDP(p));
     FAIL_IF(tv.decode_pq.top == NULL);
 
     Packet *tp = PacketDequeueNoLock(&tv.decode_pq);
-    FAIL_IF(tp->udph == NULL);
+    FAIL_IF_NOT(PacketIsUDP(tp));
     FAIL_IF_NOT(tp->sp == 546);
 
     FlowShutdown();
@@ -347,11 +347,11 @@ static int DecodeGeneveTest02(void)
     FlowInitConfig(FLOW_QUIET);
     DecodeUDP(&tv, &dtv, p, raw_geneve, sizeof(raw_geneve));
 
-    FAIL_IF(p->udph == NULL);
+    FAIL_IF_NOT(PacketIsUDP(p));
     FAIL_IF(tv.decode_pq.top == NULL);
 
     Packet *tp = PacketDequeueNoLock(&tv.decode_pq);
-    FAIL_IF(tp->udph == NULL);
+    FAIL_IF_NOT(PacketIsUDP(tp));
     FAIL_IF_NOT(tp->sp == 53);
 
     FlowShutdown();
@@ -394,11 +394,11 @@ static int DecodeGeneveTest03(void)
     FlowInitConfig(FLOW_QUIET);
     DecodeUDP(&tv, &dtv, p, raw_geneve, sizeof(raw_geneve));
 
-    FAIL_IF(p->udph == NULL);
+    FAIL_IF_NOT(PacketIsUDP(p));
     FAIL_IF(tv.decode_pq.top == NULL);
 
     Packet *tp = PacketDequeueNoLock(&tv.decode_pq);
-    FAIL_IF(tp->udph == NULL);
+    FAIL_IF_NOT(PacketIsUDP(tp));
     FAIL_IF_NOT(tp->sp == 53);
 
     FlowShutdown();
@@ -438,7 +438,7 @@ static int DecodeGeneveTest04(void)
     FlowInitConfig(FLOW_QUIET);
     DecodeUDP(&tv, &dtv, p, raw_geneve, sizeof(raw_geneve));
 
-    FAIL_IF(p->udph == NULL);
+    FAIL_IF_NOT(PacketIsUDP(p));
     FAIL_IF(tv.decode_pq.top != NULL); /* Geneve packet should not have been processed */
 
     DecodeGeneveConfigPorts(GENEVE_DEFAULT_PORT_S); /* Reset Geneve port list for future calls */
@@ -478,7 +478,7 @@ static int DecodeGeneveTest05(void)
     FlowInitConfig(FLOW_QUIET);
     DecodeUDP(&tv, &dtv, p, raw_geneve, sizeof(raw_geneve));
 
-    FAIL_IF(p->udph == NULL);
+    FAIL_IF_NOT(PacketIsUDP(p));
     FAIL_IF(tv.decode_pq.top != NULL); /* Geneve packet should not have been processed */
 
     FlowShutdown();

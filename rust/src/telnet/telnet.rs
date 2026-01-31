@@ -16,11 +16,16 @@
  */
 
 use std;
-use crate::core::{ALPROTO_UNKNOWN, AppProto, Flow, IPPROTO_TCP};
+use crate::core::{ALPROTO_UNKNOWN, IPPROTO_TCP};
 use crate::applayer::{self, *};
+use crate::flow::Flow;
 use crate::frames::*;
 use std::ffi::CString;
-use nom7::IResult;
+use nom8::IResult;
+use suricata_sys::sys::{
+    AppLayerParserState, AppProto, SCAppLayerParserConfParserEnabled,
+    SCAppLayerParserStateIssetFlag, SCAppLayerProtoDetectConfProtoDetectionEnabled,
+};
 use super::parser;
 
 static mut ALPROTO_TELNET: AppProto = ALPROTO_UNKNOWN;
@@ -135,7 +140,7 @@ impl TelnetState {
 
     // app-layer-frame-documentation tag start: parse_request
     fn parse_request(
-        &mut self, flow: *const Flow, stream_slice: &StreamSlice, input: &[u8],
+        &mut self, flow: *mut Flow, stream_slice: &StreamSlice, input: &[u8],
     ) -> AppLayerResult {
         // We're not interested in empty requests.
         if input.is_empty() {
@@ -164,6 +169,7 @@ impl TelnetState {
                     start,
                     -1_i64,
                     TelnetFrameType::Pdu as u8,
+                    None,
                 );
             }
             if self.request_specific_frame.is_none() {
@@ -175,6 +181,7 @@ impl TelnetState {
                             start,
                             -1_i64,
                             TelnetFrameType::Ctl as u8,
+                            None,
                         )
                     } else {
                         Frame::new(
@@ -183,6 +190,7 @@ impl TelnetState {
                             start,
                             -1_i64,
                             TelnetFrameType::Data as u8,
+                            None,
                         )
                     // app-layer-frame-documentation tag end: parse_request
                     };
@@ -228,7 +236,7 @@ impl TelnetState {
                         SCLogDebug!("request {:?}", _c);
                     }
                 }
-                Err(nom7::Err::Incomplete(_)) => {
+                Err(nom8::Err::Incomplete(_)) => {
                     // Not enough data. This parser doesn't give us a good indication
                     // of how much data is missing so just ask for one more byte so the
                     // parse is called as soon as more data is received.
@@ -246,7 +254,7 @@ impl TelnetState {
         return AppLayerResult::ok();
     }
 
-    fn parse_response(&mut self, flow: *const Flow, stream_slice: &StreamSlice, input: &[u8]) -> AppLayerResult {
+    fn parse_response(&mut self, flow: *mut Flow, stream_slice: &StreamSlice, input: &[u8]) -> AppLayerResult {
         // We're not interested in empty responses.
         if input.is_empty() {
             return AppLayerResult::ok();
@@ -266,14 +274,14 @@ impl TelnetState {
         let mut start = input;
         while !start.is_empty() {
             if self.response_frame.is_none() {
-                self.response_frame = Frame::new(flow, stream_slice, start, -1_i64, TelnetFrameType::Pdu as u8);
+                self.response_frame = Frame::new(flow, stream_slice, start, -1_i64, TelnetFrameType::Pdu as u8, None);
             }
             if self.response_specific_frame.is_none() {
                 if let Ok((_, is_ctl)) = parser::peek_message_is_ctl(start) {
                     self.response_specific_frame = if is_ctl {
-                        Frame::new(flow, stream_slice, start, -1_i64, TelnetFrameType::Ctl as u8)
+                        Frame::new(flow, stream_slice, start, -1_i64, TelnetFrameType::Ctl as u8, None)
                     } else {
-                        Frame::new(flow, stream_slice, start, -1_i64, TelnetFrameType::Data as u8)
+                        Frame::new(flow, stream_slice, start, -1_i64, TelnetFrameType::Data as u8, None)
                     };
                 }
             }
@@ -336,7 +344,7 @@ impl TelnetState {
                         SCLogDebug!("response {:?}", _c);
                     }
                 }
-                Err(nom7::Err::Incomplete(_)) => {
+                Err(nom8::Err::Incomplete(_)) => {
                     let consumed = input.len() - start.len();
                     let needed = start.len() + 1;
                     return AppLayerResult::incomplete(consumed as u32, needed as u32);
@@ -373,8 +381,7 @@ fn probe(input: &[u8]) -> IResult<&[u8], ()> {
 // C exports.
 
 /// C entry point for a probing parser.
-#[no_mangle]
-pub unsafe extern "C" fn rs_telnet_probing_parser(
+unsafe extern "C" fn telnet_probing_parser(
     _flow: *const Flow,
     _direction: u8,
     input: *const u8,
@@ -392,20 +399,17 @@ pub unsafe extern "C" fn rs_telnet_probing_parser(
     return ALPROTO_UNKNOWN;
 }
 
-#[no_mangle]
-pub extern "C" fn rs_telnet_state_new(_orig_state: *mut std::os::raw::c_void, _orig_proto: AppProto) -> *mut std::os::raw::c_void {
+extern "C" fn telnet_state_new(_orig_state: *mut std::os::raw::c_void, _orig_proto: AppProto) -> *mut std::os::raw::c_void {
     let state = TelnetState::new();
     let boxed = Box::new(state);
     return Box::into_raw(boxed) as *mut std::os::raw::c_void;
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_telnet_state_free(state: *mut std::os::raw::c_void) {
+unsafe extern "C" fn telnet_state_free(state: *mut std::os::raw::c_void) {
     std::mem::drop(Box::from_raw(state as *mut TelnetState));
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_telnet_state_tx_free(
+unsafe extern "C" fn telnet_state_tx_free(
     state: *mut std::os::raw::c_void,
     tx_id: u64,
 ) {
@@ -413,15 +417,14 @@ pub unsafe extern "C" fn rs_telnet_state_tx_free(
     state.free_tx(tx_id);
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_telnet_parse_request(
-    flow: *const Flow,
+unsafe extern "C" fn telnet_parse_request(
+    flow: *mut Flow,
     state: *mut std::os::raw::c_void,
-    pstate: *mut std::os::raw::c_void,
+    pstate: *mut AppLayerParserState,
     stream_slice: StreamSlice,
-    _data: *const std::os::raw::c_void
+    _data: *mut std::os::raw::c_void
 ) -> AppLayerResult {
-    let eof = AppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TS) > 0;
+    let eof = SCAppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TS) > 0;
 
     if eof {
         // If needed, handle EOF, or pass it into the parser.
@@ -441,15 +444,14 @@ pub unsafe extern "C" fn rs_telnet_parse_request(
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_telnet_parse_response(
-    flow: *const Flow,
+unsafe extern "C" fn telnet_parse_response(
+    flow: *mut Flow,
     state: *mut std::os::raw::c_void,
-    pstate: *mut std::os::raw::c_void,
+    pstate: *mut AppLayerParserState,
     stream_slice: StreamSlice,
-    _data: *const std::os::raw::c_void
+    _data: *mut std::os::raw::c_void
 ) -> AppLayerResult {
-    let _eof = AppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TC) > 0;
+    let _eof = SCAppLayerParserStateIssetFlag(pstate, APP_LAYER_PARSER_EOF_TC) > 0;
     let state = cast_pointer!(state, TelnetState);
 
     if stream_slice.is_gap() {
@@ -463,8 +465,7 @@ pub unsafe extern "C" fn rs_telnet_parse_response(
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_telnet_state_get_tx(
+unsafe extern "C" fn telnet_state_get_tx(
     state: *mut std::os::raw::c_void,
     tx_id: u64,
 ) -> *mut std::os::raw::c_void {
@@ -479,16 +480,14 @@ pub unsafe extern "C" fn rs_telnet_state_get_tx(
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_telnet_state_get_tx_count(
+unsafe extern "C" fn telnet_state_get_tx_count(
     state: *mut std::os::raw::c_void,
 ) -> u64 {
     let state = cast_pointer!(state, TelnetState);
     return state.tx_id;
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rs_telnet_tx_get_alstate_progress(
+unsafe extern "C" fn telnet_tx_get_alstate_progress(
     tx: *mut std::os::raw::c_void,
     _direction: u8,
 ) -> std::os::raw::c_int {
@@ -497,59 +496,60 @@ pub unsafe extern "C" fn rs_telnet_tx_get_alstate_progress(
     return 0;
 }
 
-export_tx_data_get!(rs_telnet_get_tx_data, TelnetTransaction);
-export_state_data_get!(rs_telnet_get_state_data, TelnetState);
+export_tx_data_get!(telnet_get_tx_data, TelnetTransaction);
+export_state_data_get!(telnet_get_state_data, TelnetState);
 
 // Parser name as a C style string.
 const PARSER_NAME: &[u8] = b"telnet\0";
 
 #[no_mangle]
-pub unsafe extern "C" fn rs_telnet_register_parser() {
+pub unsafe extern "C" fn SCRegisterTelnetParser() {
     let default_port = CString::new("[23]").unwrap();
     let parser = RustParser {
         name: PARSER_NAME.as_ptr() as *const std::os::raw::c_char,
         default_port: default_port.as_ptr(),
         ipproto: IPPROTO_TCP,
-        probe_ts: Some(rs_telnet_probing_parser),
-        probe_tc: Some(rs_telnet_probing_parser),
+        probe_ts: Some(telnet_probing_parser),
+        probe_tc: Some(telnet_probing_parser),
         min_depth: 0,
         max_depth: 16,
-        state_new: rs_telnet_state_new,
-        state_free: rs_telnet_state_free,
-        tx_free: rs_telnet_state_tx_free,
-        parse_ts: rs_telnet_parse_request,
-        parse_tc: rs_telnet_parse_response,
-        get_tx_count: rs_telnet_state_get_tx_count,
-        get_tx: rs_telnet_state_get_tx,
+        state_new: telnet_state_new,
+        state_free: telnet_state_free,
+        tx_free: telnet_state_tx_free,
+        parse_ts: telnet_parse_request,
+        parse_tc: telnet_parse_response,
+        get_tx_count: telnet_state_get_tx_count,
+        get_tx: telnet_state_get_tx,
         tx_comp_st_ts: 1,
         tx_comp_st_tc: 1,
-        tx_get_progress: rs_telnet_tx_get_alstate_progress,
+        tx_get_progress: telnet_tx_get_alstate_progress,
         get_eventinfo: Some(TelnetEvent::get_event_info),
         get_eventinfo_byid : Some(TelnetEvent::get_event_info_by_id),
         localstorage_new: None,
         localstorage_free: None,
         get_tx_files: None,
         get_tx_iterator: Some(applayer::state_get_tx_iterator::<TelnetState, TelnetTransaction>),
-        get_tx_data: rs_telnet_get_tx_data,
-        get_state_data: rs_telnet_get_state_data,
+        get_tx_data: telnet_get_tx_data,
+        get_state_data: telnet_get_state_data,
         apply_tx_config: None,
         flags: APP_LAYER_PARSER_OPT_ACCEPT_GAPS,
-        truncate: None,
         get_frame_id_by_name: Some(TelnetFrameType::ffi_id_from_name),
         get_frame_name_by_id: Some(TelnetFrameType::ffi_name_from_id),
+        get_state_id_by_name: None,
+        get_state_name_by_id: None,
 
     };
 
     let ip_proto_str = CString::new("tcp").unwrap();
 
-    if AppLayerProtoDetectConfProtoDetectionEnabled(
+    if SCAppLayerProtoDetectConfProtoDetectionEnabled(
         ip_proto_str.as_ptr(),
         parser.name,
     ) != 0
     {
-        let alproto = AppLayerRegisterProtocolDetection(&parser, 1);
+        let alproto = applayer_register_protocol_detection(&parser, 1);
         ALPROTO_TELNET = alproto;
-        if AppLayerParserConfParserEnabled(
+        if SCAppLayerParserConfParserEnabled(
             ip_proto_str.as_ptr(),
             parser.name,
         ) != 0

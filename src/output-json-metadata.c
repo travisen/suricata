@@ -65,7 +65,7 @@
 
 static int MetadataJson(ThreadVars *tv, OutputJsonThreadCtx *aft, const Packet *p)
 {
-    JsonBuilder *js = CreateEveHeader(p, LOG_DIR_PACKET, "metadata", NULL, aft->ctx);
+    SCJsonBuilder *js = CreateEveHeader(p, LOG_DIR_PACKET, "metadata", NULL, aft->ctx);
     if (unlikely(js == NULL))
         return TM_ECODE_OK;
 
@@ -74,9 +74,9 @@ static int MetadataJson(ThreadVars *tv, OutputJsonThreadCtx *aft, const Packet *
     if (!aft->ctx->cfg.include_metadata) {
         EveAddMetadata(p, p->flow, js);
     }
-    OutputJsonBuilderBuffer(js, aft);
+    OutputJsonBuilderBuffer(tv, p, p->flow, js, aft);
 
-    jb_free(js);
+    SCJbFree(js);
     return TM_ECODE_OK;
 }
 
@@ -94,12 +94,19 @@ static bool JsonMetadataLogCondition(ThreadVars *tv, void *data, const Packet *p
 
 void JsonMetadataLogRegister (void)
 {
+    OutputPacketLoggerFunctions output_logger_functions = {
+        .LogFunc = JsonMetadataLogger,
+        .FlushFunc = OutputJsonLogFlush,
+        .ConditionFunc = JsonMetadataLogCondition,
+        .ThreadInitFunc = JsonLogThreadInit,
+        .ThreadDeinitFunc = JsonLogThreadDeinit,
+        .ThreadExitPrintStatsFunc = NULL,
+    };
+
     OutputRegisterPacketSubModule(LOGGER_JSON_METADATA, "eve-log", MODULE_NAME, "eve-log.metadata",
-            OutputJsonLogInitSub, JsonMetadataLogger, JsonMetadataLogCondition, JsonLogThreadInit,
-            JsonLogThreadDeinit, NULL);
+            OutputJsonLogInitSub, &output_logger_functions);
 
     /* Kept for compatibility. */
     OutputRegisterPacketSubModule(LOGGER_JSON_METADATA, "eve-log", MODULE_NAME, "eve-log.vars",
-            OutputJsonLogInitSub, JsonMetadataLogger, JsonMetadataLogCondition, JsonLogThreadInit,
-            JsonLogThreadDeinit, NULL);
+            OutputJsonLogInitSub, &output_logger_functions);
 }

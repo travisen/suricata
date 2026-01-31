@@ -21,8 +21,8 @@
  * \author Tom DeCanio <td@npulsetech.com>
  */
 
-#ifndef __OUTPUT_JSON_EMAIL_COMMON_H__
-#define __OUTPUT_JSON_EMAIL_COMMON_H__
+#ifndef SURICATA_OUTPUT_JSON_EMAIL_COMMON_H
+#define SURICATA_OUTPUT_JSON_EMAIL_COMMON_H
 
 typedef struct OutputJsonEmailCtx_ {
     uint32_t flags; /** Store mode */
@@ -35,9 +35,10 @@ typedef struct JsonEmailLogThread_ {
     OutputJsonThreadCtx *ctx;
 } JsonEmailLogThread;
 
-TmEcode EveEmailLogJson(JsonEmailLogThread *aft, JsonBuilder *js, const Packet *p, Flow *f, void *state, void *vtx, uint64_t tx_id);
-bool EveEmailAddMetadata(const Flow *f, uint32_t tx_id, JsonBuilder *js);
+TmEcode EveEmailLogJson(JsonEmailLogThread *aft, SCJsonBuilder *js, const Packet *p, Flow *f,
+        void *state, void *vtx, uint64_t tx_id);
+bool EveEmailAddMetadata(const Flow *f, uint64_t tx_id, SCJsonBuilder *js);
 
-void OutputEmailInitConf(ConfNode *conf, OutputJsonEmailCtx *email_ctx);
+void OutputEmailInitConf(SCConfNode *conf, OutputJsonEmailCtx *email_ctx);
 
-#endif /* __OUTPUT_JSON_EMAIL_COMMON_H__ */
+#endif /* SURICATA_OUTPUT_JSON_EMAIL_COMMON_H */

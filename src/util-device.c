@@ -17,13 +17,14 @@
 
 #include "suricata-common.h"
 #include "conf.h"
-#include "util-device.h"
+#include "util-device-private.h"
 #include "util-ioctl.h"
 #include "util-misc.h"
 #include "util-dpdk.h"
 
 #include "device-storage.h"
 #include "util-debug.h"
+#include "util-affinity.h"
 
 #define MAX_DEVNAME 10
 
@@ -40,6 +41,11 @@ static LiveDevStorageId g_bypass_storage_id = { .id = -1 };
 /** private device list */
 static TAILQ_HEAD(, LiveDevice_) live_devices =
     TAILQ_HEAD_INITIALIZER(live_devices);
+
+typedef struct LiveDeviceName_ {
+    char *dev; /**< the device (e.g. "eth0") */
+    TAILQ_ENTRY(LiveDeviceName_) next;
+} LiveDeviceName;
 
 /** List of the name of devices
  *
@@ -173,6 +179,20 @@ int LiveGetDeviceCount(void)
     return i;
 }
 
+int LiveGetDeviceCountWithoutAssignedThreading(void)
+{
+    int i = 0;
+    LiveDevice *pd;
+
+    TAILQ_FOREACH (pd, &live_devices, next) {
+        if (GetAffinityTypeForNameAndIface("worker-cpu-set", pd->dev) == NULL) {
+            i++;
+        }
+    }
+
+    return i;
+}
+
 /**
  *  \brief Get a pointer to the device name at idx
  *
@@ -228,7 +248,7 @@ static int LiveSafeDeviceName(const char *devname, char *newdevname, size_t dest
             return 1;
         }
 
-        ShortenString(devname, newdevname, destlen, '.');
+        ShortenString(devname, newdevname, destlen, '~');
 
         SCLogInfo("%s: shortening device name to %s", devname, newdevname);
     } else {
@@ -278,15 +298,15 @@ int LiveBuildDeviceList(const char *runmode)
 
 int LiveBuildDeviceListCustom(const char *runmode, const char *itemname)
 {
-    ConfNode *base = ConfGetNode(runmode);
-    ConfNode *child;
+    SCConfNode *base = SCConfGetNode(runmode);
+    SCConfNode *child;
     int i = 0;
 
     if (base == NULL)
         return 0;
 
     TAILQ_FOREACH(child, &base->head, next) {
-        ConfNode *subchild;
+        SCConfNode *subchild;
         TAILQ_FOREACH(subchild, &child->head, next) {
             if ((!strcmp(subchild->name, itemname))) {
                 if (!strcmp(subchild->val, "default"))
@@ -487,25 +507,6 @@ int LiveDevUseBypass(LiveDevice *dev)
 }
 
 /**
- * Set number of currently bypassed flows for a protocol family
- *
- * \param dev pointer to LiveDevice to set stats for
- * \param cnt number of currently bypassed flows
- * \param family AF_INET to set IPv4 count or AF_INET6 to set IPv6 count
- */
-void LiveDevSetBypassStats(LiveDevice *dev, uint64_t cnt, int family)
-{
-    BypassInfo *bpfdata = LiveDevGetStorageById(dev, g_bypass_storage_id);
-    if (bpfdata) {
-        if (family == AF_INET) {
-            SC_ATOMIC_SET(bpfdata->ipv4_hash_count, cnt);
-        } else if (family == AF_INET6) {
-            SC_ATOMIC_SET(bpfdata->ipv6_hash_count, cnt);
-        }
-    }
-}
-
-/**
  * Increase number of currently bypassed flows for a protocol family
  *
  * \param dev pointer to LiveDevice to set stats for
@@ -584,8 +585,11 @@ void LiveDevAddBypassSuccess(LiveDevice *dev, uint64_t cnt, int family)
 #ifdef BUILD_UNIX_SOCKET
 TmEcode LiveDeviceGetBypassedStats(json_t *cmd, json_t *answer, void *data)
 {
+    if (g_bypass_storage_id.id < 0) {
+        json_object_set_new(answer, "message", json_string("Bypass not enabled"));
+        SCReturnInt(TM_ECODE_FAILED);
+    }
     LiveDevice *ldev = NULL, *ndev = NULL;
-
     json_t *ifaces = NULL;
     while(LiveDeviceForEach(&ldev, &ndev)) {
         BypassInfo *bpinfo = LiveDevGetStorageById(ldev, g_bypass_storage_id);
@@ -624,3 +628,33 @@ TmEcode LiveDeviceGetBypassedStats(json_t *cmd, json_t *answer, void *data)
     SCReturnInt(TM_ECODE_FAILED);
 }
 #endif
+
+uint64_t LiveDevicePktsGet(LiveDevice *dev)
+{
+    return SC_ATOMIC_GET(dev->pkts);
+}
+
+void LiveDevicePktsIncr(LiveDevice *dev)
+{
+    (void)SC_ATOMIC_ADD(dev->pkts, 1);
+}
+
+void LiveDevicePktsAdd(LiveDevice *dev, uint64_t n)
+{
+    (void)SC_ATOMIC_ADD(dev->pkts, n);
+}
+
+void LiveDeviceDropAdd(LiveDevice *dev, uint64_t n)
+{
+    (void)SC_ATOMIC_ADD(dev->drop, n);
+}
+
+void LiveDeviceBypassedAdd(LiveDevice *dev, uint64_t n)
+{
+    (void)SC_ATOMIC_ADD(dev->bypassed, n);
+}
+
+uint64_t LiveDeviceInvalidChecksumsGet(LiveDevice *dev)
+{
+    return SC_ATOMIC_GET(dev->invalid_checksums);
+}

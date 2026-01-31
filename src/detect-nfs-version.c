@@ -61,17 +61,18 @@ static int DetectNfsVersionMatch (DetectEngineThreadCtx *, Flow *,
  */
 void DetectNfsVersionRegister (void)
 {
-    sigmatch_table[DETECT_AL_NFS_VERSION].name = "nfs.version";
-    sigmatch_table[DETECT_AL_NFS_VERSION].alias = "nfs_version";
-    sigmatch_table[DETECT_AL_NFS_VERSION].desc = "match NFS version";
-    sigmatch_table[DETECT_AL_NFS_VERSION].url = "/rules/nfs-keywords.html#version";
-    sigmatch_table[DETECT_AL_NFS_VERSION].AppLayerTxMatch = DetectNfsVersionMatch;
-    sigmatch_table[DETECT_AL_NFS_VERSION].Setup = DetectNfsVersionSetup;
-    sigmatch_table[DETECT_AL_NFS_VERSION].Free = DetectNfsVersionFree;
+    sigmatch_table[DETECT_NFS_VERSION].name = "nfs.version";
+    sigmatch_table[DETECT_NFS_VERSION].alias = "nfs_version";
+    sigmatch_table[DETECT_NFS_VERSION].desc = "match NFS version";
+    sigmatch_table[DETECT_NFS_VERSION].url = "/rules/nfs-keywords.html#version";
+    sigmatch_table[DETECT_NFS_VERSION].AppLayerTxMatch = DetectNfsVersionMatch;
+    sigmatch_table[DETECT_NFS_VERSION].Setup = DetectNfsVersionSetup;
+    sigmatch_table[DETECT_NFS_VERSION].Free = DetectNfsVersionFree;
+    sigmatch_table[DETECT_NFS_VERSION].flags = SIGMATCH_INFO_UINT32;
     // unit tests were the same as DetectNfsProcedureRegisterTests
+
     DetectAppLayerInspectEngineRegister(
             "nfs_request", ALPROTO_NFS, SIG_FLAG_TOSERVER, 0, DetectEngineInspectGenericList, NULL);
-
     g_nfs_request_buffer_id = DetectBufferTypeGetByName("nfs_request");
 
     SCLogDebug("g_nfs_request_buffer_id %d", g_nfs_request_buffer_id);
@@ -102,7 +103,7 @@ static int DetectNfsVersionMatch (DetectEngineThreadCtx *det_ctx,
 
     const DetectU32Data *dd = (const DetectU32Data *)ctx;
     uint32_t version;
-    rs_nfs_tx_get_version(txv, &version);
+    SCNfsTxGetVersion(txv, &version);
     SCLogDebug("version %u mode %u lo %u hi %u", version, dd->mode, dd->arg1, dd->arg2);
     if (DetectU32Match(version, dd))
         SCReturnInt(1);
@@ -120,7 +121,7 @@ static int DetectNfsVersionMatch (DetectEngineThreadCtx *det_ctx,
  */
 static DetectU32Data *DetectNfsVersionParse(const char *rawstr)
 {
-    return rs_detect_u32_parse_inclusive(rawstr);
+    return SCDetectU32ParseInclusive(rawstr);
 }
 
 
@@ -141,7 +142,7 @@ static int DetectNfsVersionSetup (DetectEngineCtx *de_ctx, Signature *s,
 {
     SCLogDebug("\'%s\'", rawstr);
 
-    if (DetectSignatureSetAppProto(s, ALPROTO_NFS) != 0)
+    if (SCDetectSignatureSetAppProto(s, ALPROTO_NFS) != 0)
         return -1;
 
     DetectU32Data *dd = DetectNfsVersionParse(rawstr);
@@ -154,7 +155,7 @@ static int DetectNfsVersionSetup (DetectEngineCtx *de_ctx, Signature *s,
      * and put it in the Signature. */
 
     SCLogDebug("low %u hi %u", dd->arg1, dd->arg2);
-    if (SigMatchAppendSMToList(de_ctx, s, DETECT_AL_NFS_VERSION, (SigMatchCtx *)dd,
+    if (SCSigMatchAppendSMToList(de_ctx, s, DETECT_NFS_VERSION, (SigMatchCtx *)dd,
                 g_nfs_request_buffer_id) == NULL) {
         goto error;
     }
@@ -173,5 +174,5 @@ error:
  */
 void DetectNfsVersionFree(DetectEngineCtx *de_ctx, void *ptr)
 {
-    rs_detect_u32_free(ptr);
+    SCDetectU32Free(ptr);
 }

@@ -31,6 +31,7 @@
 #include "util-byte.h"
 #include "util-conf.h"
 #include "util-path.h"
+#include "util-misc.h"
 #include "util-time.h"
 
 #if defined(HAVE_SYS_UN_H) && defined(HAVE_SYS_SOCKET_H) && defined(HAVE_SYS_TYPES_H)
@@ -50,7 +51,7 @@ static bool LogFileNewThreadedCtx(LogFileCtx *parent_ctx, const char *log_path, 
         ThreadLogFileHashEntry *entry);
 
 // Threaded eve.json identifier
-static SC_ATOMIC_DECL_AND_INIT_WITH_VAL(uint32_t, eve_file_id, 1);
+static SC_ATOMIC_DECL_AND_INIT_WITH_VAL(uint16_t, eve_file_id, 1);
 
 #ifdef BUILD_WITH_UNIXSOCKET
 /** \brief connect to the indicated local stream socket, logging any errors
@@ -125,7 +126,7 @@ static int SCLogUnixSocketReconnect(LogFileCtx *log_ctx)
     log_ctx->fp = SCLogOpenUnixSocketFp(log_ctx->filename, log_ctx->sock_type, 0);
     if (log_ctx->fp) {
         /* Connected at last (or reconnected) */
-        SCLogNotice("Reconnected socket \"%s\"", log_ctx->filename);
+        SCLogDebug("Reconnected socket \"%s\"", log_ctx->filename);
     } else if (disconnected) {
         SCLogWarning("Reconnect failed: %s (will keep trying)", strerror(errno));
     }
@@ -189,6 +190,48 @@ static inline void OutputWriteLock(pthread_mutex_t *m)
 }
 
 /**
+ * \brief Flush a log file.
+ */
+static void SCLogFileFlushNoLock(LogFileCtx *log_ctx)
+{
+    log_ctx->bytes_since_last_flush = 0;
+    SCFflushUnlocked(log_ctx->fp);
+}
+
+static void SCLogFileFlush(LogFileCtx *log_ctx)
+{
+    OutputWriteLock(&log_ctx->fp_mutex);
+    SCLogFileFlushNoLock(log_ctx);
+    SCMutexUnlock(&log_ctx->fp_mutex);
+}
+
+/**
+ * \brief Handle log file rotation checks and updates
+ * \param log_ctx Log file context
+ * \retval true if rotation occurred
+ */
+static bool HandleLogRotation(LogFileCtx *log_ctx)
+{
+    if (log_ctx->rotation_flag) {
+        log_ctx->rotation_flag = 0;
+        SCConfLogReopen(log_ctx);
+        if (log_ctx->flags & LOGFILE_ROTATE_INTERVAL) {
+            log_ctx->rotate_time = time(NULL) + log_ctx->rotate_interval;
+        }
+        return true;
+    } else if (log_ctx->flags & LOGFILE_ROTATE_INTERVAL) {
+        time_t now = time(NULL);
+        if (now >= log_ctx->rotate_time) {
+            SCConfLogReopen(log_ctx);
+            log_ctx->rotate_time = now + log_ctx->rotate_interval;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
  * \brief Write buffer to log file.
  * \retval 0 on failure; otherwise, the return value of fwrite_unlocked (number of
  * characters successfully written).
@@ -197,21 +240,9 @@ static int SCLogFileWriteNoLock(const char *buffer, int buffer_len, LogFileCtx *
 {
     int ret = 0;
 
-    BUG_ON(log_ctx->is_sock);
+    DEBUG_VALIDATE_BUG_ON(log_ctx->is_sock);
 
-    /* Check for rotation. */
-    if (log_ctx->rotation_flag) {
-        log_ctx->rotation_flag = 0;
-        SCConfLogReopen(log_ctx);
-    }
-
-    if (log_ctx->flags & LOGFILE_ROTATE_INTERVAL) {
-        time_t now = time(NULL);
-        if (now >= log_ctx->rotate_time) {
-            SCConfLogReopen(log_ctx);
-            log_ctx->rotate_time = now + log_ctx->rotate_interval;
-        }
-    }
+    HandleLogRotation(log_ctx);
 
     if (log_ctx->fp) {
         SCClearErrUnlocked(log_ctx->fp);
@@ -223,8 +254,15 @@ static int SCLogFileWriteNoLock(const char *buffer, int buffer_len, LogFileCtx *
                         log_ctx->filename);
             }
             log_ctx->output_errors++;
-        } else {
-            SCFflushUnlocked(log_ctx->fp);
+            return ret;
+        }
+
+        log_ctx->bytes_since_last_flush += buffer_len;
+
+        if (log_ctx->buffer_size && log_ctx->bytes_since_last_flush >= log_ctx->buffer_size) {
+            SCLogDebug("%s: flushing %" PRIu64 " during write", log_ctx->filename,
+                    log_ctx->bytes_since_last_flush);
+            SCLogFileFlushNoLock(log_ctx);
         }
     }
 
@@ -247,35 +285,7 @@ static int SCLogFileWrite(const char *buffer, int buffer_len, LogFileCtx *log_ct
     } else
 #endif
     {
-
-        /* Check for rotation. */
-        if (log_ctx->rotation_flag) {
-            log_ctx->rotation_flag = 0;
-            SCConfLogReopen(log_ctx);
-        }
-
-        if (log_ctx->flags & LOGFILE_ROTATE_INTERVAL) {
-            time_t now = time(NULL);
-            if (now >= log_ctx->rotate_time) {
-                SCConfLogReopen(log_ctx);
-                log_ctx->rotate_time = now + log_ctx->rotate_interval;
-            }
-        }
-
-        if (log_ctx->fp) {
-            clearerr(log_ctx->fp);
-            if (1 != fwrite(buffer, buffer_len, 1, log_ctx->fp)) {
-                /* Only the first error is logged */
-                if (!log_ctx->output_errors) {
-                    SCLogError("%s error while writing to %s",
-                            ferror(log_ctx->fp) ? strerror(errno) : "unknown error",
-                            log_ctx->filename);
-                }
-                log_ctx->output_errors++;
-            } else {
-                fflush(log_ctx->fp);
-            }
-        }
+        ret = SCLogFileWriteNoLock(buffer, buffer_len, log_ctx);
     }
 
     SCMutexUnlock(&log_ctx->fp_mutex);
@@ -307,8 +317,11 @@ static char *SCLogFilenameFromPattern(const char *pattern)
 static void SCLogFileCloseNoLock(LogFileCtx *log_ctx)
 {
     SCLogDebug("Closing %s", log_ctx->filename);
-    if (log_ctx->fp)
+    if (log_ctx->fp) {
+        if (log_ctx->buffer_size)
+            SCFflushUnlocked(log_ctx->fp);
         fclose(log_ctx->fp);
+    }
 
     if (log_ctx->output_errors) {
         SCLogError("There were %" PRIu64 " output errors to %s", log_ctx->output_errors,
@@ -346,14 +359,17 @@ static void ThreadLogFileHashFreeFunc(void *data)
     BUG_ON(data == NULL);
     ThreadLogFileHashEntry *thread_ent = (ThreadLogFileHashEntry *)data;
 
-    if (thread_ent) {
+    if (!thread_ent)
+        return;
+
+    if (thread_ent->isopen) {
         LogFileCtx *lf_ctx = thread_ent->ctx;
         /* Free the leaf log file entries */
         if (!lf_ctx->threaded) {
             LogFileFreeCtx(lf_ctx);
         }
-        SCFree(thread_ent);
     }
+    SCFree(thread_ent);
 }
 
 bool SCLogOpenThreadedFile(const char *log_path, const char *append, LogFileCtx *parent_ctx)
@@ -399,8 +415,8 @@ error_exit:
  *  \retval FILE* on success
  *  \retval NULL on error
  */
-static FILE *
-SCLogOpenFileFp(const char *path, const char *append_setting, uint32_t mode)
+static FILE *SCLogOpenFileFp(
+        const char *path, const char *append_setting, uint32_t mode, const uint32_t buffer_size)
 {
     FILE *ret = NULL;
 
@@ -415,7 +431,7 @@ SCLogOpenFileFp(const char *path, const char *append_setting, uint32_t mode)
         return NULL;
     }
 
-    if (ConfValIsTrue(append_setting)) {
+    if (SCConfValIsTrue(append_setting)) {
         ret = fopen(filename, "a");
     } else {
         ret = fopen(filename, "w");
@@ -423,6 +439,7 @@ SCLogOpenFileFp(const char *path, const char *append_setting, uint32_t mode)
 
     if (ret == NULL) {
         SCLogError("Error opening file: \"%s\": %s", filename, strerror(errno));
+        goto error_exit;
     } else {
         if (mode != 0) {
 #ifdef OS_WIN32
@@ -436,7 +453,19 @@ SCLogOpenFileFp(const char *path, const char *append_setting, uint32_t mode)
         }
     }
 
+    /* Set buffering behavior */
+    if (buffer_size == 0) {
+        setbuf(ret, NULL);
+        SCLogConfig("Setting output to %s non-buffered", filename);
+    } else {
+        if (setvbuf(ret, NULL, _IOFBF, buffer_size) < 0)
+            FatalError("unable to set %s to buffered: %d", filename, buffer_size);
+        SCLogConfig("Setting output to %s buffered [limit %d bytes]", filename, buffer_size);
+    }
+
+error_exit:
     SCFree(filename);
+
     return ret;
 }
 
@@ -448,11 +477,8 @@ SCLogOpenFileFp(const char *path, const char *append_setting, uint32_t mode)
  *  \retval 0 on success
  *  \retval -1 on error
  */
-int
-SCConfLogOpenGeneric(ConfNode *conf,
-                     LogFileCtx *log_ctx,
-                     const char *default_filename,
-                     int rotate)
+int SCConfLogOpenGeneric(
+        SCConfNode *conf, LogFileCtx *log_ctx, const char *default_filename, int rotate)
 {
     char log_path[PATH_MAX];
     const char *log_dir;
@@ -472,11 +498,11 @@ SCConfLogOpenGeneric(ConfNode *conf,
     }
 
     // Resolve the given config
-    filename = ConfNodeLookupChildValue(conf, "filename");
+    filename = SCConfNodeLookupChildValue(conf, "filename");
     if (filename == NULL)
         filename = default_filename;
 
-    log_dir = ConfigGetLogDirectory();
+    log_dir = SCConfigGetLogDirectory();
 
     if (PathIsAbsolute(filename)) {
         snprintf(log_path, PATH_MAX, "%s", filename);
@@ -485,7 +511,7 @@ SCConfLogOpenGeneric(ConfNode *conf,
     }
 
     /* Rotate log file based on time */
-    const char *rotate_int = ConfNodeLookupChildValue(conf, "rotate-interval");
+    const char *rotate_int = SCConfNodeLookupChildValue(conf, "rotate-interval");
     if (rotate_int != NULL) {
         time_t now = time(NULL);
         log_ctx->flags |= LOGFILE_ROTATE_INTERVAL;
@@ -512,17 +538,34 @@ SCConfLogOpenGeneric(ConfNode *conf,
         }
     }
 
-    filetype = ConfNodeLookupChildValue(conf, "filetype");
+    filetype = SCConfNodeLookupChildValue(conf, "filetype");
     if (filetype == NULL)
         filetype = DEFAULT_LOG_FILETYPE;
 
-    const char *filemode = ConfNodeLookupChildValue(conf, "filemode");
+    /* Determine the buffering for this output device; a value of 0 means to not buffer;
+     * any other value must be a multiple of 4096
+     * The default value is 0 (no buffering)
+     */
+    uint32_t buffer_size = LOGFILE_EVE_BUFFER_SIZE;
+    const char *buffer_size_value = SCConfNodeLookupChildValue(conf, "buffer-size");
+    if (buffer_size_value != NULL) {
+        uint32_t value;
+        if (ParseSizeStringU32(buffer_size_value, &value) < 0) {
+            FatalError("Error parsing "
+                       "buffer-size - %s. Killing engine",
+                    buffer_size_value);
+        }
+        buffer_size = value;
+    }
+
+    SCLogDebug("buffering: %s -> %d", buffer_size_value, buffer_size);
+    const char *filemode = SCConfNodeLookupChildValue(conf, "filemode");
     uint32_t mode = 0;
     if (filemode != NULL && StringParseUint32(&mode, 8, (uint16_t)strlen(filemode), filemode) > 0) {
         log_ctx->filemode = mode;
     }
 
-    const char *append = ConfNodeLookupChildValue(conf, "append");
+    const char *append = SCConfNodeLookupChildValue(conf, "append");
     if (append == NULL)
         append = DEFAULT_LOG_MODE_APPEND;
 
@@ -530,26 +573,23 @@ SCConfLogOpenGeneric(ConfNode *conf,
     log_ctx->json_flags = JSON_PRESERVE_ORDER|JSON_COMPACT|
                           JSON_ENSURE_ASCII|JSON_ESCAPE_SLASH;
 
-    ConfNode *json_flags = ConfNodeLookupChild(conf, "json");
+    SCConfNode *json_flags = SCConfNodeLookupChild(conf, "json");
 
     if (json_flags != 0) {
-        const char *preserve_order = ConfNodeLookupChildValue(json_flags,
-                                                              "preserve-order");
-        if (preserve_order != NULL && ConfValIsFalse(preserve_order))
+        const char *preserve_order = SCConfNodeLookupChildValue(json_flags, "preserve-order");
+        if (preserve_order != NULL && SCConfValIsFalse(preserve_order))
             log_ctx->json_flags &= ~(JSON_PRESERVE_ORDER);
 
-        const char *compact = ConfNodeLookupChildValue(json_flags, "compact");
-        if (compact != NULL && ConfValIsFalse(compact))
+        const char *compact = SCConfNodeLookupChildValue(json_flags, "compact");
+        if (compact != NULL && SCConfValIsFalse(compact))
             log_ctx->json_flags &= ~(JSON_COMPACT);
 
-        const char *ensure_ascii = ConfNodeLookupChildValue(json_flags,
-                                                            "ensure-ascii");
-        if (ensure_ascii != NULL && ConfValIsFalse(ensure_ascii))
+        const char *ensure_ascii = SCConfNodeLookupChildValue(json_flags, "ensure-ascii");
+        if (ensure_ascii != NULL && SCConfValIsFalse(ensure_ascii))
             log_ctx->json_flags &= ~(JSON_ENSURE_ASCII);
 
-        const char *escape_slash = ConfNodeLookupChildValue(json_flags,
-                                                            "escape-slash");
-        if (escape_slash != NULL && ConfValIsFalse(escape_slash))
+        const char *escape_slash = SCConfNodeLookupChildValue(json_flags, "escape-slash");
+        if (escape_slash != NULL && SCConfValIsFalse(escape_slash))
             log_ctx->json_flags &= ~(JSON_ESCAPE_SLASH);
     }
 
@@ -560,6 +600,10 @@ SCConfLogOpenGeneric(ConfNode *conf,
         }
     }
 #endif
+    if (!(strcasecmp(filetype, DEFAULT_LOG_FILETYPE) == 0 || strcasecmp(filetype, "file") == 0)) {
+        SCLogConfig("buffering setting ignored for %s output types", filetype);
+    }
+
     // Now, what have we been asked to open?
     if (strcasecmp(filetype, "unix_stream") == 0) {
 #ifdef BUILD_WITH_UNIXSOCKET
@@ -582,8 +626,10 @@ SCConfLogOpenGeneric(ConfNode *conf,
     } else if (strcasecmp(filetype, DEFAULT_LOG_FILETYPE) == 0 ||
                strcasecmp(filetype, "file") == 0) {
         log_ctx->is_regular = 1;
+        log_ctx->buffer_size = buffer_size;
         if (!log_ctx->threaded) {
-            log_ctx->fp = SCLogOpenFileFp(log_path, append, log_ctx->filemode);
+            log_ctx->fp =
+                    SCLogOpenFileFp(log_path, append, log_ctx->filemode, log_ctx->buffer_size);
             if (log_ctx->fp == NULL)
                 return -1; // Error already logged by Open...Fp routine
         } else {
@@ -608,7 +654,7 @@ SCConfLogOpenGeneric(ConfNode *conf,
 
 #ifdef BUILD_WITH_UNIXSOCKET
     /* If a socket and running live, do non-blocking writes. */
-    if (log_ctx->is_sock && !IsRunModeOffline(RunmodeGetCurrent())) {
+    if (log_ctx->is_sock && !IsRunModeOffline(SCRunmodeGet())) {
         SCLogInfo("Setting logging socket of non-blocking in live mode.");
         log_ctx->send_flags |= MSG_DONTWAIT;
     }
@@ -645,7 +691,8 @@ int SCConfLogReopen(LogFileCtx *log_ctx)
     /* Reopen the file. Append is forced in case the file was not
      * moved as part of a rotation process. */
     SCLogDebug("Reopening log file %s.", log_ctx->filename);
-    log_ctx->fp = SCLogOpenFileFp(log_ctx->filename, "yes", log_ctx->filemode);
+    log_ctx->fp =
+            SCLogOpenFileFp(log_ctx->filename, "yes", log_ctx->filemode, log_ctx->buffer_size);
     if (log_ctx->fp == NULL) {
         return -1; // Already logged by Open..Fp routine.
     }
@@ -666,6 +713,7 @@ LogFileCtx *LogFileNewCtx(void)
 
     lf_ctx->Write = SCLogFileWrite;
     lf_ctx->Close = SCLogFileClose;
+    lf_ctx->Flush = SCLogFileFlush;
 
     return lf_ctx;
 }
@@ -677,7 +725,7 @@ LogFileCtx *LogFileNewCtx(void)
  * Each thread -- identified by its operating system thread-id -- has its
  * own file entry that includes a file pointer.
  */
-static ThreadLogFileHashEntry *LogFileThread2Slot(LogThreadedFileCtx *parent)
+static ThreadLogFileHashEntry *LogFileThread2Slot(LogThreadedFileCtx *parent, ThreadId thread_id)
 {
     ThreadLogFileHashEntry thread_hash_entry;
 
@@ -689,12 +737,14 @@ static ThreadLogFileHashEntry *LogFileThread2Slot(LogThreadedFileCtx *parent)
     if (!ent) {
         ent = SCCalloc(1, sizeof(*ent));
         if (!ent) {
-            FatalError("Unable to allocate thread/entry entry");
+            FatalError("Unable to allocate thread/hash-entry entry");
         }
         ent->thread_id = thread_hash_entry.thread_id;
-        SCLogDebug("Trying to add thread %ld to entry %d", ent->thread_id, ent->slot_number);
+        ent->internal_thread_id = thread_id;
+        SCLogDebug(
+                "Trying to add thread %" PRIi64 " to entry %d", ent->thread_id, ent->slot_number);
         if (0 != HashTableAdd(parent->ht, ent, 0)) {
-            FatalError("Unable to add thread/entry mapping");
+            FatalError("Unable to add thread/hash-entry mapping");
         }
     }
     return ent;
@@ -704,31 +754,36 @@ static ThreadLogFileHashEntry *LogFileThread2Slot(LogThreadedFileCtx *parent)
  * \param parent_ctx
  * \retval LogFileCtx * pointer if successful; NULL otherwise
  */
-LogFileCtx *LogFileEnsureExists(LogFileCtx *parent_ctx)
+LogFileCtx *LogFileEnsureExists(ThreadId thread_id, LogFileCtx *parent_ctx)
 {
     /* threaded output disabled */
     if (!parent_ctx->threaded)
         return parent_ctx;
 
+    LogFileCtx *ret_ctx = NULL;
     SCMutexLock(&parent_ctx->threads->mutex);
     /* Find this thread's entry */
-    ThreadLogFileHashEntry *entry = LogFileThread2Slot(parent_ctx->threads);
-    SCLogDebug("Adding reference for thread %ld [slot %d] to file %s [ctx %p]", SCGetThreadIdLong(),
-            entry->slot_number, parent_ctx->filename, parent_ctx);
+    ThreadLogFileHashEntry *entry = LogFileThread2Slot(parent_ctx->threads, thread_id);
+    SCLogDebug("%s: Adding reference for thread %" PRIi64
+               " (local thread id %d) to file %s [ctx %p]",
+            t_thread_name, SCGetThreadIdLong(), thread_id, parent_ctx->filename, parent_ctx);
 
     bool new = entry->isopen;
     /* has it been opened yet? */
-    if (!entry->isopen) {
-        SCLogDebug("Opening new file for thread/slot %d to file %s [ctx %p]", entry->slot_number,
-                parent_ctx->filename, parent_ctx);
+    if (!new) {
+        SCLogDebug("%s: Opening new file for thread/id %d to file %s [ctx %p]", t_thread_name,
+                thread_id, parent_ctx->filename, parent_ctx);
         if (LogFileNewThreadedCtx(
                     parent_ctx, parent_ctx->filename, parent_ctx->threads->append, entry)) {
             entry->isopen = true;
+            ret_ctx = entry->ctx;
         } else {
-            SCLogError(
+            SCLogDebug(
                     "Unable to open slot %d for file %s", entry->slot_number, parent_ctx->filename);
             (void)HashTableRemove(parent_ctx->threads->ht, entry, 0);
         }
+    } else {
+        ret_ctx = entry->ctx;
     }
     SCMutexUnlock(&parent_ctx->threads->mutex);
 
@@ -739,7 +794,7 @@ LogFileCtx *LogFileEnsureExists(LogFileCtx *parent_ctx)
         }
     }
 
-    return entry->ctx;
+    return ret_ctx;
 }
 
 /** \brief LogFileThreadedName() Create file name for threaded EVE storage
@@ -775,7 +830,7 @@ static bool LogFileThreadedName(
          * for update
          */
         dot = strrchr(original_name, '.');
-        int dotpos = dot - original_name;
+        ptrdiff_t dotpos = dot - original_name;
         tname[dotpos] = '\0';
         char *ext = tname + dotpos + 1;
         if (strlen(tname) && strlen(ext)) {
@@ -810,12 +865,14 @@ static bool LogFileNewThreadedCtx(LogFileCtx *parent_ctx, const char *log_path, 
     *thread = *parent_ctx;
     if (parent_ctx->type == LOGFILE_TYPE_FILE) {
         char fname[LOGFILE_NAME_MAX];
-        if (!LogFileThreadedName(log_path, fname, sizeof(fname), SC_ATOMIC_ADD(eve_file_id, 1))) {
+        entry->slot_number = SC_ATOMIC_ADD(eve_file_id, 1);
+        if (!LogFileThreadedName(log_path, fname, sizeof(fname), entry->slot_number)) {
             SCLogError("Unable to create threaded filename for log");
             goto error;
         }
-        SCLogDebug("Thread open -- using name %s [replaces %s]", fname, log_path);
-        thread->fp = SCLogOpenFileFp(fname, append, thread->filemode);
+        SCLogDebug("%s: thread open -- using name %s [replaces %s] - thread %d [slot %d]",
+                t_thread_name, fname, log_path, entry->internal_thread_id, entry->slot_number);
+        thread->fp = SCLogOpenFileFp(fname, append, thread->filemode, parent_ctx->buffer_size);
         if (thread->fp == NULL) {
             goto error;
         }
@@ -828,10 +885,12 @@ static bool LogFileNewThreadedCtx(LogFileCtx *parent_ctx, const char *log_path, 
         thread->Write = SCLogFileWriteNoLock;
         thread->Close = SCLogFileCloseNoLock;
         OutputRegisterFileRotationFlag(&thread->rotation_flag);
-    } else if (parent_ctx->type == LOGFILE_TYPE_PLUGIN) {
+    } else if (parent_ctx->type == LOGFILE_TYPE_FILETYPE) {
         entry->slot_number = SC_ATOMIC_ADD(eve_file_id, 1);
-        thread->plugin.plugin->ThreadInit(
-                thread->plugin.init_data, entry->slot_number, &thread->plugin.thread_data);
+        SCLogDebug("%s - thread %d [slot %d]", log_path, entry->internal_thread_id,
+                entry->slot_number);
+        thread->filetype.filetype->ThreadInit(thread->filetype.init_data, entry->internal_thread_id,
+                &thread->filetype.thread_data);
     }
     thread->threaded = false;
     thread->parent = parent_ctx;
@@ -864,8 +923,9 @@ int LogFileFreeCtx(LogFileCtx *lf_ctx)
         SCReturnInt(0);
     }
 
-    if (lf_ctx->type == LOGFILE_TYPE_PLUGIN && lf_ctx->parent != NULL) {
-        lf_ctx->plugin.plugin->ThreadDeinit(lf_ctx->plugin.init_data, lf_ctx->plugin.thread_data);
+    if (lf_ctx->type == LOGFILE_TYPE_FILETYPE && lf_ctx->filetype.filetype->ThreadDeinit) {
+        lf_ctx->filetype.filetype->ThreadDeinit(
+                lf_ctx->filetype.init_data, lf_ctx->filetype.thread_data);
     }
 
     if (lf_ctx->threaded) {
@@ -878,7 +938,7 @@ int LogFileFreeCtx(LogFileCtx *lf_ctx)
         }
         SCFree(lf_ctx->threads);
     } else {
-        if (lf_ctx->type != LOGFILE_TYPE_PLUGIN) {
+        if (lf_ctx->type != LOGFILE_TYPE_FILETYPE) {
             if (lf_ctx->fp != NULL) {
                 lf_ctx->Close(lf_ctx);
             }
@@ -901,17 +961,31 @@ int LogFileFreeCtx(LogFileCtx *lf_ctx)
         OutputUnregisterFileRotationFlag(&lf_ctx->rotation_flag);
     }
 
-    /* Deinitialize output plugins. We only want to call this for the
-     * parent of threaded output, or always for non-threaded
+    /* Deinitialize output filetypes. We only want to call this for
+     * the parent of threaded output, or always for non-threaded
      * output. */
-    if (lf_ctx->type == LOGFILE_TYPE_PLUGIN && lf_ctx->parent == NULL) {
-        lf_ctx->plugin.plugin->Deinit(lf_ctx->plugin.init_data);
+    if (lf_ctx->type == LOGFILE_TYPE_FILETYPE && lf_ctx->parent == NULL) {
+        lf_ctx->filetype.filetype->Deinit(lf_ctx->filetype.init_data);
     }
+
+#ifdef HAVE_LIBHIREDIS
+    if (lf_ctx->type == LOGFILE_TYPE_REDIS) {
+        if (lf_ctx->redis_setup.stream_format != NULL) {
+            SCFree(lf_ctx->redis_setup.stream_format);
+        }
+    }
+#endif
 
     memset(lf_ctx, 0, sizeof(*lf_ctx));
     SCFree(lf_ctx);
 
     SCReturnInt(1);
+}
+
+void LogFileFlush(LogFileCtx *file_ctx)
+{
+    SCLogDebug("%s: bytes-to-flush %ld", file_ctx->filename, file_ctx->bytes_since_last_flush);
+    file_ctx->Flush(file_ctx);
 }
 
 int LogFileWrite(LogFileCtx *file_ctx, MemBuffer *buffer)
@@ -922,9 +996,10 @@ int LogFileWrite(LogFileCtx *file_ctx, MemBuffer *buffer)
         MemBufferWriteString(buffer, "\n");
         file_ctx->Write((const char *)MEMBUFFER_BUFFER(buffer),
                         MEMBUFFER_OFFSET(buffer), file_ctx);
-    } else if (file_ctx->type == LOGFILE_TYPE_PLUGIN) {
-        file_ctx->plugin.plugin->Write((const char *)MEMBUFFER_BUFFER(buffer),
-                MEMBUFFER_OFFSET(buffer), file_ctx->plugin.init_data, file_ctx->plugin.thread_data);
+    } else if (file_ctx->type == LOGFILE_TYPE_FILETYPE) {
+        file_ctx->filetype.filetype->Write((const char *)MEMBUFFER_BUFFER(buffer),
+                MEMBUFFER_OFFSET(buffer), file_ctx->filetype.init_data,
+                file_ctx->filetype.thread_data);
     }
 #ifdef HAVE_LIBHIREDIS
     else if (file_ctx->type == LOGFILE_TYPE_REDIS) {

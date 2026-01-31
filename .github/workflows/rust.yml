@@ -4,12 +4,18 @@ on:
   push:
     paths-ignore:
       - "doc/**"
+      - "etc/schema.json"
   pull_request:
     paths-ignore:
       - "doc/**"
+      - "etc/schema.json"
 
 permissions:
   contents: read #  to fetch code (actions/checkout)
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   check-rust:
@@ -17,20 +23,15 @@ jobs:
     runs-on: ubuntu-latest
     container: almalinux:9
     steps:
-      - name: Cache rust
-        uses: actions/cache@v3.3.1
-        with:
-          path: ~/.cargo
-          key: check-rust
-
       - name: Install system packages
         run: |
-          dnf -y install dnf-plugins-core
+          dnf -y install dnf-plugins-core epel-release
           dnf config-manager --set-enabled crb
           dnf -y install \
                 autoconf \
                 automake \
-                cargo-vendor \
+                cbindgen \
+                clang-devel \
                 diffutils \
                 numactl-devel \
                 dpdk-devel \
@@ -40,7 +41,6 @@ jobs:
                 git \
                 jansson-devel \
                 jq \
-                lua-devel \
                 libtool \
                 libyaml-devel \
                 libnfnetlink-devel \
@@ -53,7 +53,6 @@ jobs:
                 libtool \
                 lz4-devel \
                 make \
-                nss-devel \
                 pcre2-devel \
                 pkgconfig \
                 python3-devel \
@@ -62,18 +61,25 @@ jobs:
                 sudo \
                 which \
                 zlib-devel
-
-      - name: Installing Rust
-        run: |
-          curl https://sh.rustup.rs -sSf | sh -s -- -y
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-      - name: Install cbindgen
-        run: cargo install --debug cbindgen
-      - uses: actions/checkout@v3.5.3
+      - run: curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain 1.93.0 -y
+      - run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      - run: cargo install bindgen-cli --version 0.66.0
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
       - run: git config --global --add safe.directory /__w/suricata/suricata
       - run: ./scripts/bundle.sh
       - run: ./autogen.sh
-      - run: ./configure
+      - run: ./configure --enable-warnings
+      - name: Checking bindgen output
+        working-directory: rust
+        run: |
+          bindgen --version
+          make check-bindgen-bindings
+          diff=$(git diff sys)
+          if [ "${diff}" ]; then
+              echo "${diff}"
+              echo "::error ::Bindgen bindings appear to be out of date"
+              exit 1
+          fi
       - run: cargo clippy --all-features --fix --allow-no-vcs
         working-directory: rust
       - run: |
@@ -88,3 +94,21 @@ jobs:
       # especially without debug feature
       - run: cargo clippy
         working-directory: rust
+      - run: cargo fmt --check
+        working-directory: rust/suricatactl
+      - run: cargo fmt --check
+        working-directory: rust/suricatasc
+      - run: cargo fmt --check
+        working-directory: rust/sys
+      - name: Check if Cargo.lock.in is up to date
+        run: |
+          cp rust/Cargo.lock rust/Cargo.lock.in
+          diff=$(git diff rust/Cargo.lock.in)
+          if [ "${diff}" ]; then
+              echo "${diff}"
+              echo "::error ::Cargo.lock.in needs to be updated"
+              exit 1
+          fi
+      # does not work in other subdirectories for now
+      - run: cargo fmt --check
+        working-directory: rust/htp
